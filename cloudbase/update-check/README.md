@@ -2,23 +2,23 @@
 
 `update-check/` 提供 Node.js 18 云函数源码，无任何 npm 依赖。两个版本**二选一**：
 
-| 文件 | 函数类型 | 适用 |
-|---|---|---|
-| `index.js` | **普通事件函数**（推荐，与 baidu-oauth 同类型） | 控制台「空白函数」创建；`exports.main` 写法，测试按钮可用、日志直观 |
-| `web-index.js` | Web 服务型函数（备用） | 对应「HTTP Node.js Hello World」模板创建；部署时用它覆盖模板的 `index.js`，`scf_bootstrap` 保持原样 |
+| 文件             | 函数类型                             | 适用                                                                          |
+| -------------- | -------------------------------- | --------------------------------------------------------------------------- |
+| `index.js`     | **普通事件函数**（推荐，与 baidu-oauth 同类型） | 控制台「空白函数」创建；`exports.main` 写法，测试按钮可用、日志直观                                   |
+| `web-index.js` | Web 服务型函数（备用）                    | 对应「HTTP Node.js Hello World」模板创建；部署时用它覆盖模板的 `index.js`，`scf_bootstrap` 保持原样 |
 
-App 端 `BuildConfig.UPDATE_CHECK_URL` 已写死指向本服务：
+App 端 `BuildConfig.UPDATE_CHECK_URL` 已写死指向本服务：  
 `https://lixing-d7g243r7kcad67750-1323070606.ap-shanghai.app.tcloudbase.com/update/check`
 
 ## 清单来源（环境变量控制，两个版本行为一致）
 
 取数顺序是「**网络源 → 内联兜底 → GitHub API**」：
 
-| 顺序 | 环境变量 | 说明 | 适用 |
-|---|---|---|---|
-| 1 | `UPDATE_MANIFEST_URL` | update.json 的直链，可用**英文逗号分隔多个源**（主源 + 加速镜像，逐个回退） | 长期推荐：GitHub Release 附件，用 `…/releases/latest/download/update.json` 固定链接，发版不用改 |
-| 2 | `UPDATE_MANIFEST_JSON` | 内联清单 JSON 字符串（**兜底**，零网络、毫秒级返回） | 免费版 3 秒超时下必填：回源一慢就顶爆函数，有它才不会报错 |
-| 3 | `GITHUB_REPO` | `user/repo`，代理 Releases API | 最后兜底：无 update.json 附件时自动从 Release 信息组装（此时无 SHA-256，App 会拒绝安装） |
+| 顺序 | 环境变量                   | 说明                                              | 适用                                                                           |
+| -- | ---------------------- | ----------------------------------------------- | ---------------------------------------------------------------------------- |
+| 1  | `UPDATE_MANIFEST_URL`  | update.json 的直链，可用**英文逗号分隔多个源**（主源 + 加速镜像，逐个回退） | 长期推荐：GitHub Release 附件，用 `…/releases/latest/download/update.json` 固定链接，发版不用改 |
+| 2  | `UPDATE_MANIFEST_JSON` | 内联清单 JSON 字符串（**兜底**，零网络、毫秒级返回）                 | 免费版 3 秒超时下必填：回源一慢就顶爆函数，有它才不会报错                                               |
+| 3  | `GITHUB_REPO`          | `user/repo`，代理 Releases API                     | 最后兜底：无 update.json 附件时自动从 Release 信息组装（此时无 SHA-256，App 会拒绝安装）                |
 
 回源失败时响应里会带 `"fallback": true`，可从调用日志判断是不是一直在走兜底。
 
@@ -29,15 +29,12 @@ CloudBase **免费版**的 `update-check` 函数执行超时最多只能选 **3 
 **对策（必须做第 2 条）**：
 
 1. `UPDATE_MANIFEST_URL` 只填**一个最快**的镜像（多源会叠加耗时，反而更容易顶破 3 秒）：
-
    ```
    https://gh-proxy.com/https://github.com/fxx255/LiXing/releases/latest/download/update.json
    ```
-
-2. `UPDATE_MANIFEST_JSON` 填当前版本的完整清单（**兜底**）。回源超时/失败时函数在几十毫秒内返回它，
-   **永远不会触发 3 秒超时**。滞后不更新只会「检测不到更新的版本」，不会误报
+2. `UPDATE_MANIFEST_JSON` 填当前版本的完整清单（**兜底**）。回源超时/失败时函数在几十毫秒内返回它，  
+   **永远不会触发 3 秒超时**。滞后不更新只会「检测不到更新的版本」，不会误报  
    （App 只在 `versionCode > 当前版本` 时才提示）。建议每次发版顺手更新一次。
-
 3. 可选：`MANIFEST_FETCH_TIMEOUT_MS` 调整单源回源超时（默认 1200ms；3 秒上限下最多设 2000）。
 
 每次发版后，把 `build/update.json` 的内容整段粘进 `UPDATE_MANIFEST_JSON` 即可（就是一行压缩过的 JSON）。
@@ -58,7 +55,7 @@ CloudBase **免费版**的 `update-check` 函数执行超时最多只能选 **3 
    - 鉴权：**免鉴权**（App 拿清单不能带凭证）
 6. 验证：浏览器或 curl 访问上面的 URL（见下）。
 
-> 如果之前已经按 HTTP 模板建过同名函数：函数类型创建后不可转换，需删掉旧的重建，
+> 如果之前已经按 HTTP 模板建过同名函数：函数类型创建后不可转换，需删掉旧的重建，  
 > 或换个名字新建后把 `/update/check` 路由的关联函数改过来。环境变量要重新配一遍。
 
 ## 验证

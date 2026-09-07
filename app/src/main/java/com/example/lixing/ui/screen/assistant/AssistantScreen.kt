@@ -1221,15 +1221,16 @@ private fun ThinkingPanel(
 }
 
 /**
- * 气泡最大宽度：按「当前可用宽度」的比例算，而不是写死 480dp。
+ * 气泡最大宽度：按「当前可用宽度」的比例算，而不是写死固定值。
  *
- * 写死值在手机上合适，但平板横屏（可用宽度 900dp+）下会出现一条很窄的文字带，
- * 右侧大片留白；这里取 min(可用宽 × 0.86, 760dp)：
- * - 手机 400dp → 344dp（和原来手感一致）
- * - 平板横屏 1200dp → 760dp（明显变宽但仍留出对侧留白，方便区分收发双方）
+ * 写死值在手机上合适，但平板横屏（可用宽度 1000dp+）下会变成一条偏窄的文字带、
+ * 右侧大片留白。这里取 min(可用宽 × 0.92, 1400dp)：
+ * - 手机 400dp → 368dp（和原来手感一致）
+ * - 平板横屏 1200dp → 1104dp（几乎铺满，只剩一点对侧留白区分收发双方）
+ * 1400dp 只是给超宽屏/桌面窗口兜底，正常平板由比例决定。
  */
-private val BUBBLE_MAX_WIDTH = 760.dp
-private const val BUBBLE_WIDTH_RATIO = 0.86f
+private val BUBBLE_MAX_WIDTH = 1400.dp
+private const val BUBBLE_WIDTH_RATIO = 0.92f
 
 @Composable
 private fun MessageBubble(
