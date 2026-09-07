@@ -41,7 +41,11 @@ internal object PreferencesKeys {
     val SYNC_AUTO_ENABLED = booleanPreferencesKey("sync_auto_enabled")
     val SYNC_WIFI_ONLY = booleanPreferencesKey("sync_wifi_only")
 
-    // ---------- 应用内更新 ----------
+    // ---------- 英语背诵 ----------
+/** 每天最多新学多少条单词/短语（复习不限量）。 */
+val ENGLISH_DAILY_NEW_LIMIT = intPreferencesKey("english_daily_new_limit")
+
+// ---------- 应用内更新 ----------
     /** 是否启用启动时自动检查版本。默认开启（用户随时可在设置关掉）。 */
     val UPDATE_AUTO_ENABLED = booleanPreferencesKey("update_auto_enabled")
     /** 自动检查是否仅限 Wi-Fi 等非计费网络（手动检查不受限）。 */

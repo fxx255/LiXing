@@ -193,6 +193,9 @@ fun SettingsScreen(
             // ---- 多端同步（WebDAV）----
             SettingsCard("多端同步") { WebDavSyncSection(viewModel, prefs) }
 
+            // ---- 英语背诵 ----
+            SettingsCard("英语背诵") { EnglishReviewSection(viewModel, prefs) }
+
             // ---- 应用内更新 ----
             SettingsCard("更新") { UpdateSection(viewModel, prefs) }
 
@@ -639,6 +642,22 @@ private fun formatFileSize(bytes: Long): String = when {
     bytes >= 1024L * 1024 -> "%.1f MB".format(bytes / (1024.0 * 1024.0))
     bytes >= 1024L -> "%.1f KB".format(bytes / 1024.0)
     else -> "$bytes B"
+}
+
+@Composable
+private fun EnglishReviewSection(
+    viewModel: SettingsViewModel,
+    prefs: com.example.lixing.data.prefs.UserPreferences,
+) {
+    SliderRow(
+        label = "每日新学上限",
+        value = "${prefs.englishDailyNewLimit} 条",
+        subtitle = "每天最多新学这么多单词/短语；到期需要复习的不受此限制",
+        sliderValue = prefs.englishDailyNewLimit.toFloat(),
+        range = 5f..100f,
+        steps = 18,
+        onChange = { viewModel.setEnglishDailyNewLimit(it.toInt()) },
+    )
 }
 
 @Composable

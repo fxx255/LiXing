@@ -31,4 +31,28 @@ data class EnglishEntryEntity(
     /** 多端同步的 Lamport 时钟戳，由同步引擎维护；0 = 从未参与同步。 */
     @ColumnInfo(name = "sync_modified_at", defaultValue = "0")
     val syncModifiedAt: Long = 0,
-)
+
+    // ---------- 背诵复习（SM-2 间隔重复）----------
+    /** 下次复习到期时间。null = 还没学过（新卡），视为立即可学。 */
+    @ColumnInfo(name = "review_due_at")
+    val reviewDueAt: Instant? = null,
+    /** SM-2 难度系数（ease factor）；默认 2.5，下限 1.3。越大间隔拉得越快。 */
+    @ColumnInfo(name = "review_ease", defaultValue = "2.5")
+    val reviewEase: Double = DEFAULT_EASE,
+    /** 当前复习间隔（天）。0 表示尚未进入稳定复习节奏。 */
+    @ColumnInfo(name = "review_interval_days", defaultValue = "0")
+    val reviewIntervalDays: Int = 0,
+    /** 连续答对次数（reps）。0 = 新卡，尚未答对过一次。 */
+    @ColumnInfo(name = "review_reps", defaultValue = "0")
+    val reviewReps: Int = 0,
+    /** 「忘记」次数，用于统计与后续算法调整。 */
+    @ColumnInfo(name = "review_lapses", defaultValue = "0")
+    val reviewLapses: Int = 0,
+    /** 上次复习时间。 */
+    @ColumnInfo(name = "review_last_at")
+    val reviewLastAt: Instant? = null,
+) {
+    companion object {
+        const val DEFAULT_EASE = 2.5
+    }
+}

@@ -12,6 +12,7 @@ import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.navArgument
+import com.example.lixing.ui.screen.english.EnglishReviewScreen
 import com.example.lixing.ui.screen.placeholder.PlaceholderScreen
 import com.example.lixing.ui.screen.plan.PlanScreen
 import com.example.lixing.ui.screen.plan.manage.PlanManageScreen
@@ -90,7 +91,21 @@ fun LiXingNavHost(
             MealScreen(onBack = { navController.popBackStack() })
         }
         secondLevel(Routes.ENGLISH_NOTEBOOK) {
-            EnglishNotebookScreen(onBack = { navController.popBackStack() })
+            EnglishNotebookScreen(
+                onBack = { navController.popBackStack() },
+                onOpenReview = { navController.navigate(Routes.ENGLISH_REVIEW) },
+            )
+        }
+        secondLevel(Routes.ENGLISH_REVIEW) {
+            EnglishReviewScreen(
+                onBack = { navController.popBackStack() },
+                onOpenNotebook = {
+                    navController.navigate(Routes.ENGLISH_NOTEBOOK) {
+                        popUpTo(Routes.ENGLISH_NOTEBOOK) { inclusive = false }
+                        launchSingleTop = true
+                    }
+                },
+            )
         }
         secondLevel(Routes.ASSISTANT) {
             AssistantScreen(onBack = { navController.popBackStack() })

@@ -28,6 +28,7 @@ object Routes {
     const val HISTORY = "history"
     const val MEALS = "meals"
     const val ENGLISH_NOTEBOOK = "english/notebook"
+    const val ENGLISH_REVIEW = "english/review"
     const val ASSISTANT = "assistant"
     const val ACHIEVEMENTS = "achievements"
     const val REPORTS = "reports"

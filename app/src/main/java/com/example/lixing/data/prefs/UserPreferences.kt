@@ -67,6 +67,10 @@ data class UserPreferences(
     /** 自动同步是否仅限 Wi-Fi 等非计费网络。手动同步不受限。 */
     val syncWifiOnly: Boolean = true,
 
+    // ---------- 英语背诵 ----------
+    /** 每天最多新学多少条（单词/短语）；到期复习不受此限制。 */
+    val englishDailyNewLimit: Int = 20,
+
     // ---------- 应用内更新 ----------
     /** 启动时是否自动检查新版本。手动检查不受此限制。 */
     val updateAutoEnabled: Boolean = true,

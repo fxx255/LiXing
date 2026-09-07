@@ -195,6 +195,11 @@ class SettingsViewModel @Inject constructor(
     fun setSyncWifiOnly(enabled: Boolean) =
         viewModelScope.launch { prefsRepository.setSyncWifiOnly(enabled) }
 
+    // ---------------- 英语背诵 ----------------
+
+    fun setEnglishDailyNewLimit(count: Int) =
+        viewModelScope.launch { prefsRepository.setEnglishDailyNewLimit(count) }
+
     // ---------------- 应用内更新 ----------------
 
     fun setUpdateAutoEnabled(enabled: Boolean) =

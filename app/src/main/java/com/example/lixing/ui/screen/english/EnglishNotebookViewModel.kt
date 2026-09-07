@@ -3,7 +3,9 @@ package com.example.lixing.ui.screen.english
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.lixing.data.local.entity.EnglishEntryEntity
+import com.example.lixing.data.prefs.UserPreferencesRepository
 import com.example.lixing.data.repository.EnglishEntryRepository
+import com.example.lixing.domain.english.DueCounts
 import com.example.lixing.domain.english.EnglishEntryType
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -26,6 +28,7 @@ data class EnglishEditorState(
 @HiltViewModel
 class EnglishNotebookViewModel @Inject constructor(
     private val repository: EnglishEntryRepository,
+    private val prefsRepository: UserPreferencesRepository,
 ) : ViewModel() {
     private val _query = MutableStateFlow("")
     val query: StateFlow<String> = _query.asStateFlow()
@@ -44,6 +47,21 @@ class EnglishNotebookViewModel @Inject constructor(
     }.flatMapLatest { (query, type) ->
         repository.observe(query, type)
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    /** 今日背诵待办：到期复习 + 还能新学多少（新学受设置里的每日上限约束）。 */
+    private val _dueCounts = MutableStateFlow(DueCounts())
+    val dueCounts: StateFlow<DueCounts> = _dueCounts.asStateFlow()
+
+    init {
+        refreshDueCounts()
+    }
+
+    fun refreshDueCounts() {
+        viewModelScope.launch {
+            val limit = prefsRepository.current().englishDailyNewLimit
+            _dueCounts.value = repository.dueCounts(dailyNewLimit = limit)
+        }
+    }
 
     fun updateQuery(value: String) {
         _query.value = value
@@ -72,6 +90,7 @@ class EnglishNotebookViewModel @Inject constructor(
                 .onSuccess {
                     _editor.value = null
                     _message.value = if (target.existing == null) "已加入英语积累" else "修改已保存"
+                    refreshDueCounts()
                 }
                 .onFailure { _message.value = it.message ?: "保存失败，请重试" }
         }
@@ -80,7 +99,10 @@ class EnglishNotebookViewModel @Inject constructor(
     fun delete(entry: EnglishEntryEntity) {
         viewModelScope.launch {
             runCatching { repository.delete(entry) }
-                .onSuccess { _message.value = "已删除" }
+                .onSuccess {
+                    _message.value = "已删除"
+                    refreshDueCounts()
+                }
                 .onFailure { _message.value = it.message ?: "删除失败，请重试" }
         }
     }

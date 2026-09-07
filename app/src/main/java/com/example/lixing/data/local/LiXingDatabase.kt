@@ -76,7 +76,7 @@ abstract class LiXingDatabase : RoomDatabase() {
     abstract fun assistantChatDao(): AssistantChatDao
 
     companion object {
-        const val VERSION = 10
+        const val VERSION = 11
         const val NAME = "lixing.db"
     }
 }

@@ -552,6 +552,23 @@ INSERT INTO `user_profile` (`id`, `nickname`, `total_points`, `level`, `title`, 
         }
     }
 
+    /**
+     * v10 → v11：英语积累增加「背诵复习」状态（SM-2 间隔重复）。
+     *
+     * 全部走 ADD COLUMN + 默认值，非破坏性：老数据自动成为「新卡」（reps=0、due 为空），
+     * 第一次打开背诵页就会进入新学队列。新增列自动纳入多端同步与版本化备份。
+     */
+    private val MIGRATION_10_11 = object : Migration(10, 11) {
+        override fun migrate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
+            db.execSQL("ALTER TABLE `english_entry` ADD COLUMN `review_due_at` INTEGER")
+            db.execSQL("ALTER TABLE `english_entry` ADD COLUMN `review_ease` REAL NOT NULL DEFAULT 2.5")
+            db.execSQL("ALTER TABLE `english_entry` ADD COLUMN `review_interval_days` INTEGER NOT NULL DEFAULT 0")
+            db.execSQL("ALTER TABLE `english_entry` ADD COLUMN `review_reps` INTEGER NOT NULL DEFAULT 0")
+            db.execSQL("ALTER TABLE `english_entry` ADD COLUMN `review_lapses` INTEGER NOT NULL DEFAULT 0")
+            db.execSQL("ALTER TABLE `english_entry` ADD COLUMN `review_last_at` INTEGER")
+        }
+    }
+
     val ALL: Array<Migration> = arrayOf(
         MIGRATION_1_2,
         MIGRATION_2_3,
@@ -562,5 +579,6 @@ INSERT INTO `user_profile` (`id`, `nickname`, `total_points`, `level`, `title`, 
         MIGRATION_7_8,
         MIGRATION_8_9,
         MIGRATION_9_10,
+        MIGRATION_10_11,
     )
 }

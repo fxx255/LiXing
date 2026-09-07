@@ -32,6 +32,7 @@ import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
@@ -66,6 +67,7 @@ private val UPDATED_TIME_FORMAT: DateTimeFormatter = DateTimeFormatter.ofPattern
 @Composable
 fun EnglishNotebookScreen(
     onBack: () -> Unit,
+    onOpenReview: () -> Unit,
     viewModel: EnglishNotebookViewModel = hiltViewModel(),
 ) {
     val entries by viewModel.entries.collectAsStateWithLifecycle()
@@ -73,6 +75,7 @@ fun EnglishNotebookScreen(
     val filter by viewModel.filter.collectAsStateWithLifecycle()
     val editor by viewModel.editor.collectAsStateWithLifecycle()
     val message by viewModel.message.collectAsStateWithLifecycle()
+    val dueCounts by viewModel.dueCounts.collectAsStateWithLifecycle()
     val snackbar = remember { SnackbarHostState() }
     var pendingDelete by remember { mutableStateOf<EnglishEntryEntity?>(null) }
 
@@ -148,6 +151,38 @@ fun EnglishNotebookScreen(
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onPrimaryContainer,
                         )
+                    }
+                }
+            }
+
+            item {
+                Surface(
+                    color = MaterialTheme.colorScheme.secondaryContainer,
+                    shape = LiXingRadius.Card,
+                    onClick = onOpenReview,
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(16.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            Text(
+                                "今日背诵",
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.onSecondaryContainer,
+                            )
+                            Text(
+                                if (dueCounts.isEmpty) {
+                                    "暂时没有到期的卡片，新积累的单词/短语会自动进入队列"
+                                } else {
+                                    "待复习 ${dueCounts.dueReview} · 可新学 ${dueCounts.newAvailable}（共 ${dueCounts.total} 张）"
+                                },
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSecondaryContainer,
+                            )
+                        }
+                        Spacer(Modifier.width(12.dp))
+                        OutlinedButton(onClick = onOpenReview) { Text("开始") }
                     }
                 }
             }

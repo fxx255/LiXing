@@ -63,6 +63,7 @@ class UserPreferencesRepository @Inject constructor(
             syncWifiOnly = p[PreferencesKeys.SYNC_WIFI_ONLY] ?: true,
             updateAutoEnabled = p[PreferencesKeys.UPDATE_AUTO_ENABLED] ?: true,
             updateWifiOnly = p[PreferencesKeys.UPDATE_WIFI_ONLY] ?: true,
+            englishDailyNewLimit = p[PreferencesKeys.ENGLISH_DAILY_NEW_LIMIT] ?: 20,
             onboardingDone = p[PreferencesKeys.ONBOARDING_DONE] ?: false,
             permissionGuideShown = p[PreferencesKeys.PERMISSION_GUIDE_SHOWN] ?: false,
             lastMaterializedDay = p[PreferencesKeys.LAST_MATERIALIZED_DAY] ?: 0L,
@@ -169,6 +170,11 @@ class UserPreferencesRepository @Inject constructor(
     suspend fun setSyncWifiOnly(enabled: Boolean) =
         edit { it[PreferencesKeys.SYNC_WIFI_ONLY] = enabled }
 
+    // ---------- 英语背诵 ----------
+
+    suspend fun setEnglishDailyNewLimit(count: Int) =
+        edit { it[PreferencesKeys.ENGLISH_DAILY_NEW_LIMIT] = count.coerceIn(5, 100) }
+
     // ---------- 应用内更新 ----------
 
     suspend fun setUpdateAutoEnabled(enabled: Boolean) =
@@ -270,6 +276,7 @@ class UserPreferencesRepository @Inject constructor(
             out[PreferencesKeys.BACKUP_KEEP_COUNT] = p.backupKeepCount
             out[PreferencesKeys.MAIMEMO_ENABLED] = p.maimemoEnabled
             out[PreferencesKeys.MAIMEMO_AUTO_SYNC] = localMaimemoAutoSync ?: p.maimemoAutoSync
+            out[PreferencesKeys.ENGLISH_DAILY_NEW_LIMIT] = p.englishDailyNewLimit
             out[PreferencesKeys.AI_ASSISTANT_ENABLED] = p.aiAssistantEnabled
             out[PreferencesKeys.AI_BASE_URL] = p.aiBaseUrl
             out[PreferencesKeys.AI_MODEL] = p.aiModel
