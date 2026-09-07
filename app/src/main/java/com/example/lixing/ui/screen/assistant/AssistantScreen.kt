@@ -187,7 +187,10 @@ fun AssistantScreen(
     // 这样旋转屏幕或被系统回收重建后仍能取回照片（普通 remember 会丢）。
     var pendingCapturePath by rememberSaveable { mutableStateOf<String?>(null) }
     var photoViewer by remember { mutableStateOf<PhotoViewerState?>(null) }
-    var cropQueue by remember { mutableStateOf<List<File>>(emptyList()) }
+    // 待裁剪的照片队列：存路径并用 rememberSaveable。
+    // 部分 ROM 在写入 requestedOrientation 时会顺带重建 Activity，
+    // 普通 remember 一丢，刚弹出的裁剪界面就「闪退」（第一次拍照有概率消失、第二次正常的根因）。
+    var cropQueue by rememberSaveable { mutableStateOf<List<String>>(emptyList()) }
     var extrasExpanded by remember { mutableStateOf(false) }
     var voiceInputStatus by remember { mutableStateOf(VoiceInputStatus.IDLE) }
     var voiceInputError by remember { mutableStateOf<String?>(null) }
@@ -430,10 +433,10 @@ fun AssistantScreen(
     val takePicture = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { success ->
         val file = pendingCapturePath?.let { File(it) }
         pendingCapturePath = null
-        if (success && file != null) cropQueue = cropQueue + file else file?.delete()
+        if (success && file != null) cropQueue = cropQueue + file.absolutePath else file?.delete()
     }
     val pickPhotos = rememberLauncherForActivityResult(ActivityResultContracts.GetMultipleContents()) { uris ->
-        val imported = uris.mapNotNull { uri -> copyAssistantPhoto(context, uri) }
+        val imported = uris.mapNotNull { uri -> copyAssistantPhoto(context, uri)?.absolutePath }
         cropQueue = cropQueue + imported
     }
 
@@ -507,19 +510,19 @@ fun AssistantScreen(
             onDismiss = { photoViewer = null },
         )
     }
-    cropQueue.firstOrNull()?.let { file ->
+    cropQueue.firstOrNull()?.let { path ->
         PhotoCropDialog(
-            path = file.absolutePath,
+            path = path,
             onCropped = {
-                viewModel.onPhotoTaken(file.absolutePath)
+                viewModel.onPhotoTaken(path)
                 cropQueue = cropQueue.drop(1)
             },
             onDismiss = {
-                file.delete()
+                File(path).delete()
                 cropQueue = cropQueue.drop(1)
             },
             onUseOriginal = {
-                viewModel.onPhotoTaken(file.absolutePath)
+                viewModel.onPhotoTaken(path)
                 cropQueue = cropQueue.drop(1)
             },
         )
@@ -1419,9 +1422,21 @@ private fun createMarkdownTextView(context: Context, textColor: Int, linkColor: 
                     builder.inlinesEnabled(true)
                     builder.theme().textColor(textColor)
                     // 单条公式解析失败时画占位，绝不让 ParseException 冒泡成整页闪退。
+                    // 失败的 latex 与异常类型一并写入本地日志，便于事后定位（用户截图
+                    // 只有 60 字符片段，根本无法重建真实失败原因）。
                     builder.errorHandler { latex, error ->
                         Log.w(RENDER_LOG_TAG, "latex render failed: $latex", error)
-                        LatexFallbackDrawable(textColor, fallbackSizePx, latex)
+                        appendRenderErrorLog(
+                            context,
+                            "LATEX-PIECE:\n$latex\n---",
+                            error,
+                        )
+                        LatexFallbackDrawable(
+                            textColor,
+                            fallbackSizePx,
+                            latex,
+                            error.javaClass.simpleName,
+                        )
                     }
                 },
             )
@@ -1473,8 +1488,9 @@ private class LatexFallbackDrawable(
     private val textColor: Int,
     textSizePx: Float,
     rawLatex: String,
+    errorType: String? = null,
 ) : Drawable() {
-    private val title = "⚠ 公式无法渲染"
+    private val title = if (errorType != null) "⚠ 公式无法渲染 ($errorType)" else "⚠ 公式无法渲染"
     private val snippet: String = rawLatex
         .replace('\n', ' ')
         .let { if (it.length > 60) it.substring(0, 60) + "…" else it }

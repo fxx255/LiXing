@@ -79,8 +79,8 @@ fun CheckInDialog(
 
     var value by remember(task.id) { mutableIntStateOf(if (isDone) task.actualValue else target) }
     var note by remember(task.id) { mutableStateOf(task.checkinNote.orEmpty()) }
-    // 多张照片
-    var photos by remember(task.id) { mutableStateOf(decodePhotos(task.checkinPhoto)) }
+    // 多张照片：rememberSaveable——拍照回来若 Activity 被部分 ROM 重建，刚拍的照片不会丢
+    var photos by rememberSaveable(task.id) { mutableStateOf(decodePhotos(task.checkinPhoto)) }
     var photoError by remember(task.id) { mutableStateOf<String?>(null) }
 
     // 拍照：先建好文件拿 FileProvider URI，相机写入后追加本地路径。

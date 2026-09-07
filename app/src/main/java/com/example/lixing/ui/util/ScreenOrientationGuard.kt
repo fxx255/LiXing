@@ -54,6 +54,17 @@ object ScreenOrientationGuard {
             ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT
         }
 
+        // 方向本来就没被相机带偏：不做强制转向，只交还系统。
+        // 部分 ROM（MIUI/鸿蒙）对 requestedOrientation 的每次写入都可能触发界面重建，
+        // 不必要的写入会把刚弹出的裁剪界面冲掉（「第一次拍照闪退、第二次正常」）。
+        val currentOrientation = target.resources.configuration.orientation
+        if (currentOrientation == orientationBeforeCapture) {
+            mainHandler.postDelayed({
+                if (isAlive(target)) target.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_FULL_USER
+            }, 250)
+            return
+        }
+
         // onResume 时转屏可能还在收尾，稍等一下再下指令更稳。
         mainHandler.postDelayed({
             if (isAlive(target)) target.requestedOrientation = restore
