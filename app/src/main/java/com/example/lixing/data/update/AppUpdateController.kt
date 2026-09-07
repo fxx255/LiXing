@@ -154,14 +154,62 @@ class AppUpdateController @Inject constructor(
     /** 用户在弹窗里点了「立即更新」。 */
     fun startDownload() {
         val manifest = lastSeenManifest ?: return
-        // 清掉旧 apk、避免一连下两次
         scope.launch {
             try {
                 val filename = "LiXing-${manifest.versionName}.apk"
-                val id = withContext(Dispatchers.IO) { downloader.enqueue(manifest.apkUrl, filename) }
-                _state.value = State.Downloading(id, manifest)
+                // 第 1 次尝试走清单原始地址；失败后自动切换镜像重试
+                val url = DownloadMirrors.urlFor(manifest.apkUrl, attempt = 1)
+                val id = withContext(Dispatchers.IO) { downloader.enqueue(url, filename) }
+                _state.value = State.Downloading(id, manifest, attempt = 1)
+                startPolling(id, manifest, attempt = 1)
             } catch (e: Exception) {
                 _state.value = State.Failed("下载启动失败: ${e.message}")
+            }
+        }
+    }
+
+    /**
+     * 轮询当前下载的状态。
+     *
+     * DownloadManager 失败时**不发**完成广播（只在成功时发 ACTION_DOWNLOAD_COMPLETE），
+     * 不轮询的话失败后 App 会永远卡在「下载中」。失败时按镜像列表自动换源重试。
+     */
+    private fun startPolling(downloadId: Long, manifest: UpdateManifest, attempt: Int) {
+        scope.launch {
+            while (true) {
+                kotlinx.coroutines.delay(5_000)
+                val s = _state.value
+                if (s !is State.Downloading || s.downloadId != downloadId || s.attempt != attempt) {
+                    return@launch // 状态已被别处推进（成功/取消/新一轮）
+                }
+                val status = withContext(Dispatchers.IO) { downloader.queryStatus(downloadId) }
+                if (status == null) continue
+                when {
+                    status.isSuccessful -> {
+                        verifyAndInstall(downloadId, manifest)
+                        return@launch
+                    }
+
+                    status.isFailed -> {
+                        if (DownloadMirrors.hasNext(attempt)) {
+                            // 换下一个源重试：直连 GitHub 失败在国内很常见
+                            downloader.cancel(downloadId)
+                            val nextUrl = DownloadMirrors.urlFor(manifest.apkUrl, attempt + 1)
+                            val id2 = withContext(Dispatchers.IO) {
+                                downloader.enqueue(nextUrl, "LiXing-${manifest.versionName}.apk")
+                            }
+                            _state.value = State.Downloading(id2, manifest, attempt = attempt + 1)
+                            startPolling(id2, manifest, attempt + 1)
+                            return@launch
+                        }
+                        _state.value = State.Failed(
+                            "下载失败（原因码 ${status.reason}）。可能是网络无法访问下载源，可稍后重试。",
+                        )
+                        return@launch
+                    }
+
+                    else -> Unit // RUNNING / PAUSED_WAITING_TO_RETRY 继续等
+                }
             }
         }
     }
@@ -276,7 +324,7 @@ class AppUpdateController @Inject constructor(
         /** 手动检查后确认没有新版本；展示几秒后自动回 [Idle]。 */
         data object UpToDate : State()
         data class Available(val manifest: UpdateManifest, val force: Boolean) : State()
-        data class Downloading(val downloadId: Long, val manifest: UpdateManifest) : State()
+        data class Downloading(val downloadId: Long, val manifest: UpdateManifest, val attempt: Int = 1) : State()
         data class Verifying(val downloadId: Long, val manifest: UpdateManifest) : State()
         data class ReadyToInstall(val manifest: UpdateManifest, val file: File) : State()
         data class Failed(val reason: String) : State()
