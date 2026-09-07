@@ -10,9 +10,11 @@
  * App 端 BuildConfig.UPDATE_CHECK_URL 已指向：
  *   https://lixing-d7g243r7kcad67750-1323070606.ap-shanghai.app.tcloudbase.com/update/check
  *
- * 清单来源三选一（按优先级，通过环境变量配置）：
- *   1. UPDATE_MANIFEST_JSON  直接内联 JSON 字符串（零外部依赖，最适合首次部署/临时应急）；
- *   2. UPDATE_MANIFEST_URL   指向 update.json 的直链（推荐长期方案，GitHub Release 附件）；
+ * 清单来源（按顺序尝试，通过环境变量配置）：
+ *   1. UPDATE_MANIFEST_URL   指向 update.json 的直链（推荐长期方案，GitHub Release 附件；
+ *                            可逗号分隔多个源，每个源独立超时，逐个回退）；
+ *   2. UPDATE_MANIFEST_JSON  直接内联 JSON 字符串 —— **兜底**：回源失败/超时时毫秒级返回，
+ *                            保证函数在免费版 3 秒执行超时内永远能给出结果；
  *   3. GITHUB_REPO           形如 user/repo，代理 GitHub Releases API（/releases/latest）自动组装。
  *
  * 行为：
