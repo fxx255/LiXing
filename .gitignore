@@ -26,3 +26,9 @@ docs/mappings/
 *.log
 .DS_Store
 Thumbs.db
+
+# ---- 发布上传材料（不入仓，内容在 GitHub Release 里）----
+release-upload/
+
+# ---- 本地工具配置 ----
+.claude/
