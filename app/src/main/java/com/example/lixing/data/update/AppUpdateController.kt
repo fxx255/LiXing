@@ -233,7 +233,7 @@ class AppUpdateController @Inject constructor(
     private suspend fun verifyAndInstall(downloadId: Long, manifest: UpdateManifest) {
         _state.value = State.Verifying(downloadId, manifest)
         val file = withContext(Dispatchers.IO) {
-            downloader.findDownloadedApk() ?: return@withContext null
+            downloader.findDownloadedApk(downloadId) ?: return@withContext null
         } ?: run {
             _state.value = State.Failed("下载完成后未找到 APK 文件")
             return

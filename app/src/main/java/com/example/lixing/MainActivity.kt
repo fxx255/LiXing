@@ -92,15 +92,15 @@ class MainActivity : ComponentActivity() {
         if (dismissed) return
         AlertDialog(
             onDismissRequest = { dismissed = true; appUpdateController.acknowledge() },
-            title = { Text("发现新版本 ${'$'}{s.manifest.versionName}") },
+            title = { Text("发现新版本 ${s.manifest.versionName}") },
             text = {
                 val sizeText = if (s.manifest.sizeBytes > 0) {
                     "%.1f MB".format(s.manifest.sizeBytes / (1024.0 * 1024.0))
                 } else "未知大小"
                 val parts = buildList {
-                    add("新版本大小：${'$'}sizeText")
+                    add("新版本大小：$sizeText")
                     add("已通过 SHA-256 校验后才能安装")
-                    if (s.manifest.changelog.isNotBlank()) add("\n${'$'}{s.manifest.changelog}")
+                    if (s.manifest.changelog.isNotBlank()) add("\n${s.manifest.changelog}")
                 }
                 Text(parts.joinToString("\n"))
             },
