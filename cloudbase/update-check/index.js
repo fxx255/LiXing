@@ -28,12 +28,12 @@ const CACHE_TTL_MS = 10 * 60 * 1000;
 const FETCH_TIMEOUT_MS = Number(process.env.MANIFEST_FETCH_TIMEOUT_MS || 1200);
 
 /** 带超时的 JSON 拉取：慢源直接放弃换下一个，不让整个函数被拖到超时。 */
-async function fetchJsonWithTimeout(url, timeoutMs) {
+async function fetchJsonWithTimeout(url, timeoutMs, extraHeaders) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const response = await fetch(url, {
-      headers: { Accept: "application/json" },
+      headers: { Accept: "application/json", ...(extraHeaders || {}) },
       signal: controller.signal,
     });
     if (!response.ok) throw new Error(`返回 ${response.status}`);
@@ -74,50 +74,64 @@ exports.main = async (event) => {
   }
 };
 
+/**
+ * 取清单：先回源，回源失败就用内联清单兜底。
+ *
+ * ⚠️ 顺序是「网络源 → 内联」而不是反过来：CloudBase 免费版的函数执行超时只能选到 3 秒，
+ * 而回源（GitHub / 加速镜像）随时可能超过 3 秒，一旦超时整个函数被判失败、App 端检查更新
+ * 没反应。所以内联清单必须当作**兜底**存在：哪怕回源全部超时，也能在几十毫秒内返回，
+ * 函数永远不会超时。代价只是「内联滞后时检测不到最新版」（App 判断是
+ * versionCode > 当前版本 才提示，旧清单只会显示「已是最新版本」，不会误报）。
+ */
 async function fetchManifest() {
-  // 优先级 1：内联 JSON（首次部署/没有 GitHub 时的零依赖模式）
-  const inline = process.env.UPDATE_MANIFEST_JSON;
-  if (inline && inline.trim()) {
-    try {
-      return normalizeManifest(JSON.parse(inline));
-    } catch (error) {
-      throw new Error(`UPDATE_MANIFEST_JSON 不是合法 JSON: ${error.message}`);
-    }
-  }
+  const errors = [];
 
-  // 优先级 2：外部直链。
-  // 支持逗号分隔多个源（主源 + 加速镜像），逐个试；每个源独立超时，
-  // 保证总耗时不会顶爆云函数的执行超时（默认 3 秒，控制台可调到 10 秒）。
+  // 1) 外部直链：支持逗号分隔多个源（主源 + 加速镜像），逐个试，每个源独立超时
   const directUrl = process.env.UPDATE_MANIFEST_URL;
   if (directUrl) {
     const urls = directUrl.split(",").map((item) => item.trim()).filter(Boolean);
-    const errors = [];
     for (const url of urls) {
       try {
-        const data = await fetchJsonWithTimeout(url, FETCH_TIMEOUT_MS);
-        return normalizeManifest(data);
+        return normalizeManifest(await fetchJsonWithTimeout(url, FETCH_TIMEOUT_MS));
       } catch (error) {
         errors.push(`${url} → ${error.message}`);
       }
     }
-    throw new Error(`所有清单源都失败：${errors.join(" | ")}`);
   }
 
-  // 优先级 3：代理 GitHub Releases API
-  const repo = process.env.GITHUB_REPO;
-  if (!repo) throw new Error("未配置 UPDATE_MANIFEST_JSON / UPDATE_MANIFEST_URL / GITHUB_REPO 任一清单源");
+  // 2) 内联清单兜底：零网络、毫秒级返回，保证函数不超时
+  const inline = process.env.UPDATE_MANIFEST_JSON;
+  if (inline && inline.trim()) {
+    try {
+      return { ...normalizeManifest(JSON.parse(inline)), fallback: true, errors };
+    } catch (error) {
+      errors.push(`UPDATE_MANIFEST_JSON 解析失败 → ${error.message}`);
+    }
+  }
 
-  const response = await fetch(`https://api.github.com/repos/${repo}/releases/latest`, {
-    headers: { Accept: "application/vnd.github+json", "User-Agent": "lixing-update-check" },
-  });
-  if (!response.ok) throw new Error(`GitHub API 返回 ${response.status}`);
-  const release = await response.json();
+  // 3) 代理 GitHub Releases API（无 update.json 附件时的最后兜底，注意它也可能很慢）
+  const repo = process.env.GITHUB_REPO;
+  if (!repo) {
+    throw new Error(
+      errors.length ? `清单获取失败：${errors.join(" | ")}` : "未配置 UPDATE_MANIFEST_URL / UPDATE_MANIFEST_JSON / GITHUB_REPO 任一清单源",
+    );
+  }
+  const release = await fetchJsonWithTimeout(
+    `https://api.github.com/repos/${repo}/releases/latest`,
+    FETCH_TIMEOUT_MS,
+    { Accept: "application/vnd.github+json", "User-Agent": "lixing-update-check" },
+  );
   const asset = (release.assets || []).find((item) => item.name.endsWith(".apk"));
   const manifestAsset = (release.assets || []).find((item) => item.name === "update.json");
 
   if (manifestAsset && manifestAsset.browser_download_url) {
-    const manifestResponse = await fetch(manifestAsset.browser_download_url);
-    if (manifestResponse.ok) return normalizeManifest(await manifestResponse.json());
+    try {
+      return normalizeManifest(
+        await fetchJsonWithTimeout(manifestAsset.browser_download_url, FETCH_TIMEOUT_MS),
+      );
+    } catch (error) {
+      errors.push(`清单附件拉取失败 → ${error.message}`);
+    }
   }
 
   if (!asset) throw new Error("Release 里没有 APK");
