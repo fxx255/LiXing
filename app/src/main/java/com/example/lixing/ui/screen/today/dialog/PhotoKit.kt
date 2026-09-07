@@ -24,9 +24,10 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.sizeIn
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
@@ -304,11 +305,18 @@ private fun previewMaxHeight(): Dp {
     return minOf(420.dp, configuration.screenHeightDp.dp * 0.55f)
 }
 
-/** 裁剪视口（正方形）的最大边长：横屏时按屏高比例限制，否则正方形会高出屏幕。 */
+/**
+ * 裁剪视口（正方形）的最大边长。
+ *
+ * 关键：必须按「当前窗口高度减去弹窗其他内容（标题/提示/比例条/按钮，约 260dp）」来算，
+ * 否则横屏下正方形边长跟着屏宽走，整个弹窗比屏幕还高，上下都被裁掉。
+ * 极端小屏兜底 200dp（配合外层 verticalScroll 仍可操作）。
+ */
 @Composable
 private fun cropViewportMaxSide(): Dp {
     val configuration = LocalConfiguration.current
-    return minOf(configuration.screenWidthDp.dp, configuration.screenHeightDp.dp * 0.56f)
+    val usableHeight = configuration.screenHeightDp.dp - 260.dp
+    return minOf(configuration.screenWidthDp.dp, usableHeight).coerceAtLeast(200.dp)
 }
 
 private data class CropRatio(val label: String, val value: Float?)
@@ -360,7 +368,12 @@ fun PhotoCropDialog(
     ) {
         Surface(shape = LiXingRadius.Hero, color = MaterialTheme.colorScheme.surface) {
             Column(
-                modifier = Modifier.fillMaxWidth().padding(16.dp),
+                // 小屏/分屏兜底：内容超高时可滚动（裁剪框内的手势有自己的 pointerInput，
+                // 会消费掉拖动事件，不会被滚动条抢走）。
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState())
+                    .padding(16.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
                 Text("裁剪照片", style = MaterialTheme.typography.titleLarge)
@@ -383,9 +396,11 @@ fun PhotoCropDialog(
 
                     Box(
                         modifier = Modifier
+                            // 约束顺序很关键：sizeIn 必须在 fillMaxWidth 之前——
+                            // 反过来 fillMaxWidth 会先把宽度钉死成父容器宽度，
+                            // 后面的 max 形同虚设（v1.0.5 弹窗上下被裁的根因）。
+                            .sizeIn(maxWidth = viewportMaxSide, maxHeight = viewportMaxSide)
                             .fillMaxWidth()
-                            // 平板横屏下正方形视口不能跟着屏宽走（会高出屏幕），按屏高比例封顶。
-                            .widthIn(max = viewportMaxSide)
                             .aspectRatio(1f)
                             .clip(LiXingRadius.Card)
                             .background(Color.Black)
