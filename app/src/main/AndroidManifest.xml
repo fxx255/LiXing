@@ -50,7 +50,19 @@
             android:exported="true"
             android:launchMode="singleTask"
             android:windowSoftInputMode="adjustResize"
-            android:theme="@style/Theme.LiXing">
+            android:theme="@style/Theme.LiXing"
+            android:screenOrientation="fullUser"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|density|fontScale|fontWeightAdjustment">
+            <!--
+              screenOrientation=fullUser：明确声明支持全部四个方向（含反向横/竖屏）。
+              不声明时系统按 unspecified 处理，平板等大屏设备上会被套用「方向/信箱兼容模式」
+              强制竖屏；这里显式声明后系统不再替我们做方向裁剪。
+
+              configChanges：旋转、分屏、窗口尺寸变化不再销毁重建 Activity。
+              Compose 会自行在配置变化时重组，重建反而会丢掉输入框内容、列表滚动位置、
+              以及「正在等相机返回」的临时文件路径。
+              未声明 locale / uiMode：语言、深浅色切换仍走系统重建，避免资源未刷新。
+            -->
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />

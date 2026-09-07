@@ -16,9 +16,23 @@ set -euo pipefail
 
 VERSION_NAME="${1:?用法: release.sh <versionName> [changelog] [user/repo]}"
 CHANGELOG="${2:-更新到 ${VERSION_NAME}}"
-REPO="${3:-${GITHUB_REPO:?请设置 GITHUB_REPO=user/repo 或作为第三个参数传入}}"
+REPO="${3:-${GITHUB_REPO:-fxx255/LiXing}}"
+# 国内手机连不上 GitHub 的 release 附件 CDN，清单里的下载地址必须走加速镜像。
+# App 端 DownloadMirrors 还会再自动回退另外两个源，这里只负责给个可用的首选。
+MIRROR="${UPDATE_MIRROR:-https://ghfast.top/}"
 
 cd "$(dirname "$0")/.."
+
+# versionCode 必须与 BuildConfig.VERSION_CODE 完全一致：
+# 早先用日期生成（260907 之类），会导致装完最新版仍被判定为「有新版本」。
+VERSION_CODE=$(grep -m1 '^[[:space:]]*versionCode' app/build.gradle.kts | grep -o '[0-9]\+')
+MIN_SDK=$(grep -m1 '^[[:space:]]*minSdk' app/build.gradle.kts | grep -o '[0-9]\+')
+VERSION_NAME_IN_CODE=$(grep -m1 '^[[:space:]]*versionName' app/build.gradle.kts | grep -o '"[^"]*"' | tr -d '"')
+if [ "$VERSION_NAME" != "$VERSION_NAME_IN_CODE" ]; then
+  echo "警告：传入的 $VERSION_NAME 与 build.gradle.kts 里的 $VERSION_NAME_IN_CODE 不一致，以代码为准"
+  VERSION_NAME="$VERSION_NAME_IN_CODE"
+fi
+echo "==> versionCode=$VERSION_CODE versionName=$VERSION_NAME minSdk=$MIN_SDK"
 
 echo "==> 构建 release 包"
 GRADLE_USER_HOME="F:/APP/.gradle-local" ./gradlew :app:assembleRelease
@@ -33,20 +47,23 @@ if [ -z "$SHA256" ]; then
 fi
 SIZE=$(stat -c %s "$APK")
 
+APK_NAME="LiXing-${VERSION_NAME}-arm64.apk"
+
 echo "==> 生成 update.json"
 cat > build/update.json <<JSON
 {
-  "versionCode": $(date +%Y%m%d | sed 's/^20//'),
+  "versionCode": ${VERSION_CODE},
   "versionName": "${VERSION_NAME}",
-  "apkUrl": "https://github.com/${REPO}/releases/download/v${VERSION_NAME}/LiXing-${VERSION_NAME}.apk",
+  "apkUrl": "${MIRROR}https://github.com/${REPO}/releases/download/v${VERSION_NAME}/${APK_NAME}",
   "sha256": "${SHA256}",
   "sizeBytes": ${SIZE},
   "changelog": $(printf '%s' "$CHANGELOG" | python -c 'import json,sys; print(json.dumps(sys.stdin.read()))'),
+  "minSdk": ${MIN_SDK},
   "force": false
 }
 JSON
 
-cp "$APK" "build/LiXing-${VERSION_NAME}.apk"
+cp "$APK" "build/${APK_NAME}"
 
 echo "==> 归档 R8 mapping（线上崩溃日志反混淆必需，按版本号存 docs/mappings/）"
 mkdir -p docs/mappings
@@ -54,7 +71,7 @@ cp app/build/outputs/mapping/release/mapping.txt "docs/mappings/mapping-v${VERSI
 
 echo "==> 创建 GitHub Release v${VERSION_NAME}"
 gh release create "v${VERSION_NAME}" \
-  "build/LiXing-${VERSION_NAME}.apk" \
+  "build/${APK_NAME}" \
   "build/update.json" \
   --repo "$REPO" \
   --title "砺行 ${VERSION_NAME}" \

@@ -48,6 +48,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -63,6 +64,7 @@ import com.example.lixing.domain.meal.MealType
 import com.example.lixing.ui.photo.importPhoto
 import com.example.lixing.ui.screen.today.dialog.PhotoThumb
 import com.example.lixing.ui.theme.LiXingRadius
+import com.example.lixing.ui.util.ScreenOrientationGuard
 import java.io.File
 import java.text.SimpleDateFormat
 import java.time.LocalDate
@@ -86,14 +88,22 @@ fun MealScreen(
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val snackbar = remember { SnackbarHostState() }
-    var pending by remember { mutableStateOf<Pair<MealType, File>?>(null) }
+    // 等相机回写的临时文件：存路径 + 餐次名并用 rememberSaveable，
+    // 旋转屏幕 / 进程被回收后重建也不会丢（普通 remember 会丢，照片就找不回来了）。
+    var pendingPhotoPath by rememberSaveable { mutableStateOf<String?>(null) }
+    var pendingMealType by rememberSaveable { mutableStateOf<String?>(null) }
     var pendingAlbumType by remember { mutableStateOf<MealType?>(null) }
     var editing by remember { mutableStateOf<MealRecordEntity?>(null) }
     val takePicture = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { success ->
-        val request = pending
-        pending = null
-        if (success && request != null) viewModel.analyzePhoto(request.first, request.second.absolutePath)
-        else request?.second?.delete()
+        val path = pendingPhotoPath
+        val typeName = pendingMealType
+        pendingPhotoPath = null
+        pendingMealType = null
+        if (success && path != null && typeName != null) {
+            viewModel.analyzePhoto(MealType.valueOf(typeName), path)
+        } else if (path != null) {
+            File(path).delete()
+        }
     }
     val pickPhoto = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
         val type = pendingAlbumType
@@ -171,14 +181,18 @@ fun MealScreen(
                         enabled = state.analyzing == null,
                         onCapture = {
                             val file = createMealPhotoFile(context, type)
-                            pending = type to file
+                            pendingPhotoPath = file.absolutePath
+                            pendingMealType = type.name
                             val uri = FileProvider.getUriForFile(
                                 context,
                                 "${context.packageName}.fileprovider",
                                 file,
                             )
+                            // 相机普遍声明竖屏且不受用户方向锁定约束，先把方向锁在当前方向，
+                            // 回到前台时由 MainActivity.onResume 解除。
+                            ScreenOrientationGuard.armBeforeExternalCapture(context)
                             runCatching { takePicture.launch(uri) }
-                                .onFailure { pending = null; file.delete() }
+                                .onFailure { pendingPhotoPath = null; pendingMealType = null; file.delete() }
                         },
                         onPickFromAlbum = {
                             pendingAlbumType = type

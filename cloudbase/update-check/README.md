@@ -15,10 +15,27 @@ App 端 `BuildConfig.UPDATE_CHECK_URL` 已写死指向本服务：
 | 优先级 | 环境变量 | 说明 | 适用 |
 |---|---|---|---|
 | 1 | `UPDATE_MANIFEST_JSON` | 直接内联清单 JSON 字符串 | 首次部署、还没建 GitHub 仓库时；临时改 versionCode 测弹窗也最方便 |
-| 2 | `UPDATE_MANIFEST_URL` | update.json 的直链 | 长期推荐：GitHub Release 附件，建议用 `…/releases/latest/download/update.json` 固定链接 |
+| 2 | `UPDATE_MANIFEST_URL` | update.json 的直链，可用**英文逗号分隔多个源**（主源 + 加速镜像，逐个回退） | 长期推荐：GitHub Release 附件，建议用 `…/releases/latest/download/update.json` 固定链接 |
 | 3 | `GITHUB_REPO` | `user/repo`，代理 Releases API | 兜底：无 update.json 附件时自动从 Release 信息组装（此时无 SHA-256，App 会拒绝安装） |
 
 三者可共存，按优先级生效；换来源时把不用的变量清空，避免歧义。
+
+### ⚠️ 云函数侧连不上 GitHub 直链（3 秒超时）
+
+Cloudbase 云函数**默认执行超时只有 3 秒**，而 GitHub 的 `github.com/.../releases/latest/...` 从云函数所在网络经常连不通（实测国内连通性很差），回源一慢整个函数就被判定超时，App 端表现为「检查更新无反应」。
+
+两件事都做掉就稳了：
+
+1. **清单地址走加速镜像**（可一次填多个，逗号分隔，逐个回退）：
+
+   ```
+   https://gh-proxy.com/https://github.com/fxx255/LiXing/releases/latest/download/update.json,https://ghfast.top/https://github.com/fxx255/LiXing/releases/latest/download/update.json
+   ```
+
+   实测延迟：gh-proxy.com ≈ 1.4s < ghfast.top ≈ 4s（ghfast 单独用会顶破 3 秒）。
+2. **把函数的「执行超时时间」从 3 秒调到 10 秒**（控制台 → 函数配置 → 执行超时时间）。
+
+云函数内部已给每个源加了独立超时（`MANIFEST_FETCH_TIMEOUT_MS`，默认 1200ms），慢源会自动换下一个，并把失败原因写进日志。
 
 ## 部署步骤（普通事件函数，推荐）
 

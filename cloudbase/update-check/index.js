@@ -24,6 +24,25 @@
 
 const CACHE_TTL_MS = 10 * 60 * 1000;
 
+/** 单个清单源的回源超时（毫秒）。可用环境变量 MANIFEST_FETCH_TIMEOUT_MS 覆盖。 */
+const FETCH_TIMEOUT_MS = Number(process.env.MANIFEST_FETCH_TIMEOUT_MS || 1200);
+
+/** 带超时的 JSON 拉取：慢源直接放弃换下一个，不让整个函数被拖到超时。 */
+async function fetchJsonWithTimeout(url, timeoutMs) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(url, {
+      headers: { Accept: "application/json" },
+      signal: controller.signal,
+    });
+    if (!response.ok) throw new Error(`返回 ${response.status}`);
+    return await response.json();
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /** 进程内缓存：云函数实例复用期间不再回源，避免每次请求都打 GitHub。 */
 let cachedPayload = null;
 let cachedAt = 0;
@@ -66,13 +85,22 @@ async function fetchManifest() {
     }
   }
 
-  // 优先级 2：外部直链
+  // 优先级 2：外部直链。
+  // 支持逗号分隔多个源（主源 + 加速镜像），逐个试；每个源独立超时，
+  // 保证总耗时不会顶爆云函数的执行超时（默认 3 秒，控制台可调到 10 秒）。
   const directUrl = process.env.UPDATE_MANIFEST_URL;
   if (directUrl) {
-    const response = await fetch(directUrl, { headers: { Accept: "application/json" } });
-    if (!response.ok) throw new Error(`清单源返回 ${response.status}`);
-    const data = await response.json();
-    return normalizeManifest(data);
+    const urls = directUrl.split(",").map((item) => item.trim()).filter(Boolean);
+    const errors = [];
+    for (const url of urls) {
+      try {
+        const data = await fetchJsonWithTimeout(url, FETCH_TIMEOUT_MS);
+        return normalizeManifest(data);
+      } catch (error) {
+        errors.push(`${url} → ${error.message}`);
+      }
+    }
+    throw new Error(`所有清单源都失败：${errors.join(" | ")}`);
   }
 
   // 优先级 3：代理 GitHub Releases API

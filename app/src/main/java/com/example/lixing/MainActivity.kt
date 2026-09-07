@@ -119,6 +119,17 @@ class MainActivity : ComponentActivity() {
         )
     }
 
+    /**
+     * 从外部相机/相册返回时解除方向锁定。
+     *
+     * 相机自己声明竖屏会把屏幕带偏，回来后由这里把方向交还给系统（跟随用户 + 传感器）。
+     * 没打过相机的正常场景 ScreenOrientationGuard 未 armed，这里是空操作。
+     */
+    override fun onResume() {
+        super.onResume()
+        com.example.lixing.ui.util.ScreenOrientationGuard.releaseAfterExternalCapture(this)
+    }
+
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)

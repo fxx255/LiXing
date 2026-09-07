@@ -37,6 +37,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -47,6 +48,7 @@ import androidx.core.content.FileProvider
 import com.example.lixing.data.local.entity.DailyTaskEntity
 import com.example.lixing.ui.photo.importPhoto
 import com.example.lixing.ui.theme.LiXingRadius
+import com.example.lixing.ui.util.ScreenOrientationGuard
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -81,15 +83,16 @@ fun CheckInDialog(
     var photos by remember(task.id) { mutableStateOf(decodePhotos(task.checkinPhoto)) }
     var photoError by remember(task.id) { mutableStateOf<String?>(null) }
 
-    // 拍照：先建好文件拿 FileProvider URI，相机写入后追加本地路径
-    var pendingPhotoFile by remember { mutableStateOf<File?>(null) }
+    // 拍照：先建好文件拿 FileProvider URI，相机写入后追加本地路径。
+    // 用路径 + rememberSaveable：旋转屏幕 / 进程被回收重建后仍能取回照片（普通 remember 会丢）。
+    var pendingPhotoPath by rememberSaveable { mutableStateOf<String?>(null) }
     val takePicture = rememberLauncherForActivityResult(
         ActivityResultContracts.TakePicture(),
     ) { success ->
-        val file = pendingPhotoFile
+        val file = pendingPhotoPath?.let { File(it) }
         if (success) file?.absolutePath?.let { photos = photos + it }
         else file?.delete()
-        pendingPhotoFile = null
+        pendingPhotoPath = null
     }
     val pickPhotos = rememberLauncherForActivityResult(
         ActivityResultContracts.PickMultipleVisualMedia(20),
@@ -180,14 +183,17 @@ fun CheckInDialog(
                     FilledIconButton(
                         onClick = {
                             val file = createPhotoFile(context)
-                            pendingPhotoFile = file
+                            pendingPhotoPath = file.absolutePath
                             val uri = FileProvider.getUriForFile(
                                 context,
                                 "${context.packageName}.fileprovider",
                                 file,
                             )
+                            // 相机普遍声明竖屏且不受用户方向锁定约束，先把方向锁在当前方向，
+                            // 回到前台时由 MainActivity.onResume 解除。
+                            ScreenOrientationGuard.armBeforeExternalCapture(context)
                             runCatching { takePicture.launch(uri) }.onFailure {
-                                pendingPhotoFile = null
+                                pendingPhotoPath = null
                                 file.delete()
                                 photoError = "无法打开相机"
                             }

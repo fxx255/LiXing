@@ -28,6 +28,7 @@ import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -90,6 +91,8 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -102,6 +105,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.text.font.FontWeight
@@ -124,6 +128,7 @@ import com.example.lixing.ui.screen.assistant.PlanChangeScope.LONG_TERM
 import com.example.lixing.ui.screen.assistant.PlanChangeScope.TODAY
 import com.example.lixing.ui.theme.LiXingRadius
 import com.example.lixing.ui.screen.today.dialog.PhotoCropDialog
+import com.example.lixing.ui.util.ScreenOrientationGuard
 import io.noties.markwon.Markwon
 import ru.noties.jlatexmath.JLatexMathDrawable
 import io.noties.markwon.ext.latex.JLatexMathPlugin
@@ -178,7 +183,9 @@ fun AssistantScreen(
     val snackbar = remember { SnackbarHostState() }
     val listState = rememberLazyListState()
     val context = LocalContext.current
-    var pendingCaptureFile by remember { mutableStateOf<File?>(null) }
+    // 等相机回写的临时文件：用路径 + rememberSaveable 存，
+    // 这样旋转屏幕或被系统回收重建后仍能取回照片（普通 remember 会丢）。
+    var pendingCapturePath by rememberSaveable { mutableStateOf<String?>(null) }
     var photoViewer by remember { mutableStateOf<PhotoViewerState?>(null) }
     var cropQueue by remember { mutableStateOf<List<File>>(emptyList()) }
     var extrasExpanded by remember { mutableStateOf(false) }
@@ -421,8 +428,8 @@ fun AssistantScreen(
         }
     }
     val takePicture = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { success ->
-        val file = pendingCaptureFile
-        pendingCaptureFile = null
+        val file = pendingCapturePath?.let { File(it) }
+        pendingCapturePath = null
         if (success && file != null) cropQueue = cropQueue + file else file?.delete()
     }
     val pickPhotos = rememberLauncherForActivityResult(ActivityResultContracts.GetMultipleContents()) { uris ->
@@ -745,14 +752,17 @@ fun AssistantScreen(
                         IconButton(
                             onClick = {
                                 val file = createAssistantPhotoFile(context)
-                                pendingCaptureFile = file
+                                pendingCapturePath = file.absolutePath
                                 val uri = FileProvider.getUriForFile(
                                     context,
                                     "${context.packageName}.fileprovider",
                                     file,
                                 )
+                                // 相机普遍声明竖屏且不受用户方向锁定约束，先把方向锁在当前方向，
+                                // 回到前台时由 MainActivity.onResume 解除（见 ScreenOrientationGuard）。
+                                ScreenOrientationGuard.armBeforeExternalCapture(context)
                                 runCatching { takePicture.launch(uri) }
-                                    .onFailure { pendingCaptureFile = null; file.delete() }
+                                    .onFailure { pendingCapturePath = null; file.delete() }
                             },
                             enabled = !state.busy && !holdingTalk && voiceInputStatus == VoiceInputStatus.IDLE,
                         ) {
@@ -1210,6 +1220,17 @@ private fun ThinkingPanel(
     }
 }
 
+/**
+ * 气泡最大宽度：按「当前可用宽度」的比例算，而不是写死 480dp。
+ *
+ * 写死值在手机上合适，但平板横屏（可用宽度 900dp+）下会出现一条很窄的文字带，
+ * 右侧大片留白；这里取 min(可用宽 × 0.86, 760dp)：
+ * - 手机 400dp → 344dp（和原来手感一致）
+ * - 平板横屏 1200dp → 760dp（明显变宽但仍留出对侧留白，方便区分收发双方）
+ */
+private val BUBBLE_MAX_WIDTH = 760.dp
+private const val BUBBLE_WIDTH_RATIO = 0.86f
+
 @Composable
 private fun MessageBubble(
     role: String,
@@ -1218,41 +1239,46 @@ private fun MessageBubble(
     onImageClick: (List<String>, Int) -> Unit,
 ) {
     val isUser = role == "user"
-    Box(Modifier.fillMaxWidth()) {
-        SelectionContainer(
-            modifier = Modifier
-                .align(if (isUser) Alignment.CenterEnd else Alignment.CenterStart)
-                .widthIn(max = 480.dp),
-        ) {
-            Surface(
-                color = if (isUser) MaterialTheme.colorScheme.primaryContainer
-                else MaterialTheme.colorScheme.surfaceContainerHigh,
-                shape = RoundedCornerShape(
-                    topStart = 14.dp, topEnd = 14.dp,
-                    bottomStart = if (isUser) 14.dp else 4.dp,
-                    bottomEnd = if (isUser) 4.dp else 14.dp,
-                ),
+    // BoxWithConstraints 拿的是「父容器实际给到的最大宽度」，
+    // 比 LocalConfiguration 的屏幕宽度更准（含列表内边距、分屏/多窗口）。
+    BoxWithConstraints(Modifier.fillMaxWidth()) {
+        val bubbleMaxWidth = minOf(maxWidth * BUBBLE_WIDTH_RATIO, BUBBLE_MAX_WIDTH)
+        Box {
+            SelectionContainer(
+                modifier = Modifier
+                    .align(if (isUser) Alignment.CenterEnd else Alignment.CenterStart)
+                    .widthIn(max = bubbleMaxWidth),
             ) {
-                Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    if (imagePaths.isNotEmpty()) {
-                        Row(
-                            modifier = Modifier.horizontalScroll(rememberScrollState()),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        ) {
-                            imagePaths.forEachIndexed { index, path ->
-                                AssistantThumbnail(
-                                    path = path,
-                                    modifier = Modifier.size(92.dp),
-                                    onClick = { onImageClick(imagePaths, index) },
-                                )
+                Surface(
+                    color = if (isUser) MaterialTheme.colorScheme.primaryContainer
+                    else MaterialTheme.colorScheme.surfaceContainerHigh,
+                    shape = RoundedCornerShape(
+                        topStart = 14.dp, topEnd = 14.dp,
+                        bottomStart = if (isUser) 14.dp else 4.dp,
+                        bottomEnd = if (isUser) 4.dp else 14.dp,
+                    ),
+                ) {
+                    Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        if (imagePaths.isNotEmpty()) {
+                            Row(
+                                modifier = Modifier.horizontalScroll(rememberScrollState()),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            ) {
+                                imagePaths.forEachIndexed { index, path ->
+                                    AssistantThumbnail(
+                                        path = path,
+                                        modifier = Modifier.size(92.dp),
+                                        onClick = { onImageClick(imagePaths, index) },
+                                    )
+                                }
                             }
                         }
-                    }
-                    if (content.isNotBlank()) {
-                        if (isUser) {
-                            Text(content, style = MaterialTheme.typography.bodyLarge)
-                        } else {
-                            MarkdownAnswer(content)
+                        if (content.isNotBlank()) {
+                            if (isUser) {
+                                Text(content, style = MaterialTheme.typography.bodyLarge)
+                            } else {
+                                MarkdownAnswer(content)
+                            }
                         }
                     }
                 }
@@ -1354,54 +1380,86 @@ private fun OcrPreviewDialog(
 private fun MarkdownAnswer(content: String) {
     val textColor = MaterialTheme.colorScheme.onSurface.toArgb()
     val linkColor = MaterialTheme.colorScheme.primary.toArgb()
+    // 实测宽度。公式是按「当前可用宽度」拆分的，宽度一变（旋转、平板横屏、分屏）
+    // 必须按新宽度重新拆分，否则会留下按旧宽度算出的超长公式 → 右侧溢出被裁掉。
+    var widthPx by remember { mutableIntStateOf(0) }
+    var host by remember { mutableStateOf<TextView?>(null) }
+
+    LaunchedEffect(host, content, widthPx, textColor, linkColor) {
+        val view = host ?: return@LaunchedEffect
+        renderMarkdown(view, content, widthPx, textColor, linkColor)
+    }
+
     AndroidView(
-        modifier = Modifier.fillMaxWidth(),
-        factory = { context ->
-            TextView(context).apply {
-                setTextColor(textColor)
-                setLinkTextColor(linkColor)
-                setTextIsSelectable(true)
-                movementMethod = LinkMovementMethod.getInstance()
-                textSize = 17f
-                val fallbackSizePx = 14f * resources.displayMetrics.scaledDensity
-                val renderer = Markwon.builder(context)
-                    .usePlugin(MarkwonInlineParserPlugin.create())
-                    .usePlugin(TablePlugin.create(context))
-                    .usePlugin(
-                        JLatexMathPlugin.create(this.textSize) { builder ->
-                            builder.inlinesEnabled(true)
-                            builder.theme().textColor(textColor)
-                            // 单条公式解析失败时画占位，绝不让 ParseException 冒泡成整页闪退。
-                            builder.errorHandler { latex, error ->
-                                Log.w(RENDER_LOG_TAG, "latex render failed: $latex", error)
-                                LatexFallbackDrawable(textColor, fallbackSizePx, latex)
-                            }
-                        },
-                    )
-                    .build()
-                tag = renderer
-            }
-        },
+        modifier = Modifier
+            .fillMaxWidth()
+            .onSizeChanged { widthPx = it.width },
+        factory = { context -> createMarkdownTextView(context, textColor, linkColor) },
         update = { view ->
-            view.setTextColor(textColor)
-            view.setLinkTextColor(linkColor)
-            val rendered = wrapLongFormulas(
-                sanitizeAssistantLatex(normalizeAssistantMarkdown(content)),
-                formulaMaxWidthPx(view),
-                formulaWidthMeasurer(view),
-            )
-            runCatching {
-                (view.tag as Markwon).setMarkdown(view, rendered)
-            }.onFailure { error ->
-                Log.e(RENDER_LOG_TAG, "markdown render failed, fallback to plain text", error)
-                appendRenderErrorLog(view.context, rendered, error)
-                view.text = buildString {
-                    append(content)
-                    append("\n\n[部分内容无法渲染，已回退为纯文本]")
-                }
-            }
+            host = view
+            renderMarkdown(view, content, widthPx, textColor, linkColor)
         },
     )
+}
+
+private fun createMarkdownTextView(context: Context, textColor: Int, linkColor: Int): TextView =
+    TextView(context).apply {
+        setTextColor(textColor)
+        setLinkTextColor(linkColor)
+        setTextIsSelectable(true)
+        movementMethod = LinkMovementMethod.getInstance()
+        textSize = 17f
+        val fallbackSizePx = 14f * resources.displayMetrics.scaledDensity
+        val renderer = Markwon.builder(context)
+            .usePlugin(MarkwonInlineParserPlugin.create())
+            .usePlugin(TablePlugin.create(context))
+            .usePlugin(
+                JLatexMathPlugin.create(this.textSize) { builder ->
+                    builder.inlinesEnabled(true)
+                    builder.theme().textColor(textColor)
+                    // 单条公式解析失败时画占位，绝不让 ParseException 冒泡成整页闪退。
+                    builder.errorHandler { latex, error ->
+                        Log.w(RENDER_LOG_TAG, "latex render failed: $latex", error)
+                        LatexFallbackDrawable(textColor, fallbackSizePx, latex)
+                    }
+                },
+            )
+            .build()
+        tag = renderer
+    }
+
+/**
+ * 渲染一次回答。
+ *
+ * 宽度为 0（还没完成布局）时**直接跳过**：以前这里会用屏幕宽度兜底，
+ * 而气泡很可能只有 480～760dp，于是长公式不拆、直接溢出被裁；
+ * 现在等 [widthPx] 到位后再渲染，最多晚一帧，不会错。
+ */
+private fun renderMarkdown(
+    view: TextView,
+    content: String,
+    widthPx: Int,
+    textColor: Int,
+    linkColor: Int,
+) {
+    if (widthPx <= 0) return
+    view.setTextColor(textColor)
+    view.setLinkTextColor(linkColor)
+    val rendered = wrapLongFormulas(
+        sanitizeAssistantLatex(normalizeAssistantMarkdown(content)),
+        formulaMaxWidthPx(view, widthPx),
+        formulaWidthMeasurer(view),
+    )
+    runCatching {
+        (view.tag as Markwon).setMarkdown(view, rendered)
+    }.onFailure { error ->
+        Log.e(RENDER_LOG_TAG, "markdown render failed, fallback to plain text", error)
+        appendRenderErrorLog(view.context, rendered, error)
+        view.text = buildString {
+            append(content)
+            append("\n\n[部分内容无法渲染，已回退为纯文本]")
+        }
+    }
 }
 
 private const val RENDER_LOG_TAG = "MarkdownAnswer"
@@ -1493,11 +1551,15 @@ private fun appendRenderErrorLog(context: Context, markdown: String, error: Thro
     }
 }
 
-/** 公式可用宽度：气泡实际宽度（未布局时用屏宽）减去左右留白。 */
-private fun formulaMaxWidthPx(view: TextView): Int {
+/**
+ * 公式可用宽度：TextView 实测宽度减去左右留白。
+ *
+ * 只认实测宽度——屏幕宽度在平板上远大于气泡宽度，用它兜底等于「不拆公式」。
+ */
+private fun formulaMaxWidthPx(view: TextView, measuredWidthPx: Int): Int {
     val metrics = view.resources.displayMetrics
-    val available = if (view.width > 0) view.width else metrics.widthPixels
-    return available - (metrics.density * 24).toInt()
+    val padding = (metrics.density * 24).toInt()
+    return (measuredWidthPx - padding).coerceAtLeast((metrics.density * 120).toInt())
 }
 
 /** 优先用 JLatexMath 真实测量公式宽度；测量失败时按字符数估算。 */

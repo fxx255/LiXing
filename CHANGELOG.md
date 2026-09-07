@@ -2,6 +2,45 @@
 
 > 按时间倒序记录功能变更。
 
+## v1.0.5 (2026-09-07) · 屏幕方向 / 平板横屏适配
+
+三处与方向、横屏相关的 bug 修复：
+
+### 1. 拍照被强制切竖屏、拍完不恢复（打卡拍照 / 饮食拍照 / AI 拍题）
+
+- **根因**：`MainActivity` 未声明 `screenOrientation`，系统会按 `unspecified` 处理，平板等大屏设备上容易被套用「方向/信箱兼容模式」；同时系统相机普遍在 manifest 里声明竖屏，启动后会把屏幕带成竖屏，且**不受用户的方向锁定约束**——返回后部分 ROM（鸿蒙/EMUI、MIUI）不会把调用方 Activity 纠正回来，于是卡在竖屏；
+- **修复**：
+  - `AndroidManifest.xml`：`MainActivity` 增加 `android:screenOrientation="fullUser"`（明确支持四向，尊重用户锁定）与 `android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|density|fontScale|fontWeightAdjustment"`（旋转不再销毁重建 Activity）；
+  - 新增 `ui/util/ScreenOrientationGuard`：启动相机前把方向锁在当前方向（`SCREEN_ORIENTATION_LOCKED`），`MainActivity.onResume` 回到前台时恢复 `FULL_USER`——系统按「顶层 Activity 的方向要求优先」裁决，相机退出后会自动转回我们锁定的方向；
+  - 三处拍照入口（`CheckInDialog`、`MealScreen`、`AssistantScreen`）在 `takePicture.launch()` 前调用 `armBeforeExternalCapture()`；
+  - 待回写的临时文件路径从 `remember` 改为 `rememberSaveable`（存路径字符串），旋转或进程被回收后重建也不会丢照片。
+
+### 2. AI 助手旋转后布局错乱，必须重新进入才恢复
+
+- **根因**：旋转会销毁重建 Activity（未声明 `configChanges`），重建期间「正在等相机返回」的临时文件与滚动位置丢失；同时回答正文是 `AndroidView` 里的 Markwon `TextView`，公式按「首次拿到的宽度」拆分，宽度变化后不会重新排版，于是沿用旧宽度拆出的超长公式，表现为内容溢出/错位，只有重新进入（重新创建 composable）才恢复；
+- **修复**：
+  - 上述 `configChanges` 让旋转只触发重组、不重建 Activity；
+  - `MarkdownAnswer` 改为「测到真实宽度才渲染」：用 `Modifier.onSizeChanged` 记录 `TextView` 实测宽度，宽度/内容/配色变化时重新跑一次渲染（`LaunchedEffect` + 抽出的 `renderMarkdown()`），彻底去掉「用屏幕宽度兜底」的旧逻辑；
+  - 裁剪弹窗 `PhotoCropDialog`：视口尺寸变化（旋转/分屏）时把裁剪框按比例迁移到新坐标系（`scaleRect`），不再是停留在旧位置的错位选框；预览图高度由写死 420dp 改为 `min(420dp, 屏高 × 55%)`，横屏下按钮不再被挤出屏幕；裁剪视口正方形边长按 `min(屏宽, 屏高 × 56%)` 封顶。
+
+### 3. 对话气泡宽度不随平板变宽 + 公式溢出
+
+- **根因**：气泡最大宽度写死 `widthIn(max = 480.dp)`，平板横屏可用宽度 900dp+ 时仍只有 480dp；公式可用宽度 `formulaMaxWidthPx()` 在 `view.width == 0`（首次渲染尚未布局）时用**屏幕宽度**兜底，平板上远大于气泡宽度，等于「不拆公式」→ 超出气泡被裁；
+- **修复**：
+  - 气泡最大宽度改为 `min(可用宽度 × 0.86, 760dp)`（用 `BoxWithConstraints` 取父容器实际可用宽度，比分屏下的屏幕宽度更准）：手机 400dp → 344dp 手感不变，平板横屏 1200dp → 760dp；
+  - 公式宽度只认 `TextView` 实测宽度（减去 24dp 留白），拿不到宽度就先不渲染（最多晚一帧），不会再按屏幕宽度错误拆分。
+
+## v1.0.4 (2026-09-07)
+
+- 更新安装完成后自动清理旧安装包（只保留最新一个），释放存储空间；
+- 百度网盘下载备份包显示实时进度条（百分比 + 已下载/总大小），下载慢时不再是「无响应」的空白等待。
+
+## v1.0.3 (2026-09-07)
+
+- 下载器修复：APK 保存目录与查找目录统一为 `files/Download/apk/`，并用 `COLUMN_LOCAL_URI` 精确定位下载结果 + 双目录兜底扫描，修复鸿蒙平板「下载完成后未找到 APK 文件」；
+- 更新弹窗修复：版本号/大小/更新日志不再显示成 `${...}` 原始占位符；
+- 下载失败可感知：DownloadManager 失败不广播，改为 5 秒轮询，失败后自动切换加速镜像重试（最多 3 源）。
+
 ## v1.0.2 (2026-09-07) · 英语背诵复习（SM-2 间隔重复）
 
 - **背诵页**：墨墨式翻转自评卡片——正面只显示英文，默想释义后点卡片翻面，再选「认识 / 模糊 / 忘记」；顶部显示第几张与进度条，结束页汇总本轮三档数量；

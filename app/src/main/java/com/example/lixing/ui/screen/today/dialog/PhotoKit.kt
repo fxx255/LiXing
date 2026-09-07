@@ -21,9 +21,11 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
@@ -56,6 +58,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
@@ -245,13 +249,15 @@ private fun PhotoPreviewDialog(
                 }
 
                 if (bitmap != null) {
+                    // 高度不再写死 420dp：平板横屏可用高度只有 400dp 出头，
+                    // 写死会把底部按钮挤出屏幕。取「屏高的 55%」和 420dp 里更小的那个。
                     Image(
                         bitmap = bitmap.asImageBitmap(),
                         contentDescription = null,
                         contentScale = ContentScale.Fit,
                         modifier = Modifier
                             .fillMaxWidth()
-                            .height(420.dp)
+                            .heightIn(max = previewMaxHeight())
                             .clip(LiXingRadius.Card)
                             .background(MaterialTheme.colorScheme.surfaceContainerLow),
                     )
@@ -289,6 +295,20 @@ private fun PhotoPreviewDialog(
             }
         }
     }
+}
+
+/** 预览图最大高度：竖屏最多 420dp，横屏/平板按屏高比例收缩，保证下方按钮不被挤出屏幕。 */
+@Composable
+private fun previewMaxHeight(): Dp {
+    val configuration = LocalConfiguration.current
+    return minOf(420.dp, configuration.screenHeightDp.dp * 0.55f)
+}
+
+/** 裁剪视口（正方形）的最大边长：横屏时按屏高比例限制，否则正方形会高出屏幕。 */
+@Composable
+private fun cropViewportMaxSide(): Dp {
+    val configuration = LocalConfiguration.current
+    return minOf(configuration.screenWidthDp.dp, configuration.screenHeightDp.dp * 0.56f)
 }
 
 private data class CropRatio(val label: String, val value: Float?)
@@ -332,6 +352,7 @@ fun PhotoCropDialog(
     var selectedRatio by remember { mutableStateOf(cropRatios[0]) }
     var saving by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
+    val viewportMaxSide = cropViewportMaxSide()
 
     Dialog(
         onDismissRequest = { if (!saving) onDismiss() },
@@ -363,18 +384,26 @@ fun PhotoCropDialog(
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
+                            // 平板横屏下正方形视口不能跟着屏宽走（会高出屏幕），按屏高比例封顶。
+                            .widthIn(max = viewportMaxSide)
                             .aspectRatio(1f)
                             .clip(LiXingRadius.Card)
                             .background(Color.Black)
                             .onSizeChanged { size ->
+                                if (size == IntSize.Zero || size == viewport) return@onSizeChanged
+                                val previous = viewport
                                 viewport = size
                                 imageOffset = constrainImageOffset(imageOffset, preview, size, zoom)
-                                if (cropRect == Rect.Zero) {
-                                    cropRect = centeredCropRect(
+                                // 视口尺寸变了（旋转 / 分屏）：把已有选框按比例迁移到新坐标系，
+                                // 否则选框还停留在旧尺寸的位置上，看起来就是「裁剪框错位」。
+                                cropRect = if (cropRect == Rect.Zero || previous == IntSize.Zero) {
+                                    centeredCropRect(
                                         viewport = size,
                                         ratio = selectedRatio.value,
                                         freeRatio = preview.width.toFloat() / preview.height,
                                     )
+                                } else {
+                                    scaleRect(cropRect, previous, size)
                                 }
                             }
                             .pointerInput(preview, viewport) {
@@ -559,6 +588,19 @@ fun PhotoCropDialog(
             }
         }
     }
+}
+
+/** 视口尺寸变化时把选框按比例迁移到新坐标系（旋转、分屏后不再错位）。 */
+internal fun scaleRect(rect: Rect, from: IntSize, to: IntSize): Rect {
+    if (from.width <= 0 || from.height <= 0 || to.width <= 0 || to.height <= 0) return rect
+    val scaleX = to.width.toFloat() / from.width
+    val scaleY = to.height.toFloat() / from.height
+    return Rect(
+        left = rect.left * scaleX,
+        top = rect.top * scaleY,
+        right = rect.right * scaleX,
+        bottom = rect.bottom * scaleY,
+    )
 }
 
 internal fun minimumCropZoom(previewSize: IntSize, viewport: IntSize): Float {
