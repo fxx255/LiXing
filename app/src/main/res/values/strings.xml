@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">砺行</string>
+
+    <!-- 底部导航 -->
+    <string name="nav_today">今日</string>
+    <string name="nav_plan">计划</string>
+    <string name="nav_focus">专注</string>
+    <string name="nav_stats">统计</string>
+    <string name="nav_mine">我的</string>
+
+    <!-- 通知渠道 -->
+    <string name="channel_slot_name">时段提醒</string>
+    <string name="channel_slot_desc">每个学习时段开始前提醒你要做的事</string>
+    <string name="channel_urge_name">催办提醒</string>
+    <string name="channel_urge_desc">时段即将结束但仍有任务未完成时提醒</string>
+    <string name="channel_summary_name">成就与总结</string>
+    <string name="channel_summary_desc">成就解锁、每日复盘与周报通知</string>
+    <string name="channel_focus_name">专注计时</string>
+    <string name="channel_focus_desc">专注计时进行中的常驻通知</string>
+    <string name="channel_assistant_name">AI 回答生成</string>
+    <string name="channel_assistant_desc">AI 学习助手生成回答期间的保活通知，防止熄屏或切后台时被中断</string>
+    <string name="assistant_keepalive_title">AI 学习助手</string>
+    <string name="assistant_keepalive_text">正在思考与生成回答，请保持应用在前台以获得最佳体验</string>
+
+    <!-- 通用 -->
+    <string name="action_check_in">立即打卡</string>
+    <string name="action_confirm">确定</string>
+    <string name="action_cancel">取消</string>
+    <string name="privacy_notice">所有数据仅存储在本机，应用不申请网络权限，不会上传任何内容。</string>
+</resources>

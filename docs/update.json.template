@@ -1,0 +1,10 @@
+{
+  "versionCode": 2,
+  "versionName": "1.0.1",
+  "apkUrl": "https://github.com/<OWNER>/<REPO>/releases/download/v1.0.1/LiXing-v1.0.1-release-arm64-284M.apk",
+  "sizeBytes": 296797253,
+  "sha256": "199A9FAE9C0F104D196717BEC34DDA84E2D87BB0519A9A95FDCB526BCCB728CB",
+  "changelog": "1. 改为 release 构建 + R8 资源压缩，APK 由 410MB 减到 284MB（OCR 模型 212MB 原样保留，省出的是 x86_64 模拟器库与无用代码）\n2. 启用应用内自动更新：启动时静默检查，弹窗后用系统 DownloadManager 下载，SHA-256 校验后提示安装\n3. 包名统一为 com.example.lixing.debug，与历史安装版本一致，可直接覆盖升级",
+  "minSdk": 26,
+  "force": false
+}

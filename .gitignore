@@ -1,0 +1,28 @@
+# ---- Gradle 构建 ----
+.gradle/
+.gradle-local/
+build/
+app/build/
+.kotlin/
+
+# ---- IDE ----
+.idea/
+*.iml
+captures/
+
+# ---- 本机配置（含机器特定路径）----
+local.properties
+
+# ---- 构建产物与大文件 ----
+*.apk
+*.aab
+docs/mappings/
+
+# ---- 个人文件与工作数据 ----
+初试经验分享.docx
+.workbuddy/
+
+# ---- 日志与杂项 ----
+*.log
+.DS_Store
+Thumbs.db

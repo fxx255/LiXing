@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- FileProvider 可见路径：
+     - checkin_photos：打卡照片（写入目录）
+     - cache：临时缓存
+     - apk：DownloadManager 拉到 getExternalFilesDir("Download/apk/") 后的安装包，用于更新对话框安装 Intent
+-->
+<paths>
+    <external-files-path name="checkin_photos" path="Pictures/" />
+    <external-files-path name="apk" path="Download/apk/" />
+    <cache-path name="cache" path="/" />
+</paths>

@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<full-backup-content>
+    <include domain="database" path="." />
+    <include domain="sharedpref" path="." />
+    <exclude domain="sharedpref" path="baidu_credentials_encrypted.xml" />
+    <!-- 每台设备的同步凭据是各自的，跟着备份跑到另一台会让两台设备互相覆盖对方的同步文件 -->
+    <exclude domain="sharedpref" path="webdav_credentials_encrypted.xml" />
+    <!-- file domain 没有被 include，"backup" 子目录天然不会进备份，无需 exclude -->
+</full-backup-content>

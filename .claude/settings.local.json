@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "WebSearch",
+      "Bash(cd /tmp)",
+      "Bash(python3 -c ' *)",
+      "Bash(python3 /c/Users/17611/AppData/Local/Temp/dedupe.py)",
+      "Read(//tmp/**)",
+      "Bash(cygpath -w /tmp)",
+      "Bash(python3 *)"
+    ]
+  }
+}

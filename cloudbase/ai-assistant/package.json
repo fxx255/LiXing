@@ -1,0 +1,9 @@
+{
+  "name": "lixing-ai-assistant-cloudbase",
+  "version": "1.0.0",
+  "private": true,
+  "main": "index.js",
+  "dependencies": {
+    "@cloudbase/node-sdk": "latest"
+  }
+}

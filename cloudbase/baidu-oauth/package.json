@@ -1,0 +1,9 @@
+{
+  "name": "lixing-baidu-oauth-cloudbase",
+  "version": "1.0.1",
+  "private": true,
+  "main": "index.js",
+  "dependencies": {
+    "@cloudbase/node-sdk": "latest"
+  }
+}
