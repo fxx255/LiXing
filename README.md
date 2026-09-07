@@ -20,24 +20,6 @@
 - Gradle 8.14.3 / AGP 8.13.2 / Kotlin 2.2.21 / Compose + Material 3
 - **调试签名用项目内密钥库** `app/debug.keystore`（口令 android / androiddebugkey）：用户主目录的 debug 密钥库曾被清理工具删掉重建导致覆盖安装失败，现已固定进仓库，不要删除或替换它，否则已装设备无法覆盖更新
 
-## 真机测试数据保护（重要）
-
-真机测试不得把日常使用的 `com.example.lixing.debug` 当作可随意重装的测试环境。  
-Android Gradle Plugin 的 `connectedDebugAndroidTest` 会安装测试 APK；在部分 MIUI / Android 设备上，  
-测试安装被取消或失败时，测试框架仍可能先卸载/重建被测包，从而清空应用私有数据库、设置和本机照片。
-
-执行任何真机测试前必须遵守：
-
-1. 在设置页生成并导出一份 `.lixingbackup`，确认文件实际存在且能看到 `manifest.json`；
-2. 优先使用独立的测试 applicationId / 独立设备，不要对日常包运行 `connectedDebugAndroidTest`；
-3. 只做 APK 覆盖安装时使用 `adb install -r -d`，并先核对 APK 的生成时间、大小和 SHA-256；
-4. 测试结束后检查数据库版本、计划、打卡记录和照片是否仍在，再把 APK 交给用户；
-5. 任何恢复操作前先创建 `before_restore` 恢复点，禁止把空数据库上传为云端最新版本。
-
-本项目曾因未遵守上述隔离规则导致一次真机调试数据被清除；后续开发与发布必须把“备份已验证 + 测试包隔离”作为前置条件。
-
-当前日常设备（MIUI）会被系统直接拒绝安装 `androidTest` 测试包（`INSTALL_FAILED_USER_RESTRICTED`），因此 `connectedDebugAndroidTest` 实际无法在日常包上运行；真机模型回归改为“主机端单元测试 + 仅 debug 构建包含的一次性诊断入口”（读图并写出识别结果，用完即移除，正式包不含），正式包的真机验证只做 `adb install -r -d` 覆盖安装。
-
 ## 功能
 
 | 模块    | 说明                                                                                                                                                |
@@ -77,6 +59,15 @@ Android Gradle Plugin 的 `connectedDebugAndroidTest` 会安装测试 APK；在�
 - 「上传当前完整版本」先生成 `.lixingbackup`，再分片上传至百度网盘 `/apps/砺行` 应用目录；
 - 网盘版本下载后仍需用户确认，恢复前继续自动创建 `before_restore` 本机恢复点；
 - 当前采取手动上传、手动选择版本恢复，不做后台静默覆盖，避免两台设备同时修改时丢失数据。
+
+#### 开源后别人能拿到我的数据吗？
+
+**不能。** 开源的只有代码，不含任何用户数据：
+
+- 网盘版本包只存在于**授权者本人**的百度账号里（`/apps/砺行` 应用目录）。任何人下载本项目重新安装，OAuth 授权的只会是**他自己**的百度网盘，与你的账号无关；
+- 你的 access/refresh token 由 Android Keystore 硬件加密保存在你自己的手机上，不进备份、不进仓库、不上云；换设备需重新授权一次；
+- 本仓库经审计不含任何打卡数据、密钥或个人文件（`app/debug.keystore` 为口令公开的调试密钥，见「开源许可」）；
+- 需要你自己注意的唯一一点：`.lixingbackup` 版本包内容**未加密**，不要把它导出到公开分享目录或发给别人。
 
 ### 当前 CloudBase 部署
 
