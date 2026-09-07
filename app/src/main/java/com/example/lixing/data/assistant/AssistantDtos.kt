@@ -637,20 +637,40 @@ private fun convertAlignedEnvironments(markdown: String): String {
         val envMatch = KNOWN_MATH_ENV_PATTERN.find(line)
         if (envMatch != null) {
             val envName = envMatch.groupValues[1]
+            val beginRe = Regex("""\\begin\{${Regex.escape(envName)}\}""")
+            val endRe = Regex("""\\end\{${Regex.escape(envName)}\}""")
+            // 先数起始行自身：模型最常把 cases/matrix 等写成「\begin{...}...\end{...}」单行，
+            // 之前只往后续行找闭合，单行环境永远匹配不到 → 不补 $$ → 整段落成 Markdown 纯文本
+            // （表现为 \\ 被 Markdown 吃成 \ 、& 原样露出）。
+            var depth = beginRe.findAll(line).count() - endRe.findAll(line).count()
+            if (depth == 0) {
+                // 单行环境已在本行闭合。行内任一侧已带 $$ 的（已在公式里）原样放行，
+                // 交给 wrapLongFormulas 按宽度拆分；其余整行补 $$ 包裹。
+                val alreadyInMath = line.substring(0, envMatch.range.first).contains("$$") ||
+                    line.substring(envMatch.range.last + 1).contains("$$")
+                if (alreadyInMath) {
+                    out += line
+                } else {
+                    out += "$$" + line.trim() + "$$"
+                }
+                i++
+                continue
+            }
             val startIdx = i
-            var depth = 1
             var j = i + 1
             while (j < lines.size && depth > 0) {
                 val l = lines[j]
-                depth += Regex("""\\begin\{${Regex.escape(envName)}\}""").findAll(l).count()
-                depth -= Regex("""\\end\{${Regex.escape(envName)}\}""").findAll(l).count()
+                depth += beginRe.findAll(l).count()
+                depth -= endRe.findAll(l).count()
                 if (depth == 0) break
                 j++
             }
             if (j < lines.size && depth == 0) {
                 val endIdx = j
-                val alreadyWrapped = startIdx > 0 && lines[startIdx - 1].trim() == "$$" &&
-                    endIdx + 1 < lines.size && lines[endIdx + 1].trim() == "$$"
+                // 上一行以 $$ 开头（含「$$ 内容」的带内容开头）即视为已在显示块内，
+                // 不再补 $$，否则会出现两对 $$ 互相错配。
+                val alreadyWrapped = startIdx > 0 && lines[startIdx - 1].trimStart().startsWith("$$") &&
+                    endIdx + 1 < lines.size && lines[endIdx + 1].trimEnd().endsWith("$$")
                 val block = (startIdx..endIdx).joinToString("\n") { lines[it] }
                 val transformed = transformEnvironment(block, envName)
                 if (!alreadyWrapped) {

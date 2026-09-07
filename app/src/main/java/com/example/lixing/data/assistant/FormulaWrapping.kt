@@ -22,6 +22,7 @@ internal fun wrapLongFormulas(
             trimmed.startsWith("~~~") -> "~~~"
             else -> null
         }
+        val t = line.trim()
         when {
             lineFence != null -> {
                 fence = if (fence == null) lineFence else if (fence == lineFence) null else fence
@@ -29,16 +30,39 @@ internal fun wrapLongFormulas(
             }
             fence != null -> out += line
             inDisplay -> {
-                if (line.trim() == DISPLAY_DELIMITER) {
-                    inDisplay = false
-                    out += splitFormulaBlocks(block.toString().trim(), maxWidthPx, measure)
-                    block.setLength(0)
-                } else {
-                    if (block.isNotEmpty()) block.append('\n')
-                    block.append(line)
+                when {
+                    // 纯 $$ 行：常规关闭
+                    t == DISPLAY_DELIMITER -> {
+                        inDisplay = false
+                        out += splitFormulaBlocks(block.toString().trim(), maxWidthPx, measure)
+                        block.setLength(0)
+                    }
+                    // 「内容 $$」行：内容并入块后再关闭（模型偶尔把闭合符写在公式尾部）。
+                    // 行内必须只有这一个 $$，否则可能是「…$$ … $$」的行内对，交回普通文本处理。
+                    t.endsWith(DISPLAY_DELIMITER) &&
+                        t.indexOf(DISPLAY_DELIMITER) == t.length - DISPLAY_DELIMITER.length -> {
+                        if (t.length > DISPLAY_DELIMITER.length) {
+                            block.append('\n').append(t.substring(0, t.length - DISPLAY_DELIMITER.length))
+                        }
+                        inDisplay = false
+                        out += splitFormulaBlocks(block.toString().trim(), maxWidthPx, measure)
+                        block.setLength(0)
+                    }
+                    else -> {
+                        if (block.isNotEmpty()) block.append('\n')
+                        block.append(line)
+                    }
                 }
             }
-            line.trim() == DISPLAY_DELIMITER -> inDisplay = true
+            t == DISPLAY_DELIMITER -> inDisplay = true
+            // 「$$ 内容」行（如 "$$y(n) ="）：开启显示块，内容并入块。
+            // 之前这种写法开不了显示块，后续行的裸环境会整段落成纯文本。
+            // 仅当行内再无第二个 $$ 时成立；「$$…$$ 文字」这类行内公式仍走 wrapInlineLine。
+            t.startsWith(DISPLAY_DELIMITER) && t.indexOf(DISPLAY_DELIMITER, 2) < 0 -> {
+                inDisplay = true
+                val content = t.substring(DISPLAY_DELIMITER.length).trim()
+                if (content.isNotEmpty()) block.append(content)
+            }
             else -> out += wrapInlineLine(line, maxWidthPx, measure)
         }
     }

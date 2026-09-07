@@ -174,4 +174,52 @@ class FormulaWrappingTest {
                 piece.split("\\{").size - 1, piece.split("\\}").size - 1)
         }
     }
+
+    @Test
+    fun `bare single-line cases environment gets wrapped by sanitizer`() {
+        // 真机截图（平板横屏）的第五种坏例：模型把 cases 写成不带 $$ 的单行裸环境，
+        // convertAlignedEnvironments 以前只往后续行找闭合，单行永远匹配不到 → 整段落成
+        // Markdown 纯文本（\\ 被 Markdown 吃成 \、& 原样露出）。
+        val markdown = "当 \$a \\ne 1\$ 时：\n" +
+            "\\begin{cases} 0, & n < 0 \\\\ \\dfrac{1-a^{n+1}}{1-a}, & 0 \\le n < N \\end{cases}"
+        val out = sanitizeAssistantLatex(markdown)
+        val displayCount = out.split(d).size - 1
+        assertTrue("单行裸环境应被补上 $$ 包裹：$out", displayCount >= 2)
+        assertTrue("cases 内容必须仍在：$out", out.contains("\\begin{cases}"))
+    }
+
+    @Test
+    fun `single-line environment already inside display is left alone`() {
+        // 已经包在 $$…$$ 里的单行环境不能再补一层，否则 $$ 错配
+        val markdown = "${d}y(n) = \\begin{cases} a & b \\\\ c & d \\end{cases}${d}"
+        assertEquals(markdown, sanitizeAssistantLatex(markdown))
+    }
+
+    @Test
+    fun `display opener with trailing content opens the block`() {
+        // "$$y(n) =" 形式的开头（$$ 后带内容）必须能开启显示块，
+        // 否则后续行的裸环境整段落成纯文本。
+        val markdown = "${d}y(n) =\n\\begin{cases} a & b \\\\ c & d \\end{cases}\n${d}"
+        val wrapped = wrapLongFormulas(markdown, 10_000, measure)
+        // 旧行为：$$y(n) = 整行留成纯文本、环境行也是裸文本
+        assertFalse("带内容开头不应再残留为纯文本：$wrapped", wrapped.contains("${d}y(n) ="))
+        assertTrue("环境内容应保留：$wrapped", wrapped.contains("\\begin{cases}"))
+        assertTrue("应进入显示块（成对 $$）：$wrapped", wrapped.split("\n").count { it == d } >= 2)
+    }
+
+    @Test
+    fun `display closer with leading content closes the block`() {
+        val markdown = "${d}\nf(x)=1\nx^2+1${d}"
+        val wrapped = wrapLongFormulas(markdown, 10_000, measure)
+        val lines = wrapped.split("\n")
+        assertTrue("应进入显示块（成对 $$）：$wrapped", lines.count { it == d } >= 2)
+        assertTrue("内容应保留：$wrapped", wrapped.contains("x^2+1"))
+        assertTrue("不应残留「内容+$$」的行：$wrapped", lines.none { it.endsWith(d) && it.length > 2 })
+    }
+
+    @Test
+    fun `single-line inline formula with both delimiters is untouched by opener handling`() {
+        val markdown = "${d}x^2=1${d} 是方程。"
+        assertEquals(markdown, wrapLongFormulas(markdown, 10_000, measure))
+    }
 }
