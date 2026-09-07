@@ -130,6 +130,20 @@ class UpdateDownloader @Inject constructor(
         cleanOldApks()
     }
 
+    /** 清掉所有本地安装包（覆盖安装成功后调用，安装包已无用处）。 */
+    fun cleanAllApks() = cleanOldApks()
+
+    /** 只保留最新下载的一个安装包，其余删除（磁盘占用上限 = 一个 APK）。 */
+    fun keepOnlyLatestApk() {
+        val all = sequenceOf(apkDir, legacyApkDir)
+            .mapNotNull { dir ->
+                dir.listFiles()?.filter { it.isFile && it.name.endsWith(".apk") }?.maxByOrNull { it.lastModified() }
+            }
+            .toList()
+        val latest = all.maxByOrNull { it.lastModified() } ?: return
+        all.filter { it != latest }.forEach { runCatching { it.delete() } }
+    }
+
     /** 清空两个候选目录里的旧 APK。 */
     private fun cleanOldApks() {
         sequenceOf(apkDir, legacyApkDir).forEach { dir ->

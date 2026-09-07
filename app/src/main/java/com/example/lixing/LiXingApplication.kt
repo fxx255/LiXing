@@ -79,6 +79,8 @@ class LiXingApplication : Application(), Configuration.Provider {
         // 应用内更新：启动时静默检查一次（受「仅 Wi-Fi」「每天最多一次」「用户总开关」三重节流）。
         // startSilentCheck 自己内部用独立 Controller scope 启动协程，这里直接调用即可。
         appUpdateController.startSilentCheck(manual = false)
+        // 顺便做安装包卫生：覆盖安装成功后清掉安装包；平时最多保留一个最新的
+        appUpdateController.cleanupAfterInstallIfNeeded()
 
         runMealModelSmokeTestIfRequested()
     }

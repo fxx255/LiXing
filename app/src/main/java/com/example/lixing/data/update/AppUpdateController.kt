@@ -61,6 +61,31 @@ class AppUpdateController @Inject constructor(
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
+    init {
+        // 启动即做一次安装包卫生：刚完成覆盖安装 → 全清；平时 → 最多留一个最新包
+        cleanupAfterInstallIfNeeded()
+    }
+
+    /**
+     * 安装包清理逻辑：
+     * - 启动时发现本机版本号比记录的大 = 刚完成一次覆盖安装 → 安装包已无用，全部清掉；
+     * - 否则最多保留最新下载的一个安装包（磁盘占用上限 ≈ 一个 APK）。
+     */
+    fun cleanupAfterInstallIfNeeded() {
+        scope.launch {
+            runCatching {
+                val recorded = prefsRepository.updateLastSeenVersionCode()
+                val current = BuildConfig.VERSION_CODE
+                if (current > recorded) {
+                    withContext(Dispatchers.IO) { downloader.cleanAllApks() }
+                    prefsRepository.setUpdateLastSeenVersionCode(current)
+                } else {
+                    withContext(Dispatchers.IO) { downloader.keepOnlyLatestApk() }
+                }
+            }
+        }
+    }
+
     private val _state = MutableStateFlow<State>(State.Idle)
     val state: StateFlow<State> = _state.asStateFlow()
 

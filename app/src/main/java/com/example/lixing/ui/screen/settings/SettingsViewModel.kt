@@ -83,6 +83,9 @@ class SettingsViewModel @Inject constructor(
 
     val baiduState = baiduNetdiskRepository.state
     val cloudBackups = baiduNetdiskRepository.cloudBackups
+
+    /** 网盘版本包下载进度（下载很慢，需要给用户看得见的反馈）。 */
+    val baiduDownloadProgress = baiduNetdiskRepository.downloadProgress
     val baiduAuthorizationUrl: String get() = baiduNetdiskRepository.authorizationUrl
 
     val syncState = syncRepository.state

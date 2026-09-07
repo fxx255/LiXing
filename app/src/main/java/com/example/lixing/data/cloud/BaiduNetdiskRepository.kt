@@ -58,6 +58,10 @@ class BaiduNetdiskRepository @Inject internal constructor(
     private val _cloudBackups = MutableStateFlow<List<CloudBackup>>(emptyList())
     val cloudBackups: StateFlow<List<CloudBackup>> = _cloudBackups.asStateFlow()
 
+    /** 网盘版本包下载进度（0～1）；active=false 表示当前没有正在进行的下载。 */
+    private val _downloadProgress = MutableStateFlow(BaiduDownloadProgress())
+    val downloadProgress: StateFlow<BaiduDownloadProgress> = _downloadProgress.asStateFlow()
+
     val authorizationUrl: String
         get() = "${BuildConfig.BAIDU_OAUTH_BASE_URL}/oauth/baidu/start"
 
@@ -145,14 +149,21 @@ class BaiduNetdiskRepository @Inject internal constructor(
     suspend fun downloadBackup(backup: CloudBackup): File = withContext(io) {
         require(backup.fsId > 0) { "网盘文件标识无效" }
         _state.update { it.copy(busy = true, message = "正在下载 ${backup.fileName}…") }
+        _downloadProgress.value = BaiduDownloadProgress(
+            active = true,
+            fileName = backup.fileName,
+            totalBytes = backup.sizeBytes,
+        )
         try {
             val credentials = validCredentials()
             val target = downloadFile(backup, credentials)
+            _downloadProgress.update { it.copy(active = false, downloadedBytes = it.totalBytes) }
             _state.update {
                 it.copy(connected = true, busy = false, message = "下载完成，正在校验备份…")
             }
             target
         } catch (e: Exception) {
+            _downloadProgress.update { it.copy(active = false) }
             operationFailed("下载失败", e)
             throw e
         }
@@ -334,6 +345,7 @@ class BaiduNetdiskRepository @Inject internal constructor(
             val declaredSize = response.body?.contentLength() ?: -1
             require(declaredSize <= MAX_BACKUP_BYTES) { "网盘备份过大" }
             val input = response.body?.byteStream() ?: error("百度没有返回文件内容")
+            var lastReported = 0L
             try {
                 target.outputStream().buffered().use { output ->
                     val buffer = ByteArray(64 * 1024)
@@ -344,6 +356,13 @@ class BaiduNetdiskRepository @Inject internal constructor(
                         total += count
                         require(total <= MAX_BACKUP_BYTES) { "网盘备份过大" }
                         output.write(buffer, 0, count)
+                        // 每 256KB 上报一次进度（StateFlow 自带去抖，这里节流减少无效更新）
+                        if (total - lastReported >= 256 * 1024) {
+                            lastReported = total
+                            _downloadProgress.update {
+                                it.copy(downloadedBytes = total, totalBytes = declaredSize)
+                            }
+                        }
                     }
                 }
             } catch (e: Exception) {

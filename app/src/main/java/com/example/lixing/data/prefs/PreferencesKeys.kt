@@ -46,6 +46,8 @@ internal object PreferencesKeys {
 val ENGLISH_DAILY_NEW_LIMIT = intPreferencesKey("english_daily_new_limit")
 
 // ---------- 应用内更新 ----------
+/** 上一次记录到的本机版本号；启动时发现变大了 = 刚完成一次覆盖安装 → 清理安装包。 */
+val UPDATE_LAST_SEEN_VERSION_CODE = intPreferencesKey("update_last_seen_version_code")
     /** 是否启用启动时自动检查版本。默认开启（用户随时可在设置关掉）。 */
     val UPDATE_AUTO_ENABLED = booleanPreferencesKey("update_auto_enabled")
     /** 自动检查是否仅限 Wi-Fi 等非计费网络（手动检查不受限）。 */

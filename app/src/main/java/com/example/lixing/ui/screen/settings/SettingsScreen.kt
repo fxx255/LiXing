@@ -33,6 +33,7 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -428,6 +429,26 @@ private fun BaiduNetdiskSection(viewModel: SettingsViewModel) {
 
             if (cloudBackups.isNotEmpty()) {
                 Text("网盘版本", style = MaterialTheme.typography.labelLarge)
+
+                // 下载进度（网盘下载很慢，必须给看得见的反馈）
+                val progress by viewModel.baiduDownloadProgress.collectAsStateWithLifecycle()
+                if (progress.active) {
+                    Column(Modifier.fillMaxWidth()) {
+                        Text(
+                            "正在下载 ${progress.fileName}（${formatFileSize(progress.downloadedBytes)}" +
+                                if (progress.totalBytes > 0) {
+                                    " / ${formatFileSize(progress.totalBytes)}${progress.percentText}"
+                                } else "",
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                        Spacer(Modifier.height(4.dp))
+                        LinearProgressIndicator(
+                            progress = { progress.fraction },
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    }
+                }
+
                 cloudBackups.take(10).forEach { backup ->
                     Row(
                         modifier = Modifier.fillMaxWidth(),

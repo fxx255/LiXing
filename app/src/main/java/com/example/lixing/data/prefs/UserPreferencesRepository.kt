@@ -190,6 +190,13 @@ class UserPreferencesRepository @Inject constructor(
     suspend fun markUpdateChecked(atMillis: Long) =
         edit { it[PreferencesKeys.UPDATE_LAST_CHECK_AT] = atMillis }
 
+    /** 上次记录到的本机版本号（用于判断「刚完成一次覆盖安装」）。 */
+    suspend fun updateLastSeenVersionCode(): Int =
+        context.dataStore.data.first()[PreferencesKeys.UPDATE_LAST_SEEN_VERSION_CODE] ?: 0
+
+    suspend fun setUpdateLastSeenVersionCode(code: Int) =
+        edit { it[PreferencesKeys.UPDATE_LAST_SEEN_VERSION_CODE] = code }
+
     // ---------- 引导状态 ----------
 
     suspend fun setOnboardingDone(done: Boolean) =
