@@ -180,7 +180,7 @@ class AssistantModelClient @Inject constructor(
             val parsed = guardMissingEnglishActions(
                 guardMissingPlanActions(AssistantResponseParser.parse(answer), userPrompt),
                 userPrompt,
-            )
+            ).copy(truncated = output.finishReason == "length")
             val distinctCitations = output.citations.distinctBy(Citation::url)
             if (distinctCitations.isEmpty()) {
                 parsed

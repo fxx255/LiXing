@@ -75,6 +75,7 @@ class UserPreferencesRepository @Inject constructor(
             aiModel = p[PreferencesKeys.AI_MODEL] ?: "",
             aiVisionEnabled = p[PreferencesKeys.AI_VISION_ENABLED] ?: false,
             aiWebSearchEnabled = p[PreferencesKeys.AI_WEB_SEARCH_ENABLED] ?: false,
+            assistantAutoContinue = p[PreferencesKeys.ASSISTANT_AUTO_CONTINUE] ?: 4,
         )
     }
 
@@ -245,6 +246,10 @@ class UserPreferencesRepository @Inject constructor(
     suspend fun setAiWebSearchEnabled(enabled: Boolean) =
         edit { it[PreferencesKeys.AI_WEB_SEARCH_ENABLED] = enabled }
 
+    /** 长回答自动续写的保护上限（0 ~ 8 轮；正常推导几轮内就会自然写完）。 */
+    suspend fun setAssistantAutoContinue(count: Int) =
+        edit { it[PreferencesKeys.ASSISTANT_AUTO_CONTINUE] = count.coerceIn(0, 8) }
+
     /** 用备份中的完整设置原子替换当前设置。敏感的墨墨 Token 不进入备份。 */
     suspend fun replaceAll(p: UserPreferences) {
         context.dataStore.edit { out ->
@@ -289,6 +294,7 @@ class UserPreferencesRepository @Inject constructor(
             out[PreferencesKeys.AI_MODEL] = p.aiModel
             out[PreferencesKeys.AI_VISION_ENABLED] = p.aiVisionEnabled
             out[PreferencesKeys.AI_WEB_SEARCH_ENABLED] = p.aiWebSearchEnabled
+            out[PreferencesKeys.ASSISTANT_AUTO_CONTINUE] = p.assistantAutoContinue.coerceIn(0, 8)
             if (localMaimemoToken != null) out[PreferencesKeys.MAIMEMO_TOKEN] = localMaimemoToken
             if (localMaimemoLastSyncAt != null) {
                 out[PreferencesKeys.MAIMEMO_LAST_SYNC_AT] = localMaimemoLastSyncAt

@@ -940,6 +940,15 @@ private fun AiAssistantSection(viewModel: SettingsViewModel, prefs: com.example.
                 checked = prefs.aiWebSearchEnabled,
                 onCheckedChange = viewModel::setAiWebSearchEnabled,
             )
+            SliderRow(
+                label = "长回答自动续写",
+                value = if (prefs.assistantAutoContinue == 0) "关闭" else "最多 ${prefs.assistantAutoContinue} 段",
+                subtitle = "回答撞到模型输出上限时自动接着写；正常几段内会写完，这里只是保护上限",
+                sliderValue = prefs.assistantAutoContinue.toFloat(),
+                range = 0f..8f,
+                steps = 7,
+                onChange = { viewModel.setAssistantAutoContinue(it.toInt()) },
+            )
 
             if (profiles.isEmpty()) {
                 Text(

@@ -38,6 +38,8 @@ data class ParsedAssistantReply(
     val actions: List<PlanAction>,
     val warnings: List<String>,
     val englishActions: List<EnglishEntryAction> = emptyList(),
+    /** 模型因达到输出长度上限（finish_reason=length）被截断。 */
+    val truncated: Boolean = false,
 )
 
 /**

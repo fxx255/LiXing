@@ -98,6 +98,8 @@ data class UserPreferences(
     val aiVisionEnabled: Boolean = false,
     /** 是否启用联网搜索（DeepSeek 内置）。默认关闭。 */
     val aiWebSearchEnabled: Boolean = false,
+    /** 长回答自动续写的保护上限（轮数）；0 表示不自动续写。正常几轮内会自然写完。 */
+    val assistantAutoContinue: Int = 4,
 
     /** 是否完成首次引导。false 时启动进引导页。 */
     val onboardingDone: Boolean = false,

@@ -403,6 +403,11 @@ class SettingsViewModel @Inject constructor(
         prefsRepository.setAiWebSearchEnabled(enabled)
     }
 
+    /** 长回答自动续写轮数（0 = 关闭）。 */
+    fun setAssistantAutoContinue(count: Int) = viewModelScope.launch {
+        prefsRepository.setAssistantAutoContinue(count)
+    }
+
     private val _questionVisionProfileId = MutableStateFlow<String?>(null)
     val questionVisionProfileId: StateFlow<String?> = _questionVisionProfileId.asStateFlow()
 

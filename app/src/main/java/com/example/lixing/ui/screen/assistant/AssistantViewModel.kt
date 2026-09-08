@@ -8,6 +8,7 @@ import com.example.lixing.data.assistant.AssistantContextBuilder
 import com.example.lixing.data.assistant.AssistantImagePrep
 import com.example.lixing.data.assistant.AssistantModelClient
 import com.example.lixing.data.assistant.AssistantModelException
+import com.example.lixing.data.assistant.ParsedAssistantReply
 import com.example.lixing.data.assistant.AssistantStreamEvent
 import com.example.lixing.data.assistant.LocalTextRecognizer
 import com.example.lixing.data.assistant.OcrProgress
@@ -322,42 +323,22 @@ class AssistantViewModel @Inject constructor(
                     if ((auto - manual).isNotEmpty()) "$names（含模型自动选择）" else names
                 }
                 // 只带最近 10 轮对话，控制费用与隐私面。
-                val history = _state.value.messages.takeLast(10)
-                val reply = modelClient.chatStreaming(
-                    history,
-                    context,
-                    emptyList(),
-                    webSearchEnabled,
-                ) { event ->
-                    when (event) {
-                        is AssistantStreamEvent.ReasoningDelta -> _state.update {
-                            it.copy(activeReasoning = appendReasoningForDisplay(it.activeReasoning, event.text))
-                        }
-                        is AssistantStreamEvent.AnswerDelta -> _state.update {
-                            it.copy(activeAnswerStarted = true)
-                        }
+                runChatTurn(
+                    conversationId = conversationId,
+                    context = context,
+                    imageBase64s = emptyList(),
+                    webSearchEnabled = webSearchEnabled,
+                    today = today,
+                ).let { lastReply ->
+                    _state.update { state ->
+                        state.copy(
+                            busy = false,
+                            activeReasoning = "",
+                            activeAnswerStarted = false,
+                            lastContextNote = contextNote,
+                            error = lastReply?.warnings?.joinToString("；")?.takeIf { it.isNotEmpty() },
+                        )
                     }
-                }
-                chatRepository.appendMessage(conversationId, "assistant", reply.reply)
-                val previews = reply.actions.takeIf { it.isNotEmpty() }?.let { buildPreviews(it, today) }
-                val englishPreviews = buildEnglishPreviews(reply.englishActions)
-                _state.update { state ->
-                    // 待确认项只挂到产生它的那条回复下面，不再自动跳到确认页。
-                    val updatedMessages = state.messages + AssistantMessage("assistant", reply.reply)
-                    val ownerIndex = updatedMessages.lastIndex
-                    state.copy(
-                        busy = false,
-                        activeReasoning = "",
-                        activeAnswerStarted = false,
-                        lastContextNote = contextNote,
-                        messages = updatedMessages,
-                        pendingActions = previews ?: state.pendingActions,
-                        pendingActionsOwnerIndex = if (previews != null) ownerIndex else state.pendingActionsOwnerIndex,
-                        planReviewDate = if (previews != null) today else state.planReviewDate,
-                        pendingEnglishActions = englishPreviews ?: state.pendingEnglishActions,
-                        pendingEnglishOwnerIndex = if (englishPreviews != null) ownerIndex else state.pendingEnglishOwnerIndex,
-                        error = reply.warnings.joinToString("；").ifEmpty { null },
-                    )
                 }
             } catch (e: AssistantModelException) {
                 _state.update { it.copy(busy = false, activeReasoning = "", activeAnswerStarted = false, error = e.message) }
@@ -509,6 +490,113 @@ class AssistantViewModel @Inject constructor(
         startOcrPreview(preview.prompt, preview.photoPaths)
     }
 
+    /**
+     * 一轮问答 = 首次请求 + 输出撞长度上限（finish_reason=length）时的自适应续写。
+     *
+     * 没有固定轮数上限：只要模型每轮仍在产出「实打实的长内容」（整段被截断 =
+     * 把 max_tokens 用满了），就继续发「继续」接着写；同时有三道刹车防失控：
+     * 1. 用户设置的保护上限（默认 4 轮，可在设置页调 0~8，0 = 关闭自动续写）；
+     * 2. 单段过短（< 200 字符）说明模型已收尾或在原地打转 → 停止；
+     * 3. 累计输出超过总熔断长度 → 收尾并明示。
+     * 返回最后一段回复（含 warnings，供调用方展示）。
+     */
+    private suspend fun runChatTurn(
+        conversationId: String,
+        context: String,
+        imageBase64s: List<String>,
+        webSearchEnabled: Boolean,
+        today: LocalDate,
+    ): ParsedAssistantReply? {
+        val maxContinuations = prefsRepository.current().assistantAutoContinue.coerceAtLeast(0)
+        val minMeaningfulChars = 200
+        val totalCharFuse = 240_000 // 约 12 万汉字量级的绝对熔断，正常永远到不了
+        var images = imageBase64s
+        var continuation = 0
+        var totalChars = 0
+        var lastReply: ParsedAssistantReply? = null
+        while (true) {
+            val history = _state.value.messages.takeLast(10)
+            val reply = modelClient.chatStreaming(history, context, images, webSearchEnabled) { event ->
+                when (event) {
+                    is AssistantStreamEvent.ReasoningDelta -> _state.update {
+                        it.copy(activeReasoning = appendReasoningForDisplay(it.activeReasoning, event.text))
+                    }
+                    is AssistantStreamEvent.AnswerDelta -> _state.update { it.copy(activeAnswerStarted = true) }
+                }
+            }
+            lastReply = reply
+            images = emptyList() // 续写轮不再带图：首轮图片内容已在对话历史里
+            totalChars += reply.reply.length
+
+            val hitLimit = reply.truncated
+            val producedSomething = reply.reply.length >= minMeaningfulChars
+            val withinUserCap = continuation < maxContinuations
+            val withinFuse = totalChars < totalCharFuse
+            // 继续的条件：确实被截断 + 本轮产出够长（排除原地打转）+ 未触发任何刹车
+            val shouldContinue = hitLimit && producedSomething && withinUserCap && withinFuse
+            // 继续写时原样入会话；收尾（不再续写且被截断）时才做修饰并明示
+            val text = if (hitLimit && !shouldContinue) polishTruncatedTail(reply.reply) else reply.reply
+            appendAssistantTurn(conversationId, text, reply, today)
+            if (!shouldContinue) {
+                when {
+                    !hitLimit -> Unit // 自然写完，无需提示
+                    !producedSomething ->
+                        _state.update {
+                            it.copy(error = "这一段几乎没有新内容，已停止自动续写；可发送「继续」重试")
+                        }
+                    continuation >= maxContinuations && maxContinuations > 0 ->
+                        _state.update {
+                            it.copy(error = "回答较长，已达自动续写保护上限（设置页可调整），发送「继续」可接着生成")
+                        }
+                    !withinFuse ->
+                        _state.update {
+                            it.copy(error = "回答非常长，已到自动续写的总长度保险丝，发送「继续」可接着生成")
+                        }
+                    else -> Unit
+                }
+                return lastReply
+            }
+            continuation++
+            val continueText = "继续，从刚才中断的地方接着输出，不要重复已有内容。"
+            chatRepository.appendMessage(conversationId, "user", continueText, emptyList(), null)
+            _state.update { it.copy(messages = it.messages + AssistantMessage("user", continueText)) }
+        }
+    }
+
+    /** 把一段回复写入会话与消息列表，并挂上计划/英语变更的待确认项。 */
+    private suspend fun appendAssistantTurn(
+        conversationId: String,
+        text: String,
+        reply: ParsedAssistantReply,
+        today: LocalDate,
+    ) {
+        chatRepository.appendMessage(conversationId, "assistant", text)
+        val previews = reply.actions.takeIf { it.isNotEmpty() }?.let { buildPreviews(it, today) }
+        val englishPreviews = buildEnglishPreviews(reply.englishActions)
+        _state.update { state ->
+            // 待确认项只挂到产生它的那条回复下面，不再自动跳到确认页。
+            val updatedMessages = state.messages + AssistantMessage("assistant", text)
+            val ownerIndex = updatedMessages.lastIndex
+            state.copy(
+                messages = updatedMessages,
+                pendingActions = previews ?: state.pendingActions,
+                pendingActionsOwnerIndex = if (previews != null) ownerIndex else state.pendingActionsOwnerIndex,
+                planReviewDate = if (previews != null) today else state.planReviewDate,
+                pendingEnglishActions = englishPreviews ?: state.pendingEnglishActions,
+                pendingEnglishOwnerIndex = if (englishPreviews != null) ownerIndex else state.pendingEnglishOwnerIndex,
+            )
+        }
+    }
+
+    /** 截断收尾：去掉悬空的加粗标记、补齐未闭合的公式块，并附加截断说明。 */
+    private fun polishTruncatedTail(text: String): String {
+        var t = text.trimEnd()
+        if (t.endsWith("**")) t = t.removeSuffix("**").trimEnd()
+        // $$ 出现奇数次 → 有未闭合的公式块，补一个闭合
+        if (t.split("$$").size % 2 == 0) t += "\n$$"
+        return "$t\n\n——（回答达到单次输出上限被截断）"
+    }
+
     private fun performPhotoSend(
         outgoing: String,
         photoPaths: List<String>,
@@ -554,35 +642,22 @@ class AssistantViewModel @Inject constructor(
                     val names = kinds.joinToString("、") { it.label }
                     if ((auto - manual).isNotEmpty()) "$names（含模型自动选择）" else names
                 }
-                val history = _state.value.messages.takeLast(10)
-                val reply = modelClient.chatStreaming(history, modelContext, imageBase64s, webSearchEnabled) { event ->
-                    when (event) {
-                        is AssistantStreamEvent.ReasoningDelta -> _state.update {
-                            it.copy(activeReasoning = appendReasoningForDisplay(it.activeReasoning, event.text))
-                        }
-                        is AssistantStreamEvent.AnswerDelta -> _state.update { it.copy(activeAnswerStarted = true) }
+                runChatTurn(
+                    conversationId = conversationId,
+                    context = modelContext,
+                    imageBase64s = imageBase64s,
+                    webSearchEnabled = webSearchEnabled,
+                    today = today,
+                ).let { lastReply ->
+                    _state.update { state ->
+                        state.copy(
+                            busy = false,
+                            activeReasoning = "",
+                            activeAnswerStarted = false,
+                            lastContextNote = contextNote,
+                            error = lastReply?.warnings?.joinToString("；")?.takeIf { it.isNotEmpty() },
+                        )
                     }
-                }
-                chatRepository.appendMessage(conversationId, "assistant", reply.reply)
-                val previews = reply.actions.takeIf { it.isNotEmpty() }?.let { buildPreviews(it, today) }
-                val englishPreviews = buildEnglishPreviews(reply.englishActions)
-                _state.update { state ->
-                    // 待确认项只挂到产生它的那条回复下面，不再自动跳到确认页。
-                    val updatedMessages = state.messages + AssistantMessage("assistant", reply.reply)
-                    val ownerIndex = updatedMessages.lastIndex
-                    state.copy(
-                        busy = false,
-                        activeReasoning = "",
-                        activeAnswerStarted = false,
-                        lastContextNote = contextNote,
-                        messages = updatedMessages,
-                        pendingActions = previews ?: state.pendingActions,
-                        pendingActionsOwnerIndex = if (previews != null) ownerIndex else state.pendingActionsOwnerIndex,
-                        planReviewDate = if (previews != null) today else state.planReviewDate,
-                        pendingEnglishActions = englishPreviews ?: state.pendingEnglishActions,
-                        pendingEnglishOwnerIndex = if (englishPreviews != null) ownerIndex else state.pendingEnglishOwnerIndex,
-                        error = reply.warnings.joinToString("；").ifEmpty { null },
-                    )
                 }
             } catch (error: AssistantModelException) {
                 _state.update { it.copy(busy = false, activeReasoning = "", activeAnswerStarted = false, error = error.message) }
