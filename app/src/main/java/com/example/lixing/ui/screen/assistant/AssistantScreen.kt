@@ -777,16 +777,6 @@ fun AssistantScreen(
                         ) {
                             Icon(Icons.Filled.PhotoLibrary, contentDescription = "从相册选择")
                         }
-                        // ⊕ 收进左侧工具组：输入框随之贴到发送键一侧（页面右端）
-                        FilledTonalIconButton(
-                            onClick = { extrasExpanded = !extrasExpanded },
-                            enabled = !state.busy && !holdingTalk && voiceInputStatus == VoiceInputStatus.IDLE,
-                        ) {
-                            Icon(
-                                if (extrasExpanded) Icons.Filled.Close else Icons.Filled.Add,
-                                contentDescription = if (extrasExpanded) "收起附带和快捷提问" else "展开附带和快捷提问",
-                            )
-                        }
                         if (voiceMode) {
                             val voiceBarHeight by animateDpAsState(
                                 targetValue = if (holdingTalk) 72.dp else 48.dp,
@@ -892,6 +882,16 @@ fun AssistantScreen(
                                         )
                                     }
                                 },
+                            )
+                        }
+                        // ⊕ 放回输入框与发送之间（v1.0.8 误移到左侧工具组，已改回）
+                        FilledTonalIconButton(
+                            onClick = { extrasExpanded = !extrasExpanded },
+                            enabled = !state.busy && !holdingTalk && voiceInputStatus == VoiceInputStatus.IDLE,
+                        ) {
+                            Icon(
+                                if (extrasExpanded) Icons.Filled.Close else Icons.Filled.Add,
+                                contentDescription = if (extrasExpanded) "收起附带和快捷提问" else "展开附带和快捷提问",
                             )
                         }
                         IconButton(
@@ -1246,44 +1246,44 @@ private fun MessageBubble(
     val isUser = role == "user"
     // BoxWithConstraints 拿的是「父容器实际给到的最大宽度」，
     // 比 LocalConfiguration 的屏幕宽度更准（含列表内边距、分屏/多窗口）。
+    // 注意：align 必须直接用在 BoxWithConstraints 作用域里——中间不能再包一层
+    // 收缩宽度的 Box，否则靠右对齐失效（v1.0.5 用户气泡全跑到左边的根因）。
     BoxWithConstraints(Modifier.fillMaxWidth()) {
         val bubbleMaxWidth = minOf(maxWidth * BUBBLE_WIDTH_RATIO, BUBBLE_MAX_WIDTH)
-        Box {
-            SelectionContainer(
-                modifier = Modifier
-                    .align(if (isUser) Alignment.CenterEnd else Alignment.CenterStart)
-                    .widthIn(max = bubbleMaxWidth),
+        SelectionContainer(
+            modifier = Modifier
+                .align(if (isUser) Alignment.CenterEnd else Alignment.CenterStart)
+                .widthIn(max = bubbleMaxWidth),
+        ) {
+            Surface(
+                color = if (isUser) MaterialTheme.colorScheme.primaryContainer
+                else MaterialTheme.colorScheme.surfaceContainerHigh,
+                shape = RoundedCornerShape(
+                    topStart = 14.dp, topEnd = 14.dp,
+                    bottomStart = if (isUser) 14.dp else 4.dp,
+                    bottomEnd = if (isUser) 4.dp else 14.dp,
+                ),
             ) {
-                Surface(
-                    color = if (isUser) MaterialTheme.colorScheme.primaryContainer
-                    else MaterialTheme.colorScheme.surfaceContainerHigh,
-                    shape = RoundedCornerShape(
-                        topStart = 14.dp, topEnd = 14.dp,
-                        bottomStart = if (isUser) 14.dp else 4.dp,
-                        bottomEnd = if (isUser) 4.dp else 14.dp,
-                    ),
-                ) {
-                    Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        if (imagePaths.isNotEmpty()) {
-                            Row(
-                                modifier = Modifier.horizontalScroll(rememberScrollState()),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            ) {
-                                imagePaths.forEachIndexed { index, path ->
-                                    AssistantThumbnail(
-                                        path = path,
-                                        modifier = Modifier.size(92.dp),
-                                        onClick = { onImageClick(imagePaths, index) },
-                                    )
-                                }
+                Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    if (imagePaths.isNotEmpty()) {
+                        Row(
+                            modifier = Modifier.horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            imagePaths.forEachIndexed { index, path ->
+                                AssistantThumbnail(
+                                    path = path,
+                                    modifier = Modifier.size(92.dp),
+                                    onClick = { onImageClick(imagePaths, index) },
+                                )
                             }
                         }
-                        if (content.isNotBlank()) {
-                            if (isUser) {
-                                Text(content, style = MaterialTheme.typography.bodyLarge)
-                            } else {
-                                MarkdownAnswer(content)
-                            }
+                    }
+                    if (content.isNotBlank()) {
+                        if (isUser) {
+                            Text(content, style = MaterialTheme.typography.bodyLarge)
+                        } else {
+                            MarkdownAnswer(content)
                         }
                     }
                 }
