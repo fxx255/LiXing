@@ -777,6 +777,16 @@ fun AssistantScreen(
                         ) {
                             Icon(Icons.Filled.PhotoLibrary, contentDescription = "从相册选择")
                         }
+                        // ⊕ 收进左侧工具组：输入框随之贴到发送键一侧（页面右端）
+                        FilledTonalIconButton(
+                            onClick = { extrasExpanded = !extrasExpanded },
+                            enabled = !state.busy && !holdingTalk && voiceInputStatus == VoiceInputStatus.IDLE,
+                        ) {
+                            Icon(
+                                if (extrasExpanded) Icons.Filled.Close else Icons.Filled.Add,
+                                contentDescription = if (extrasExpanded) "收起附带和快捷提问" else "展开附带和快捷提问",
+                            )
+                        }
                         if (voiceMode) {
                             val voiceBarHeight by animateDpAsState(
                                 targetValue = if (holdingTalk) 72.dp else 48.dp,
@@ -882,15 +892,6 @@ fun AssistantScreen(
                                         )
                                     }
                                 },
-                            )
-                        }
-                        FilledTonalIconButton(
-                            onClick = { extrasExpanded = !extrasExpanded },
-                            enabled = !state.busy && !holdingTalk && voiceInputStatus == VoiceInputStatus.IDLE,
-                        ) {
-                            Icon(
-                                if (extrasExpanded) Icons.Filled.Close else Icons.Filled.Add,
-                                contentDescription = if (extrasExpanded) "收起附带和快捷提问" else "展开附带和快捷提问",
                             )
                         }
                         IconButton(
