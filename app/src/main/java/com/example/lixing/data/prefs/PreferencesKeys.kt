@@ -84,4 +84,8 @@ val UPDATE_LAST_SEEN_VERSION_CODE = intPreferencesKey("update_last_seen_version_
     val AI_WEB_SEARCH_ENABLED = booleanPreferencesKey("ai_web_search_enabled")
     /** 长回答被截断时的自动续写保护上限（轮数，0 = 关闭自动续写；正常用不满）。 */
     val ASSISTANT_AUTO_CONTINUE = intPreferencesKey("assistant_auto_continue")
+    /** 用户个性化：AI 对用户的称呼（空 = 不注入，由模型用默认称谓）。 */
+    val ASSISTANT_NICKNAME = stringPreferencesKey("assistant_nickname")
+    /** 用户个性化：所在城市（用于时区/昼夜/相对时间的推断；空 = 不注入）。 */
+    val ASSISTANT_CITY = stringPreferencesKey("assistant_city")
 }

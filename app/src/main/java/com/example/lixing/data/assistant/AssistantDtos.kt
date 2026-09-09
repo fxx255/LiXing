@@ -54,6 +54,8 @@ data class ParsedAssistantReply(
 object AssistantResponseParser {
 
     const val MAX_TARGET_VALUE = 9_999
+    /** 「每时段至少完成几项」的上限，与编辑页 EditScreens 的校验保持一致。 */
+    const val MAX_REQUIRED_TASK_COUNT = 20
     private val MAX_ENGLISH_CONTENT = EnglishEntryRepository.MAX_CONTENT_LENGTH
     private val MAX_ENGLISH_MEANING = EnglishEntryRepository.MAX_MEANING_LENGTH
     private val json = Json { ignoreUnknownKeys = true }
@@ -233,9 +235,29 @@ object AssistantResponseParser {
         require(slotId != null) { "缺少有效的 slotId" }
         val start = obj.time("startTime")
         val end = obj.time("endTime")
-        require(start != null || end != null) { "没有给出任何新时间" }
+        val required = obj.optionalInt("requiredTaskCount")
+        require(required == null || required in 0..MAX_REQUIRED_TASK_COUNT) {
+            "每时段任务数需在 0~$MAX_REQUIRED_TASK_COUNT 之间"
+        }
+        require(start != null || end != null || required != null) {
+            "没有给出任何新时间或新的任务数"
+        }
         require(start == null || end == null || start < end) { "开始时间必须早于结束时间" }
-        return PlanAction.UpdateTimeSlot(slotId, start, end, obj.reason())
+        return PlanAction.UpdateTimeSlot(
+            slotId = slotId,
+            startTime = start,
+            endTime = end,
+            requiredTaskCount = required,
+            reason = obj.reason(),
+        )
+    }
+
+    /** 可选整数字段：没填返回 null；填了但不是整数（越界由调用方校验）。 */
+    private fun JsonObject.optionalInt(key: String): Int? {
+        val element = this[key] ?: return null
+        val value = (element as? JsonPrimitive)?.intOrNull
+        require(value != null) { "$key 必须是整数" }
+        return value
     }
 
     private fun parseUpdateTemplate(obj: JsonObject): PlanAction? {

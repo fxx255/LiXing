@@ -25,6 +25,17 @@ data class AssistantMessage(
 )
 
 /**
+ * 用户在设置页填写的个性化信息，注入系统提示词用。
+ * 两个都可空/空白：没填就不注入对应条目，绝不能出现空称呼。
+ */
+data class AssistantUserProfile(
+    val nickname: String = "",
+    val city: String = "",
+) {
+    val hasAny: Boolean get() = nickname.isNotBlank() || city.isNotBlank()
+}
+
+/**
  * AI 可以返回的结构化「计划修改建议」。
  *
  * 原则：AI 只能给出建议，所有建议必须经过本地校验与用户逐条确认；
@@ -33,11 +44,15 @@ data class AssistantMessage(
 sealed class PlanAction {
     abstract val reason: String
 
-    /** 调整现有时段的起止时间（任一为空表示不改）。 */
+    /**
+     * 调整现有时段（任一字段为空表示不改）。
+     * [requiredTaskCount]：该时段「至少完成几项」，0 表示全部都要完成。
+     */
     data class UpdateTimeSlot(
         val slotId: String,
         val startTime: LocalTime?,
         val endTime: LocalTime?,
+        val requiredTaskCount: Int? = null,
         override val reason: String,
     ) : PlanAction()
 

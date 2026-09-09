@@ -71,11 +71,23 @@ class PlanChangeApplier @Inject constructor(
                 weekdayMask = slot.weekdayMask,
                 sortOrder = slot.sortOrder,
                 note = slot.note,
-                requiredTaskCount = slot.requiredTaskCount,
+                requiredTaskCount = action.requiredTaskCount ?: slot.requiredTaskCount,
                 isEnabled = slot.isEnabled,
             ),
         )
-        return ok(action, "时段「${slot.name}」已调整为 $newStart-$newEnd")
+        val detail = buildString {
+            if (action.startTime != null || action.endTime != null) {
+                append("时间调整为 $newStart-$newEnd")
+            }
+            if (action.requiredTaskCount != null) {
+                if (isNotEmpty()) append("，")
+                append(
+                    if (action.requiredTaskCount == 0) "改为全部任务都要完成"
+                    else "改为至少完成 ${action.requiredTaskCount} 项",
+                )
+            }
+        }
+        return ok(action, "时段「${slot.name}」$detail")
     }
 
     private suspend fun applyUpdateTemplate(action: PlanAction.UpdateTaskTemplate): PlanApplyResult {

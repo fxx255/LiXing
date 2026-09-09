@@ -76,6 +76,8 @@ class UserPreferencesRepository @Inject constructor(
             aiVisionEnabled = p[PreferencesKeys.AI_VISION_ENABLED] ?: false,
             aiWebSearchEnabled = p[PreferencesKeys.AI_WEB_SEARCH_ENABLED] ?: false,
             assistantAutoContinue = p[PreferencesKeys.ASSISTANT_AUTO_CONTINUE] ?: 4,
+            assistantNickname = p[PreferencesKeys.ASSISTANT_NICKNAME].orEmpty().trim().take(20),
+            assistantCity = p[PreferencesKeys.ASSISTANT_CITY].orEmpty().trim().take(30),
         )
     }
 
@@ -250,6 +252,12 @@ class UserPreferencesRepository @Inject constructor(
     suspend fun setAssistantAutoContinue(count: Int) =
         edit { it[PreferencesKeys.ASSISTANT_AUTO_CONTINUE] = count.coerceIn(0, 8) }
 
+    /** 保存用户个性化：称呼（<=20 字）与城市（<=30 字），保存前 trim。 */
+    suspend fun setAssistantIdentity(nickname: String, city: String) = edit {
+        it[PreferencesKeys.ASSISTANT_NICKNAME] = nickname.trim().take(20)
+        it[PreferencesKeys.ASSISTANT_CITY] = city.trim().take(30)
+    }
+
     /** 用备份中的完整设置原子替换当前设置。敏感的墨墨 Token 不进入备份。 */
     suspend fun replaceAll(p: UserPreferences) {
         context.dataStore.edit { out ->
@@ -295,6 +303,8 @@ class UserPreferencesRepository @Inject constructor(
             out[PreferencesKeys.AI_VISION_ENABLED] = p.aiVisionEnabled
             out[PreferencesKeys.AI_WEB_SEARCH_ENABLED] = p.aiWebSearchEnabled
             out[PreferencesKeys.ASSISTANT_AUTO_CONTINUE] = p.assistantAutoContinue.coerceIn(0, 8)
+            out[PreferencesKeys.ASSISTANT_NICKNAME] = p.assistantNickname
+            out[PreferencesKeys.ASSISTANT_CITY] = p.assistantCity
             if (localMaimemoToken != null) out[PreferencesKeys.MAIMEMO_TOKEN] = localMaimemoToken
             if (localMaimemoLastSyncAt != null) {
                 out[PreferencesKeys.MAIMEMO_LAST_SYNC_AT] = localMaimemoLastSyncAt

@@ -408,6 +408,11 @@ class SettingsViewModel @Inject constructor(
         prefsRepository.setAssistantAutoContinue(count)
     }
 
+    /** 保存用户个性化（称呼 + 城市），立即生效并持久化。 */
+    fun saveAssistantIdentity(nickname: String, city: String) = viewModelScope.launch {
+        prefsRepository.setAssistantIdentity(nickname, city)
+    }
+
     private val _questionVisionProfileId = MutableStateFlow<String?>(null)
     val questionVisionProfileId: StateFlow<String?> = _questionVisionProfileId.asStateFlow()
 

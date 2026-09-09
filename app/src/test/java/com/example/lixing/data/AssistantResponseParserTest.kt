@@ -316,4 +316,31 @@ class AssistantResponseParserTest {
         assertEquals("{curly} brace", add.content)
         assertTrue(parsed.reply.contains("{含花括号}"))
     }
+
+    @Test
+    fun `update time slot accepts requiredTaskCount`() {
+        val raw = """
+            {"reply":"ok","plan_actions":[
+              {"kind":"UPDATE_TIME_SLOT","slotId":3,"requiredTaskCount":2,"reason":"加一点约束"}
+            ]}
+        """.trimIndent()
+        val parsed = AssistantResponseParser.parse(raw)
+        assertEquals(1, parsed.actions.size)
+        val action = parsed.actions[0] as PlanAction.UpdateTimeSlot
+        assertEquals(2, action.requiredTaskCount)
+        assertEquals(null, action.startTime)
+    }
+
+    @Test
+    fun `update time slot rejects out of range requiredTaskCount`() {
+        val raw = """
+            {"reply":"ok","plan_actions":[
+              {"kind":"UPDATE_TIME_SLOT","slotId":3,"requiredTaskCount":99,"reason":"越界"},
+              {"kind":"UPDATE_TIME_SLOT","slotId":3,"requiredTaskCount":"abc","reason":"非数字"}
+            ]}
+        """.trimIndent()
+        val parsed = AssistantResponseParser.parse(raw)
+        assertTrue(parsed.actions.isEmpty())
+        assertTrue(parsed.warnings.size >= 2)
+    }
 }

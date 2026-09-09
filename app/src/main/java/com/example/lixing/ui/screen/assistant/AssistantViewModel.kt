@@ -852,8 +852,11 @@ class AssistantViewModel @Inject constructor(
             ?: return invalidPreview(action, "调整时段（id=${action.slotId}）", "时段不存在")
         val newStart = action.startTime ?: slot.startTime
         val newEnd = action.endTime ?: slot.endTime
-        val before = "${slot.startTime.format(timeFmt)}-${slot.endTime.format(timeFmt)}"
-        val after = "${newStart.format(timeFmt)}-${newEnd.format(timeFmt)}"
+        val newRequired = action.requiredTaskCount
+        val before = "${slot.startTime.format(timeFmt)}-${slot.endTime.format(timeFmt)}" +
+            requiredSuffix(slot.requiredTaskCount)
+        val after = "${newStart.format(timeFmt)}-${newEnd.format(timeFmt)}" +
+            requiredSuffix(newRequired ?: slot.requiredTaskCount)
         val problem = when {
             newStart == newEnd -> "开始时间与结束时间相同"
             before == after -> "方案与当前时段相同"
@@ -868,6 +871,10 @@ class AssistantViewModel @Inject constructor(
             problem = problem,
         )
     }
+
+    /** 时段预览里「每时段至少完成几项」的后缀；0 = 全部都要完成。 */
+    private fun requiredSuffix(count: Int): String =
+        if (count > 0) " · 至少${count}项" else " · 全部"
 
     private suspend fun previewUpdateTemplate(action: PlanAction.UpdateTaskTemplate): PendingPlanAction {
         val template = planRepository.getTemplate(action.templateId)

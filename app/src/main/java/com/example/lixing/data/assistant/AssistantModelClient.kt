@@ -4,6 +4,7 @@ import com.example.lixing.data.prefs.UserPreferencesRepository
 import com.example.lixing.di.IoDispatcher
 import android.util.Log
 import com.example.lixing.domain.assistant.AssistantContextKind
+import com.example.lixing.domain.assistant.AssistantUserProfile
 import com.example.lixing.domain.assistant.AssistantMessage
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
@@ -111,12 +112,14 @@ class AssistantModelClient @Inject constructor(
         onEvent: suspend (AssistantStreamEvent) -> Unit,
     ): ParsedAssistantReply = withContext(io) {
         val configured = requireConfigured()
+        val prefs = prefsRepository.current()
+        val userProfile = AssistantUserProfile(prefs.assistantNickname, prefs.assistantCity)
         val webSearchOn = webSearchEnabled &&
-            prefsRepository.current().aiWebSearchEnabled &&
+            prefs.aiWebSearchEnabled &&
             configured.searchProtocol != AiSearchProtocol.OFF
         if (webSearchOn && configured.searchProtocol == AiSearchProtocol.RESPONSES) {
             try {
-                return@withContext chatDeepSeekNativeResponses(configured, messages, context, imageBase64s, onEvent)
+                return@withContext chatDeepSeekNativeResponses(configured, messages, context, imageBase64s, userProfile, onEvent)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -131,6 +134,7 @@ class AssistantModelClient @Inject constructor(
             imageBase64s,
             stream = true,
             webSearchEnabled = chatCompletionsSearch,
+            userProfile = userProfile,
         )
         val request = Request.Builder()
             .url(completionsUrl(configured.baseUrl))
@@ -425,6 +429,7 @@ class AssistantModelClient @Inject constructor(
         imageBase64s: List<String>,
         stream: Boolean,
         webSearchEnabled: Boolean = false,
+        userProfile: AssistantUserProfile = AssistantUserProfile(),
     ): JsonObject = buildJsonObject {
         put("model", configured.model)
         put("temperature", 0.4)
@@ -442,7 +447,7 @@ class AssistantModelClient @Inject constructor(
             })
         }
         put("messages", buildJsonArray {
-            add(buildJsonObject { put("role", "system"); put("content", SYSTEM_PROMPT) })
+            add(buildJsonObject { put("role", "system"); put("content", buildSystemPrompt(userProfile)) })
             add(buildJsonObject {
                 put("role", "system")
                 put("content", reasoningInstruction(configured.reasoningEffort))
@@ -677,9 +682,10 @@ class AssistantModelClient @Inject constructor(
         messages: List<AssistantMessage>,
         context: String,
         imageBase64s: List<String>,
+        userProfile: AssistantUserProfile,
         onEvent: suspend (AssistantStreamEvent) -> Unit,
     ): ParsedAssistantReply {
-        val payload = buildDeepSeekResponsesPayload(configured, messages, context, imageBase64s)
+        val payload = buildDeepSeekResponsesPayload(configured, messages, context, imageBase64s, userProfile)
         val request = Request.Builder()
             .url(deepSeekResponsesUrl(configured.baseUrl))
             .header("Authorization", "Bearer ${configured.apiKey}")
@@ -751,11 +757,12 @@ class AssistantModelClient @Inject constructor(
         messages: List<AssistantMessage>,
         context: String,
         imageBase64s: List<String>,
+        userProfile: AssistantUserProfile,
     ): JsonObject = buildJsonObject {
         put("model", configured.model)
         put("max_output_tokens", MAX_OUTPUT_TOKENS)
         put("instructions", buildString {
-            append(SYSTEM_PROMPT)
+            append(buildSystemPrompt(userProfile))
             append("\n\n").append(reasoningInstruction(configured.reasoningEffort))
         })
         put("tools", buildJsonArray { add(buildJsonObject { put("type", "web_search") }) })
@@ -784,6 +791,30 @@ class AssistantModelClient @Inject constructor(
                 })
             }
         })
+    }
+
+    /**
+     * 系统提示词 = 通用协议 + 用户个性化（可空，逐条注入）+ 当前时间。
+     * 时间永远注入：让「今天/本周/昼夜问候」有唯一基准；个性化条目没填就不出现。
+     */
+    private fun buildSystemPrompt(user: AssistantUserProfile): String = buildString {
+        append(SYSTEM_PROMPT)
+        val nickname = user.nickname.trim()
+        val city = user.city.trim()
+        append("\n\n## 当前时间\n")
+        val now = java.time.LocalDateTime.now()
+        val weekday = now.dayOfWeek.getDisplayName(java.time.format.TextStyle.FULL, java.util.Locale.CHINESE)
+        append("现在是 ${now.format(java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm"))}（$weekday）。")
+        append("涉及「今天/明天/本周/上周」等相对时间一律以这条时间为基准，不要自行猜测日期。")
+        if (nickname.isNotEmpty() || city.isNotEmpty()) {
+            append("\n\n## 用户个性化（必须遵守）\n")
+            if (nickname.isNotEmpty()) {
+                append("- 称呼：用「$nickname」称呼用户，问候与正文中自然使用；不要叫「用户」。\n")
+            }
+            if (city.isNotEmpty()) {
+                append("- 所在城市：$city。涉及时区、昼夜问候时按该城市推断；中国境内的城市按 UTC+8。\n")
+            }
+        }
     }
 
     private companion object {
@@ -828,7 +859,7 @@ class AssistantModelClient @Inject constructor(
 {"reply": "给用户看的正文", "plan_actions": [ ... ], "english_actions": [ ... ]}
 
 plan_actions 支持的类型：
-- {"kind":"UPDATE_TIME_SLOT","slotId":数字,"startTime":"HH:mm"可省,"endTime":"HH:mm"可省,"reason":"简短原因"}
+- {"kind":"UPDATE_TIME_SLOT","slotId":数字,"startTime":"HH:mm"可省,"endTime":"HH:mm"可省,"requiredTaskCount":数字可省(0~20,0=该时段任务全部都要完成),"reason":"简短原因"}，时间与该时段「至少完成几项」至少给一个
 - {"kind":"UPDATE_TASK_TEMPLATE","templateId":数字, 可选字段:"title"(<=60字)/"targetValue"(1~9999整数)/"timeSlotId"/"repeatRule"(DAILY|WEEKLY_DAYS|EVERY_N_DAYS)/"isKeystone"/"isEnabled", "reason":"..."}
 - {"kind":"INSERT_TASK_TEMPLATE","subjectId":数字,"timeSlotId":数字,"title":"...","taskType"(LECTURE|PRACTICE|MEMORIZE|REVIEW|CUSTOM),"targetType"(MINUTES|COUNT|PAGES|BOOLEAN),"targetValue":数字,"repeatRule":同上,"isKeystone":布尔,"note"可省,"reason":"..."}
 - {"kind":"UPDATE_TODAY_TASK","taskId":数字, 可选字段:"targetValue"(1~9999整数)/"timeSlotId", "reason":"..."}，至少提供一个可选字段，仅今日生效

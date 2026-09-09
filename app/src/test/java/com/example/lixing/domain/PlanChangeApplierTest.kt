@@ -88,7 +88,7 @@ class PlanChangeApplierTest {
     @Test
     fun `update time slot changes start and end`() = runTest {
         val results = applier.apply(
-            listOf(PlanAction.UpdateTimeSlot(slot.id, LocalTime.of(9, 0), LocalTime.of(11, 0), "缩短上午")),
+            listOf(PlanAction.UpdateTimeSlot(slot.id, LocalTime.of(9, 0), LocalTime.of(11, 0), reason = "缩短上午")),
             today,
         )
         assertTrue(results.single().success)
@@ -100,13 +100,13 @@ class PlanChangeApplierTest {
     @Test
     fun `update time slot rejects missing slot and equal times`() = runTest {
         val missing = applier.apply(
-            listOf(PlanAction.UpdateTimeSlot("999", LocalTime.of(9, 0), null, "")),
+            listOf(PlanAction.UpdateTimeSlot("999", LocalTime.of(9, 0), null, reason = "")),
             today,
         )
         assertFalse(missing.single().success)
 
         val sameTimes = applier.apply(
-            listOf(PlanAction.UpdateTimeSlot(slot.id, LocalTime.of(9, 0), LocalTime.of(9, 0), "")),
+            listOf(PlanAction.UpdateTimeSlot(slot.id, LocalTime.of(9, 0), LocalTime.of(9, 0), reason = "")),
             today,
         )
         assertFalse(sameTimes.single().success)

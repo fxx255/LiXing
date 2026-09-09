@@ -98,6 +98,10 @@ data class UserPreferences(
     val aiVisionEnabled: Boolean = false,
     /** 是否启用联网搜索（DeepSeek 内置）。默认关闭。 */
     val aiWebSearchEnabled: Boolean = false,
+    /** 用户个性化：AI 对用户的称呼（空 = 不注入）。 */
+    val assistantNickname: String = "",
+    /** 用户个性化：所在城市（用于时区/昼夜/相对时间推断；空 = 不注入）。 */
+    val assistantCity: String = "",
     /** 长回答自动续写的保护上限（轮数）；0 表示不自动续写。正常几轮内会自然写完。 */
     val assistantAutoContinue: Int = 4,
 

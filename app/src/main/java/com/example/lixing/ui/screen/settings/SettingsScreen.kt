@@ -49,6 +49,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -681,6 +682,56 @@ private fun EnglishReviewSection(
     )
 }
 
+/**
+ * 用户个性化：称呼 + 城市。本地状态 + 显式保存（避免每次击键都写 DataStore），
+ * 保存后立即生效并持久化；两栏都留空 = 不注入个性化，模型用默认称谓。
+ */
+@Composable
+private fun AssistantIdentitySection(
+    viewModel: SettingsViewModel,
+    prefs: com.example.lixing.data.prefs.UserPreferences,
+) {
+    var nickname by rememberSaveable { mutableStateOf(prefs.assistantNickname) }
+    var city by rememberSaveable { mutableStateOf(prefs.assistantCity) }
+    val dirty = nickname.trim() != prefs.assistantNickname || city.trim() != prefs.assistantCity
+
+    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        OutlinedTextField(
+            value = nickname,
+            onValueChange = { nickname = it.take(20) },
+            label = { Text("AI 对你的称呼") },
+            placeholder = { Text("如：小李 / 老板（留空则不特别称呼）") },
+            supportingText = { Text("最多 20 字；保存后所有回复都会这样叫你") },
+            modifier = Modifier.fillMaxWidth(),
+            singleLine = true,
+        )
+        OutlinedTextField(
+            value = city,
+            onValueChange = { city = it.take(30) },
+            label = { Text("所在城市") },
+            placeholder = { Text("如：上海（用于时区与昼夜/相对时间推断）") },
+            supportingText = { Text("最多 30 字；与「当前时间」一起注入系统提示词") },
+            modifier = Modifier.fillMaxWidth(),
+            singleLine = true,
+        )
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Button(onClick = { viewModel.saveAssistantIdentity(nickname, city) }, enabled = dirty) {
+                Text("保存")
+            }
+            if (!dirty) {
+                Text(
+                    "已保存，立即生效",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+    }
+}
+
 @Composable
 private fun UpdateSection(
     viewModel: SettingsViewModel,
@@ -949,6 +1000,7 @@ private fun AiAssistantSection(viewModel: SettingsViewModel, prefs: com.example.
                 steps = 7,
                 onChange = { viewModel.setAssistantAutoContinue(it.toInt()) },
             )
+            AssistantIdentitySection(viewModel, prefs)
 
             if (profiles.isEmpty()) {
                 Text(

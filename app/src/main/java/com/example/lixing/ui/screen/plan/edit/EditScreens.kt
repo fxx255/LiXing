@@ -32,9 +32,17 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.TextFieldValue
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -43,6 +51,9 @@ import com.example.lixing.domain.model.TargetType
 import com.example.lixing.domain.model.TaskType
 import com.example.lixing.domain.model.WeekdayMask
 import java.time.DayOfWeek
+
+/** 「至少完成几项」的上限：一个时段的任务数不会超过它，超出即视为非法输入。 */
+private const val MAX_REQUIRED_TASK_COUNT = 20
 
 /** 通用编辑页外壳。 */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -129,13 +140,48 @@ fun TimeSlotEditScreen(onBack: () -> Unit, vm: PlanEditViewModel = hiltViewModel
         timeError?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
         FieldLabel("生效星期")
         WeekdayPicker(weekdays, vm::toggleWeekday)
+        // 数字输入：旧实现直接丢弃非数字与空串，导致「改不掉、必须先输再退格」。
+        // 现在文本自己持有状态：可清空、可全选覆盖、数字键盘直接编辑，
+        // 越界/空值只提示不写回，失焦时把非法内容还原成上一次的有效值。
+        var requiredField by rememberSaveable(requiredTaskCount, stateSaver = TextFieldValue.Saver) {
+            mutableStateOf(TextFieldValue(requiredTaskCount.toString()))
+        }
+        val requiredError = when {
+            requiredField.text.isBlank() -> "请输入数量；0 表示全部都要完成"
+            requiredField.text.toIntOrNull() == null -> "只能填数字"
+            requiredField.text.toInt() > MAX_REQUIRED_TASK_COUNT -> "最多 $MAX_REQUIRED_TASK_COUNT 项"
+            else -> null
+        }
         OutlinedTextField(
-            value = requiredTaskCount.toString(),
-            onValueChange = { it.toIntOrNull()?.let(vm::setSlotRequiredTaskCount) },
+            value = requiredField,
+            onValueChange = { next ->
+                val digits = next.text.filter(Char::isDigit).take(2)
+                requiredField = TextFieldValue(digits, selection = TextRange(digits.length))
+                // 只在合法区间内写回，保证「保存」拿到的永远是有效值
+                digits.toIntOrNull()
+                    ?.takeIf { it <= MAX_REQUIRED_TASK_COUNT }
+                    ?.let(vm::setSlotRequiredTaskCount)
+            },
             label = { Text("至少完成几项（0 = 全部）") },
-            supportingText = { Text("填 1/2… 表示该时段任务任选相应数量") },
-            modifier = Modifier.fillMaxWidth(),
+            supportingText = { Text(requiredError ?: "填 1/2… 表示该时段任务任选相应数量") },
+            isError = requiredError != null,
+            modifier = Modifier
+                .fillMaxWidth()
+                .onFocusChanged { focus ->
+                    when {
+                        // 获得焦点自动全选，直接输入即覆盖原数字
+                        focus.isFocused -> requiredField = requiredField.copy(
+                            selection = TextRange(0, requiredField.text.length),
+                        )
+                        // 失焦时把非法内容还原为当前有效值
+                        requiredError != null -> requiredField = TextFieldValue(
+                            requiredTaskCount.toString(),
+                            selection = TextRange(requiredTaskCount.toString().length),
+                        )
+                    }
+                },
             singleLine = true,
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
         )
         NameField(note, vm::setNote, "用途备注")
         SaveDelete(

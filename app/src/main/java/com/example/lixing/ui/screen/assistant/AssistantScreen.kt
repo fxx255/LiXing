@@ -17,12 +17,14 @@ import android.widget.TextView
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
@@ -53,6 +55,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.AddComment
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Mic
@@ -89,8 +92,10 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -101,6 +106,7 @@ import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.input.pointer.pointerInput
@@ -109,11 +115,13 @@ import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlin.math.sin
 import java.io.File
 import androidx.core.content.FileProvider
@@ -575,8 +583,10 @@ fun AssistantScreen(
                             Icon(Icons.Filled.History, contentDescription = "历史对话")
                         }
                         if (state.messages.isNotEmpty()) {
+                            // 这里的行为是「开一个全新对话」，不是删除：用「气泡 + 加号」表达新建语义。
+                            // 历史列表里的删除仍用垃圾桶图标（AssistantHistorySheet），两者不要混。
                             IconButton(onClick = viewModel::startNewConversation) {
-                                Icon(Icons.Filled.Delete, contentDescription = "开始新对话")
+                                Icon(Icons.Filled.AddComment, contentDescription = "新建对话")
                             }
                         }
                     }
@@ -1626,23 +1636,16 @@ private fun PhotoViewerDialog(paths: List<String>, initialIndex: Int, onDismiss:
         properties = DialogProperties(usePlatformDefaultWidth = false),
     ) {
         Box(
-            modifier = Modifier.fillMaxSize().background(Color.Black).clickable(onClick = onDismiss),
+            modifier = Modifier.fillMaxSize().background(Color.Black),
             contentAlignment = Alignment.Center,
         ) {
             HorizontalPager(state = pagerState, modifier = Modifier.fillMaxSize()) { page ->
-                val bitmap = remember(paths[page]) { decodeSampledBitmap(paths[page], 2400) }
-                if (bitmap != null) {
-                    Image(
-                        bitmap = bitmap.asImageBitmap(),
-                        contentDescription = "照片大图 ${page + 1}",
-                        modifier = Modifier.fillMaxSize().padding(16.dp),
-                        contentScale = ContentScale.Fit,
-                    )
-                } else {
-                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                        Text("图片文件不可用", color = Color.White)
-                    }
-                }
+                ZoomablePhoto(
+                    path = paths[page],
+                    pageLabel = "照片大图 ${page + 1}",
+                    onTapToClose = onDismiss,
+                    onSwipeDownToClose = onDismiss,
+                )
             }
             if (paths.size > 1) {
                 Text(
@@ -1657,6 +1660,123 @@ private fun PhotoViewerDialog(paths: List<String>, initialIndex: Int, onDismiss:
             ) {
                 Icon(Icons.Filled.Close, contentDescription = "关闭", tint = Color.White)
             }
+        }
+    }
+}
+
+private const val VIEWER_MAX_SCALE = 5f
+private const val VIEWER_DOUBLE_TAP_SCALE = 2.5f
+/** 未放大时向下拖动超过这个距离就关闭查看器。 */
+private const val VIEWER_DRAG_DISMISS_PX = 140f
+
+/**
+ * 可缩放的照片页：双指捏合缩放、双击放大/还原、放大后单指拖动平移，
+ * 边界与缩放下限都做夹取，越界自动回弹（缩小到 1 时位移归零）。
+ * 未放大时：轻点关闭、向下拖动关闭；这两种手势可以并存，不会和 Pager 横滑打架
+ * （横滑由 HorizontalPager 自己消费，纵向位移才会被这里接管）。
+ */
+@Composable
+private fun ZoomablePhoto(
+    path: String,
+    pageLabel: String,
+    onTapToClose: () -> Unit,
+    onSwipeDownToClose: () -> Unit,
+) {
+    val scope = rememberCoroutineScope()
+    val scale = remember { Animatable(1f) }
+    val offsetX = remember { Animatable(0f) }
+    val offsetY = remember { Animatable(0f) }
+    var boxSize by remember { mutableStateOf(IntSize.Zero) }
+    var dragDown by remember { mutableFloatStateOf(0f) }
+    val bitmap = remember(path) { decodeSampledBitmap(path, 2400) }
+
+    // 换页时复位，避免上一张的缩放/位移带到下一张
+    LaunchedEffect(path) {
+        scale.snapTo(1f)
+        offsetX.snapTo(0f)
+        offsetY.snapTo(0f)
+        dragDown = 0f
+    }
+
+    fun maxOffset(currentScale: Float, dimension: Int): Float =
+        (dimension * (currentScale - 1f) / 2f).coerceAtLeast(0f)
+
+    fun clampX(value: Float, atScale: Float): Float {
+        val bound = maxOffset(atScale, boxSize.width)
+        return value.coerceIn(-bound, bound)
+    }
+
+    fun clampY(value: Float, atScale: Float): Float {
+        val bound = maxOffset(atScale, boxSize.height)
+        return value.coerceIn(-bound, bound)
+    }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .onSizeChanged { boxSize = it }
+            .pointerInput(Unit) {
+                detectTransformGestures { _, pan, zoom, _ ->
+                    val next = (scale.value * zoom).coerceIn(1f, VIEWER_MAX_SCALE)
+                    scope.launch {
+                        if (next <= 1.0005f) {
+                            // 未放大（或缩到底）：向下拖动关闭，位移跟手，松手前回弹
+                            dragDown += pan.y
+                            if (dragDown > VIEWER_DRAG_DISMISS_PX) {
+                                onSwipeDownToClose()
+                                return@launch
+                            }
+                            scale.snapTo(1f)
+                            offsetX.snapTo(pan.x * 0.4f)
+                            offsetY.snapTo(dragDown)
+                        } else {
+                            dragDown = 0f
+                            scale.snapTo(next)
+                            offsetX.snapTo(clampX(offsetX.value + pan.x, next))
+                            offsetY.snapTo(clampY(offsetY.value + pan.y, next))
+                        }
+                    }
+                }
+            }
+            .pointerInput(Unit) {
+                detectTapGestures(
+                    onTap = { if (scale.value <= 1.0005f) onTapToClose() },
+                    onDoubleTap = { tap ->
+                        val current = scale.value
+                        val target = if (current > 1.0005f) 1f else VIEWER_DOUBLE_TAP_SCALE
+                        val center = Offset(boxSize.width / 2f, boxSize.height / 2f)
+                        // 让双击点保持不动：offset2 = offset1 + (T - center - offset1) * (1 - s2/s1)
+                        val rel = tap - center - Offset(offsetX.value, offsetY.value)
+                        val ratio = target / current
+                        val nextX = if (target == 1f) 0f else clampX(offsetX.value + rel.x * (1f - ratio), target)
+                        val nextY = if (target == 1f) 0f else clampY(offsetY.value + rel.y * (1f - ratio), target)
+                        scope.launch {
+                            scale.animateTo(target)
+                            offsetX.animateTo(nextX)
+                            offsetY.animateTo(nextY)
+                        }
+                    },
+                )
+            },
+        contentAlignment = Alignment.Center,
+    ) {
+        if (bitmap != null) {
+            Image(
+                bitmap = bitmap.asImageBitmap(),
+                contentDescription = pageLabel,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(16.dp)
+                    .graphicsLayer(
+                        scaleX = scale.value,
+                        scaleY = scale.value,
+                        translationX = offsetX.value,
+                        translationY = offsetY.value,
+                    ),
+                contentScale = ContentScale.Fit,
+            )
+        } else {
+            Text("图片文件不可用", color = Color.White)
         }
     }
 }
