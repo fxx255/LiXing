@@ -1,6 +1,11 @@
 package com.example.lixing.ui.screen.settings
 
+import android.content.Context
 import android.content.Intent
+import android.location.Geocoder
+import android.location.Location
+import android.location.LocationListener
+import android.location.LocationManager
 import android.net.Uri
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -22,7 +27,9 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.MyLocation
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.AlertDialog
@@ -49,6 +56,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -65,6 +73,12 @@ import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.lixing.ui.theme.Blush
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
+import java.util.Locale
 import com.example.lixing.data.assistant.AiModelProfile
 import com.example.lixing.data.assistant.AiReasoningEffort
 import com.example.lixing.data.assistant.AiSearchProtocol
@@ -683,53 +697,169 @@ private fun EnglishReviewSection(
 }
 
 /**
- * 用户个性化：称呼 + 城市。本地状态 + 显式保存（避免每次击键都写 DataStore），
- * 保存后立即生效并持久化；两栏都留空 = 不注入个性化，模型用默认称谓。
+ * 用户个性化：称呼 + 城市。
+ * 称呼手动输入；城市由系统粗略定位自动反解（不需要定位就不点、可随时清除）。
+ * 本地状态 + 显式保存（避免每次击键都写 DataStore），保存后立即生效并持久化。
  */
 @Composable
 private fun AssistantIdentitySection(
     viewModel: SettingsViewModel,
     prefs: com.example.lixing.data.prefs.UserPreferences,
 ) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     var nickname by rememberSaveable { mutableStateOf(prefs.assistantNickname) }
     var city by rememberSaveable { mutableStateOf(prefs.assistantCity) }
-    val dirty = nickname.trim() != prefs.assistantNickname || city.trim() != prefs.assistantCity
+    var locating by remember { mutableStateOf(false) }
+    var notice by remember { mutableStateOf<String?>(null) }
+    val nicknameDirty = nickname.trim() != prefs.assistantNickname
+
+    val locationPermission = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        if (!granted) {
+            notice = "未授予定位权限，无法获取城市"
+        } else {
+            locating = true
+            notice = null
+            scope.launch {
+                val resolved = runCatching { resolveCityName(context) }.getOrNull()
+                locating = false
+                if (resolved != null) {
+                    city = resolved
+                    viewModel.saveAssistantIdentity(nickname, resolved)
+                    notice = "已定位到「$resolved」并保存"
+                } else {
+                    notice = "定位失败或无法解析出城市名，请稍后再试"
+                }
+            }
+        }
+    }
 
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
         OutlinedTextField(
             value = nickname,
             onValueChange = { nickname = it.take(20) },
             label = { Text("AI 对你的称呼") },
-            placeholder = { Text("如：小李 / 老板（留空则不特别称呼）") },
+            placeholder = { Text("请输入昵称") },
             supportingText = { Text("最多 20 字；保存后所有回复都会这样叫你") },
             modifier = Modifier.fillMaxWidth(),
             singleLine = true,
         )
-        OutlinedTextField(
-            value = city,
-            onValueChange = { city = it.take(30) },
-            label = { Text("所在城市") },
-            placeholder = { Text("如：上海（用于时区与昼夜/相对时间推断）") },
-            supportingText = { Text("最多 30 字；与「当前时间」一起注入系统提示词") },
+        // 城市：不用手输，粗略定位自动反解；不想用就别点、或点清除
+        Surface(
+            shape = LiXingRadius.Pill,
+            color = MaterialTheme.colorScheme.surfaceContainerHigh,
             modifier = Modifier.fillMaxWidth(),
-            singleLine = true,
-        )
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            Button(onClick = { viewModel.saveAssistantIdentity(nickname, city) }, enabled = dirty) {
-                Text("保存")
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        "所在城市（大致定位）",
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                    Text(
+                        city.ifBlank { "未设置" },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                if (locating) {
+                    Text(
+                        "定位中…",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                } else {
+                    IconButton(
+                        onClick = {
+                            locationPermission.launch(android.Manifest.permission.ACCESS_COARSE_LOCATION)
+                        },
+                    ) {
+                        Icon(Icons.Filled.MyLocation, contentDescription = "定位获取城市")
+                    }
+                }
+                if (city.isNotBlank()) {
+                    IconButton(onClick = {
+                        city = ""
+                        notice = null
+                        viewModel.saveAssistantIdentity(nickname, "")
+                    }) {
+                        Icon(Icons.Filled.Clear, contentDescription = "清除城市")
+                    }
+                }
             }
-            if (!dirty) {
+        }
+        if (locating) {
+            LinearProgressIndicator(Modifier.fillMaxWidth())
+        }
+        notice?.let {
+            Text(
+                it,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        if (nicknameDirty) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                Button(onClick = { viewModel.saveAssistantIdentity(nickname, city) }) {
+                    Text("保存称呼")
+                }
                 Text(
-                    "已保存，立即生效",
+                    "保存后立即生效",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
         }
     }
+}
+
+/**
+ * 取大致位置并反解城市名：优先读系统缓存的最近位置，没有就单次定位（最多等 8 秒），
+ * 再用 Geocoder 反解出城市级名称。任何一步失败都返回 null，由调用方提示。
+ */
+private suspend fun resolveCityName(context: Context): String? = withContext(Dispatchers.IO) {
+    val lm = context.getSystemService(Context.LOCATION_SERVICE) as? LocationManager
+        ?: return@withContext null
+    val enabled = listOf(
+        LocationManager.NETWORK_PROVIDER,
+        LocationManager.PASSIVE_PROVIDER,
+        LocationManager.GPS_PROVIDER,
+    ).filter { provider -> runCatching { lm.isProviderEnabled(provider) }.getOrDefault(false) }
+
+    var location = enabled.firstNotNullOfOrNull { provider ->
+        runCatching { lm.getLastKnownLocation(provider) }.getOrNull()
+    }
+    if (location == null && enabled.isNotEmpty()) {
+        // 没有历史定位：请求一次单点更新，结果经 Deferred 交给协程，最多等 8 秒
+        location = withTimeoutOrNull(8_000) {
+            val deferred = CompletableDeferred<Location?>()
+            val listener = LocationListener { fix -> deferred.complete(fix) }
+            try {
+                lm.requestSingleUpdate(enabled.first(), listener, null)
+            } catch (_: Exception) {
+                deferred.complete(null)
+            }
+            try {
+                deferred.await()
+            } finally {
+                runCatching { lm.removeUpdates(listener) }
+            }
+        } ?: enabled.firstNotNullOfOrNull { provider ->
+            runCatching { lm.getLastKnownLocation(provider) }.getOrNull()
+        }
+    }
+    if (location == null || !Geocoder.isPresent()) return@withContext null
+    runCatching {
+        Geocoder(context, Locale.CHINESE)
+            .getFromLocation(location.latitude, location.longitude, 1)
+            ?.firstOrNull()
+            ?.let { address -> address.locality ?: address.subAdminArea ?: address.adminArea }
+    }.getOrNull()?.trim()?.takeIf { it.isNotEmpty() }
 }
 
 @Composable

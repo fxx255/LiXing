@@ -20,6 +20,8 @@
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <!-- AI 助手个性化：粗略定位（只取大致位置反解城市，用户可不用） -->
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
     <!-- 应用内更新：用系统 DownloadManager 下载新版本 APK + 静默安装。 -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
