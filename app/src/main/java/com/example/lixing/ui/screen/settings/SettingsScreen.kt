@@ -1301,7 +1301,7 @@ private fun AiProfileEditorDialog(
     models: List<String>,
     modelsBusy: Boolean,
     fetchMessage: String?,
-    onFetchModels: (String, String) -> Unit,
+    onFetchModels: (String, String, String?) -> Unit,
     onModelsInvalidated: () -> Unit,
     onDismiss: () -> Unit,
     onSave: (String, String, String, String, Boolean, AiSearchProtocol, AiReasoningEffort) -> Unit,
@@ -1346,9 +1346,12 @@ private fun AiProfileEditorDialog(
                     visualTransformation = PasswordVisualTransformation(),
                     modifier = Modifier.fillMaxWidth(),
                 )
+                // 已保存过密钥的配置，密钥框留空也允许获取列表（沿用已存密钥）。
+                val hasStoredKey = profile?.hasApiKey == true
+                val useStoredKey = apiKey.isBlank() && hasStoredKey
                 OutlinedButton(
-                    onClick = { onFetchModels(baseUrl, apiKey) },
-                    enabled = !modelsBusy && baseUrl.isNotBlank() && apiKey.isNotBlank(),
+                    onClick = { onFetchModels(baseUrl, apiKey, profile?.id) },
+                    enabled = !modelsBusy && baseUrl.isNotBlank() && (apiKey.isNotBlank() || hasStoredKey),
                     modifier = Modifier.fillMaxWidth(),
                 ) {
                     if (modelsBusy) {
@@ -1356,6 +1359,13 @@ private fun AiProfileEditorDialog(
                         Spacer(Modifier.width(8.dp))
                     }
                     Text(if (modelsBusy) "正在获取模型…" else "获取模型列表")
+                }
+                if (useStoredKey) {
+                    Text(
+                        "密钥留空，将使用该配置已保存的密钥获取。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 }
                 fetchMessage?.let {
                     Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -1379,11 +1389,17 @@ private fun AiProfileEditorDialog(
                             onDismissRequest = { modelMenuOpen = false },
                             modifier = Modifier.heightIn(max = 320.dp),
                         ) {
-                            val filtered = models.filter { model.isBlank() || it.contains(model, ignoreCase = true) }
-                                .ifEmpty { models }
-                            filtered.forEach { id ->
+                            // 始终展示接口返回的完整列表；不按输入框内容过滤，
+                            // 否则「获取模型列表」看起来只返回了输入框里的那个模型名。
+                            models.forEach { id ->
+                                val selected = id.equals(model.trim(), ignoreCase = true)
                                 DropdownMenuItem(
-                                    text = { Text(id) },
+                                    text = {
+                                        Text(
+                                            text = id,
+                                            fontWeight = if (selected) FontWeight.Bold else null,
+                                        )
+                                    },
                                     onClick = { model = id; modelMenuOpen = false; error = null },
                                 )
                             }

@@ -8,6 +8,7 @@ import com.example.lixing.data.assistant.guardMissingPlanActions
 import com.example.lixing.data.assistant.modelsUrl
 import com.example.lixing.data.assistant.nativeReasoningRequestFields
 import com.example.lixing.data.assistant.parseModelIds
+import com.example.lixing.data.assistant.resolveFetchKey
 import com.example.lixing.data.assistant.shouldUseWebSearch
 import kotlinx.serialization.json.Json
 import org.junit.Assert.assertEquals
@@ -52,6 +53,21 @@ class AssistantModelClientTest {
         val raw = """{"data":[{"id":"z-model"},{"id":"a-model"},{"id":"a-model"},{"object":"model"}]}"""
         assertEquals(listOf("a-model", "z-model"), parseModelIds(raw))
         assertEquals(emptyList<String>(), parseModelIds("not-json"))
+    }
+
+    @Test
+    fun `resolves fetch key from input then saved then active key`() {
+        // 输入框有值：以输入为准（可用于临时更换密钥）
+        assertEquals("input-key", resolveFetchKey("input-key", "saved-key", "active-key"))
+        assertEquals("input-key", resolveFetchKey("  input-key  ", "saved-key", null))
+        // 输入框为空（编辑已有配置时密钥不回显）：回退到该配置已保存的密钥
+        assertEquals("saved-key", resolveFetchKey("", "saved-key", "active-key"))
+        assertEquals("saved-key", resolveFetchKey("   ", "  saved-key  ", null))
+        // 该配置没存过密钥：回退到当前生效配置
+        assertEquals("active-key", resolveFetchKey("", null, "active-key"))
+        assertEquals("active-key", resolveFetchKey("", "  ", "active-key"))
+        // 都没有：返回空串，由上层提示「请填写 API 密钥」
+        assertEquals("", resolveFetchKey("", null, null))
     }
 
     @Test

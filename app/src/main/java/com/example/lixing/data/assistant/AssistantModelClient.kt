@@ -209,13 +209,28 @@ class AssistantModelClient @Inject constructor(
         }
     }
 
-    /** Fetches model ids from the standard OpenAI-compatible /models endpoint. */
-    suspend fun fetchModels(baseUrl: String, apiKey: String): List<String> = withContext(io) {
+    /**
+     * Fetches model ids from the standard OpenAI-compatible /models endpoint.
+     *
+     * [apiKey] 可以为空：此时依次回退到 [profileId] 对应配置已保存的密钥、
+     * 以及当前生效配置的密钥。这样编辑已有配置时（密钥框出于安全不回显，
+     * 始终为空）也能随时获取模型列表，且可重复点击。
+     */
+    suspend fun fetchModels(
+        baseUrl: String,
+        apiKey: String = "",
+        profileId: String? = null,
+    ): List<String> = withContext(io) {
         require(baseUrl.isNotBlank()) { "请填写接口地址" }
-        require(apiKey.isNotBlank()) { "请填写 API 密钥" }
+        val key = resolveFetchKey(
+            inputKey = apiKey,
+            profileKey = profileId?.let { credentialStore.credentialsFor(it)?.apiKey },
+            activeKey = credentialStore.load(),
+        )
+        require(key.isNotEmpty()) { "请填写 API 密钥" }
         val request = Request.Builder()
             .url(modelsUrl(baseUrl))
-            .header("Authorization", "Bearer ${apiKey.trim()}")
+            .header("Authorization", "Bearer $key")
             .get()
             .build()
         val response = try {
@@ -1071,6 +1086,17 @@ internal fun parseModelIds(raw: String): List<String> {
         .distinct()
         .sorted()
 }
+
+/**
+ * 解析「获取模型列表」实际使用的密钥。
+ *
+ * 优先级：输入框现填值 → 该配置已保存的密钥 → 当前生效配置的密钥。
+ * 编辑已有配置时输入框为空（密钥不回显），前两级回退保证按钮始终可用。
+ */
+internal fun resolveFetchKey(inputKey: String, profileKey: String?, activeKey: String?): String =
+    inputKey.trim()
+        .ifEmpty { profileKey.orEmpty().trim() }
+        .ifEmpty { activeKey.orEmpty().trim() }
 
 private val WEB_SEARCH_INTENT_MARKERS = listOf(
     "搜索",

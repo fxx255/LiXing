@@ -23,6 +23,7 @@ import com.example.lixing.domain.word.WordSourceException
 import com.example.lixing.ui.theme.DarkModePref
 import com.example.lixing.ui.theme.ThemeSeed
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -80,6 +81,12 @@ class SettingsViewModel @Inject constructor(
 
     private val _aiModelsBusy = MutableStateFlow(false)
     val aiModelsBusy: StateFlow<Boolean> = _aiModelsBusy.asStateFlow()
+
+    /**
+     * 模型列表请求序号。允许用户随时重复点击「获取模型列表」，
+     * 只有最后一次请求的结果会被采纳，避免慢请求覆盖新结果。
+     */
+    private var fetchModelsSeq = 0
 
     val baiduState = baiduNetdiskRepository.state
     val cloudBackups = baiduNetdiskRepository.cloudBackups
@@ -480,23 +487,40 @@ class SettingsViewModel @Inject constructor(
         }
     }
 
-    fun fetchAiModels(baseUrl: String, apiKey: String) {
+    /**
+     * 获取模型列表。
+     *
+     * [profileId] 用于在密钥框留空（编辑已有配置时密钥不回显）的情况下
+     * 回退到该配置已保存的密钥；可在任意时刻重复调用。
+     * 获取失败时保留上一次的列表，避免把已经拿到的结果清空。
+     */
+    fun fetchAiModels(baseUrl: String, apiKey: String, profileId: String? = null) {
+        val seq = ++fetchModelsSeq
+        _aiModelsBusy.value = true
         viewModelScope.launch {
-            _aiModelsBusy.value = true
             try {
-                _aiModels.value = assistantModelClient.fetchModels(baseUrl, apiKey)
-                _aiMessage.value = "已获取 ${_aiModels.value.size} 个模型"
+                val list = assistantModelClient.fetchModels(baseUrl, apiKey, profileId)
+                if (seq == fetchModelsSeq) {
+                    _aiModels.value = list
+                    _aiMessage.value = "已获取 ${list.size} 个模型"
+                }
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
-                _aiModels.value = emptyList()
-                _aiMessage.value = "模型列表获取失败：${e.message ?: "未知错误"}；仍可手动填写模型名"
+                if (seq == fetchModelsSeq) {
+                    _aiMessage.value =
+                        "模型列表获取失败：${e.message ?: "未知错误"}；仍可手动填写模型名"
+                }
             } finally {
-                _aiModelsBusy.value = false
+                if (seq == fetchModelsSeq) _aiModelsBusy.value = false
             }
         }
     }
 
     fun clearAiModels() {
+        fetchModelsSeq++          // 作废在途请求，避免旧地址的结果覆盖新状态
         _aiModels.value = emptyList()
+        _aiModelsBusy.value = false
     }
 
     fun testActiveAiProfile() {
