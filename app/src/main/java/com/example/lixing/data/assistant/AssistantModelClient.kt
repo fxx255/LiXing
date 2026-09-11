@@ -103,12 +103,16 @@ class AssistantModelClient @Inject constructor(
      * - DeepSeek（api.deepseek.com）→ 走 OpenAI Responses API 服务端内置联网搜索；
      * - 小米 MiMo（api.xiaomimimo.com）→ 在 Chat Completions 里注入 web_search 工具；
      * 两种原生路径失败都会自动回退普通对话。
+     *
+     * 回退与「服务端没真的搜索」都会在 [ParsedAssistantReply.warnings] 里留下说明，
+     * 最终由界面展示给用户——静默降级会让联网问题完全无法定位。
      */
     suspend fun chatStreaming(
         messages: List<AssistantMessage>,
         context: String,
         imageBase64s: List<String> = emptyList(),
         webSearchEnabled: Boolean = false,
+        forceWebSearch: Boolean = false,
         onEvent: suspend (AssistantStreamEvent) -> Unit,
     ): ParsedAssistantReply = withContext(io) {
         val configured = requireConfigured()
@@ -117,13 +121,17 @@ class AssistantModelClient @Inject constructor(
         val webSearchOn = webSearchEnabled &&
             prefs.aiWebSearchEnabled &&
             configured.searchProtocol != AiSearchProtocol.OFF
+        var searchNote: String? = null
         if (webSearchOn && configured.searchProtocol == AiSearchProtocol.RESPONSES) {
             try {
-                return@withContext chatDeepSeekNativeResponses(configured, messages, context, imageBase64s, userProfile, onEvent)
+                return@withContext chatDeepSeekNativeResponses(
+                    configured, messages, context, imageBase64s, userProfile, forceWebSearch, onEvent,
+                )
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
                 Log.w("AssistantModel", "Responses native search failed, fallback to normal chat", e)
+                searchNote = "联网搜索未生效，已改用离线回答（${e.message ?: "未知原因"}）"
             }
         }
         val chatCompletionsSearch = webSearchOn && configured.searchProtocol == AiSearchProtocol.CHAT_COMPLETIONS
@@ -170,7 +178,7 @@ class AssistantModelClient @Inject constructor(
                     append(output.reasoning.takeLast(REASONING_FALLBACK_CHARS).trim())
                 },
                 actions = emptyList(),
-                warnings = listOf("服务商两次只返回思考内容，已展示可恢复的推理尾部"),
+                warnings = listOf("服务商两次只返回思考内容，已展示可恢复的推理尾部") + listOfNotNull(searchNote),
             )
         }
         if (answer.isEmpty()) {
@@ -181,10 +189,11 @@ class AssistantModelClient @Inject constructor(
         }
         try {
             val userPrompt = messages.lastOrNull { it.role == "user" }?.content.orEmpty()
-            val parsed = guardMissingEnglishActions(
+            val base = guardMissingEnglishActions(
                 guardMissingPlanActions(AssistantResponseParser.parse(answer), userPrompt),
                 userPrompt,
             ).copy(truncated = output.finishReason == "length")
+            val parsed = if (searchNote == null) base else base.copy(warnings = base.warnings + searchNote)
             val distinctCitations = output.citations.distinctBy(Citation::url)
             if (distinctCitations.isEmpty()) {
                 parsed
@@ -334,6 +343,116 @@ class AssistantModelClient @Inject constructor(
                     )
                 }
             }
+        }
+    }
+
+    /**
+     * 联网搜索自检：用一条必须依赖实时信息的问题打一次请求，报告
+     * HTTP 状态、服务端是否真的发起搜索、拿到几条来源。
+     *
+     * 正式对话里联网失败是静默降级的（自动退回普通对话、界面无提示），
+     * 没有这个入口就无法区分到底是开关、协议、模型还是服务端的问题。
+     */
+    suspend fun testWebSearch(): String = withContext(io) {
+        val configured = requireConfigured()
+        if (configured.searchProtocol == AiSearchProtocol.OFF) {
+            return@withContext "这套模型配置的联网协议是「关闭」，不会发起搜索。请改成 Responses 或 Chat Completions 再测。"
+        }
+        val primary = probeWebSearch(configured, configured.searchProtocol)
+        val other = if (configured.searchProtocol == AiSearchProtocol.RESPONSES) {
+            AiSearchProtocol.CHAT_COMPLETIONS
+        } else {
+            AiSearchProtocol.RESPONSES
+        }
+        val text = StringBuilder(primary.render("当前"))
+        if (!primary.searched) {
+            text.append("\n\n").append(probeWebSearch(configured, other).render("备选"))
+        }
+        text.toString()
+    }
+
+    /** 用一种协议探测一次联网搜索，结果与是否真的搜过一起返回。 */
+    private suspend fun probeWebSearch(
+        configured: ConfiguredModel,
+        protocol: AiSearchProtocol,
+    ): WebSearchProbe {
+        val responses = protocol == AiSearchProtocol.RESPONSES
+        val url = if (responses) deepSeekResponsesUrl(configured.baseUrl) else completionsUrl(configured.baseUrl)
+        val messages = listOf(
+            AssistantMessage("user", "请联网检索后回答：今天有什么重要的科技新闻？只说一条标题即可。"),
+        )
+        val payload = if (responses) {
+            buildDeepSeekResponsesPayload(
+                configured, messages, "", emptyList(), AssistantUserProfile(), forceWebSearch = true,
+            )
+        } else {
+            buildChatPayload(configured, messages, "", emptyList(), stream = false, webSearchEnabled = true)
+        }
+        val request = Request.Builder()
+            .url(url)
+            .header("Authorization", "Bearer ${configured.apiKey}")
+            .post(payload.toString().toRequestBody(mediaType))
+            .build()
+        val started = System.currentTimeMillis()
+        val code: Int
+        val body: String
+        try {
+            client.newCall(request).execute().use { resp ->
+                code = resp.code
+                body = resp.body?.string().orEmpty()
+            }
+        } catch (e: IOException) {
+            return WebSearchProbe(protocol, url, error = "网络错误：${e.message ?: "无法连接"}")
+        }
+        val elapsed = System.currentTimeMillis() - started
+        if (code !in 200..299) {
+            return WebSearchProbe(protocol, url, code, elapsed, error = "HTTP $code：${body.take(160)}")
+        }
+        if (responses) {
+            val output = parseDeepSeekResponses(body)
+            return WebSearchProbe(
+                protocol, url, code, elapsed, output.searched,
+                output.citations.distinctBy { it.url }.size, output.text.trim().take(100),
+            )
+        }
+        val message = runCatching {
+            val root = Json.parseToJsonElement(body) as? JsonObject
+            ((root?.get("choices") as? JsonArray)?.firstOrNull() as? JsonObject)?.get("message") as? JsonObject
+        }.getOrNull()
+        val found = mutableListOf<Citation>()
+        extractDeepSeekCitations(message?.get("citations"), found)
+        extractDeepSeekCitations(message?.get("annotations"), found)
+        val distinct = found.distinctBy { it.url }
+        return WebSearchProbe(
+            protocol, url, code, elapsed,
+            searched = distinct.isNotEmpty() || "web_search" in body || "search_result" in body,
+            citations = distinct.size,
+            preview = extractText(message?.get("content")).trim().take(100),
+        )
+    }
+
+    private data class WebSearchProbe(
+        val protocol: AiSearchProtocol,
+        val url: String,
+        val code: Int = 0,
+        val elapsedMs: Long = 0,
+        val searched: Boolean = false,
+        val citations: Int = 0,
+        val preview: String = "",
+        val error: String? = null,
+    ) {
+        fun render(tag: String): String = buildString {
+            val name = if (protocol == AiSearchProtocol.RESPONSES) "Responses" else "Chat Completions"
+            append("【$tag · $name】")
+            if (error != null) {
+                append(error)
+                return@buildString
+            }
+            append("HTTP $code · ${elapsedMs}ms · ")
+            append(if (searched) "已发起搜索" else "未发起搜索")
+            append(" · 来源 $citations 条")
+            if (preview.isNotBlank()) append("\n回答摘要：$preview")
+            append("\n端点：$url")
         }
     }
 
@@ -698,9 +817,12 @@ class AssistantModelClient @Inject constructor(
         context: String,
         imageBase64s: List<String>,
         userProfile: AssistantUserProfile,
+        forceWebSearch: Boolean,
         onEvent: suspend (AssistantStreamEvent) -> Unit,
     ): ParsedAssistantReply {
-        val payload = buildDeepSeekResponsesPayload(configured, messages, context, imageBase64s, userProfile)
+        val payload = buildDeepSeekResponsesPayload(
+            configured, messages, context, imageBase64s, userProfile, forceWebSearch,
+        )
         val request = Request.Builder()
             .url(deepSeekResponsesUrl(configured.baseUrl))
             .header("Authorization", "Bearer ${configured.apiKey}")
@@ -749,12 +871,20 @@ class AssistantModelClient @Inject constructor(
                 )
             }
             val distinctCitations = output.citations.distinctBy(Citation::url)
-            if (distinctCitations.isEmpty()) {
+            val noted = if (output.searched) {
                 parsed
             } else {
                 parsed.copy(
+                    warnings = parsed.warnings +
+                        "已按联网模式请求，但服务端没有返回任何搜索记录或来源（接口可能忽略了 web_search 工具），本次实际是离线回答",
+                )
+            }
+            if (distinctCitations.isEmpty()) {
+                noted
+            } else {
+                noted.copy(
                     reply = buildString {
-                        append(parsed.reply)
+                        append(noted.reply)
                         append("\n\n### 来源\n")
                         distinctCitations.forEach { citation ->
                             append("- [")
@@ -773,6 +903,7 @@ class AssistantModelClient @Inject constructor(
         context: String,
         imageBase64s: List<String>,
         userProfile: AssistantUserProfile,
+        forceWebSearch: Boolean,
     ): JsonObject = buildJsonObject {
         put("model", configured.model)
         put("max_output_tokens", MAX_OUTPUT_TOKENS)
@@ -781,6 +912,10 @@ class AssistantModelClient @Inject constructor(
             append("\n\n").append(reasoningInstruction(configured.reasoningEffort))
         })
         put("tools", buildJsonArray { add(buildJsonObject { put("type", "web_search") }) })
+        // 用户明确开启搜索时强制调用：默认 auto 时模型可能完全不用这个工具。
+        if (forceWebSearch) {
+            put("tool_choice", buildJsonObject { put("type", "web_search") })
+        }
         put("input", buildJsonArray {
             if (context.isNotBlank()) {
                 add(buildJsonObject { put("role", "user"); put("content", "以下是你需要依据的本机学习数据（只读）：\n\n$context") })
@@ -980,18 +1115,26 @@ internal data class DeepSeekResponsesOutput(
     val text: String,
     val thinking: String,
     val citations: List<AssistantModelClient.Citation>,
+    /**
+     * 响应里是否真的出现过搜索动作或来源引用。
+     *
+     * 服务端可能"接受但忽略" web_search：请求返回 200、回答正常，却一次都没搜过。
+     * 只有这个标记能区分「搜了但没找到引用」和「压根没搜」。
+     */
+    val searched: Boolean = false,
 )
 
-/** 解析 DeepSeek Responses API 的非流式响应：收集 output_text / 思考与 citations，忽略 web_search_call 等状态项。 */
+/** 解析 DeepSeek Responses API 的非流式响应：收集 output_text / 思考与 citations，并标记是否真的发起过搜索。 */
 internal fun parseDeepSeekResponses(raw: String): DeepSeekResponsesOutput {
     val root = runCatching { Json.parseToJsonElement(raw) as? JsonObject }.getOrNull()
-        ?: return DeepSeekResponsesOutput("", "", emptyList())
+        ?: return DeepSeekResponsesOutput("", "", emptyList(), false)
     val output = root["output"] as? JsonArray
-        ?: return DeepSeekResponsesOutput("", "", emptyList())
+        ?: return DeepSeekResponsesOutput("", "", emptyList(), false)
 
     val text = StringBuilder()
     val thinking = StringBuilder()
     val citations = mutableListOf<AssistantModelClient.Citation>()
+    var searched = false
     for (item in output) {
         val obj = item as? JsonObject ?: continue
         val type = (obj["type"] as? JsonPrimitive)?.contentOrNull
@@ -1007,8 +1150,12 @@ internal fun parseDeepSeekResponses(raw: String): DeepSeekResponsesOutput {
                         "output_thought" -> thinking.append(partText)
                     }
                     extractDeepSeekCitations(partObj["citations"], citations)
+                    // OpenAI 兼容实现常把引用放在 annotations（url_citation）里
+                    extractDeepSeekCitations(partObj["annotations"], citations)
                 }
             }
+            // 服务端确实发起过搜索才会出现这个 item
+            "web_search_call" -> searched = true
             "reasoning" -> {
                 val summary = obj["summary"] as? JsonArray ?: continue
                 for (part in summary) {
@@ -1018,10 +1165,15 @@ internal fun parseDeepSeekResponses(raw: String): DeepSeekResponsesOutput {
                     }
                 }
             }
-            // "web_search_call" 等仅表示搜索状态，忽略。
+            // 其余 item（function_call / custom_tool_call 等）本客户端暂不使用，忽略。
         }
     }
-    return DeepSeekResponsesOutput(text.toString(), thinking.toString(), citations)
+    return DeepSeekResponsesOutput(
+        text.toString(),
+        thinking.toString(),
+        citations,
+        searched || citations.isNotEmpty(),
+    )
 }
 
 private fun extractDeepSeekCitations(element: JsonElement?, out: MutableList<AssistantModelClient.Citation>) {

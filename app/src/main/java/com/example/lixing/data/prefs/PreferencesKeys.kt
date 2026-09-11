@@ -80,7 +80,7 @@ val UPDATE_LAST_SEEN_VERSION_CODE = intPreferencesKey("update_last_seen_version_
     val AI_MODEL = stringPreferencesKey("ai_model")
     /** 接入的模型是否支持图片输入（多模态）。关闭时照片先走本地 OCR。 */
     val AI_VISION_ENABLED = booleanPreferencesKey("ai_vision_enabled")
-    /** 是否启用联网搜索（DeepSeek 内置）。默认关闭。 */
+    /** 是否启用联网搜索（DeepSeek / MiMo 内置）。默认开启。 */
     val AI_WEB_SEARCH_ENABLED = booleanPreferencesKey("ai_web_search_enabled")
     /** 长回答被截断时的自动续写保护上限（轮数，0 = 关闭自动续写；正常用不满）。 */
     val ASSISTANT_AUTO_CONTINUE = intPreferencesKey("assistant_auto_continue")

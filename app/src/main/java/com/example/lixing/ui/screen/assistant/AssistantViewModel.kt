@@ -177,7 +177,22 @@ class AssistantViewModel @Inject constructor(
 
     fun toggleReasoningExpanded() = _state.update { it.copy(reasoningExpanded = !it.reasoningExpanded) }
 
-    fun setForceWebSearch(enabled: Boolean) = _state.update { it.copy(forceWebSearch = enabled) }
+    /**
+     * 助手页的「智能搜索」开关。
+     *
+     * 开启时顺带把设置页的总开关也打开：两个开关串联，总开关默认关着，
+     * 曾导致用户在这里打开了却完全不生效，且界面没有任何提示。
+     */
+    fun setForceWebSearch(enabled: Boolean) {
+        _state.update { it.copy(forceWebSearch = enabled) }
+        if (enabled) {
+            viewModelScope.launch {
+                if (!prefsRepository.current().aiWebSearchEnabled) {
+                    prefsRepository.setAiWebSearchEnabled(true)
+                }
+            }
+        }
+    }
 
     fun toggleContextKind(kind: AssistantContextKind) = _state.update { state ->
         val kinds = state.contextKinds.toMutableSet()
@@ -328,6 +343,7 @@ class AssistantViewModel @Inject constructor(
                     context = context,
                     imageBase64s = emptyList(),
                     webSearchEnabled = webSearchEnabled,
+                    forceWebSearch = _state.value.forceWebSearch,
                     today = today,
                 ).let { lastReply ->
                     _state.update { state ->
@@ -505,6 +521,7 @@ class AssistantViewModel @Inject constructor(
         context: String,
         imageBase64s: List<String>,
         webSearchEnabled: Boolean,
+        forceWebSearch: Boolean = false,
         today: LocalDate,
     ): ParsedAssistantReply? {
         val maxContinuations = prefsRepository.current().assistantAutoContinue.coerceAtLeast(0)
@@ -516,7 +533,9 @@ class AssistantViewModel @Inject constructor(
         var lastReply: ParsedAssistantReply? = null
         while (true) {
             val history = _state.value.messages.takeLast(10)
-            val reply = modelClient.chatStreaming(history, context, images, webSearchEnabled) { event ->
+            val reply = modelClient.chatStreaming(
+                history, context, images, webSearchEnabled, forceWebSearch,
+            ) { event ->
                 when (event) {
                     is AssistantStreamEvent.ReasoningDelta -> _state.update {
                         it.copy(activeReasoning = appendReasoningForDisplay(it.activeReasoning, event.text))
@@ -647,6 +666,7 @@ class AssistantViewModel @Inject constructor(
                     context = modelContext,
                     imageBase64s = imageBase64s,
                     webSearchEnabled = webSearchEnabled,
+                    forceWebSearch = _state.value.forceWebSearch,
                     today = today,
                 ).let { lastReply ->
                     _state.update { state ->

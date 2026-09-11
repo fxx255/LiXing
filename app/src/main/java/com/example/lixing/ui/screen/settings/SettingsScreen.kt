@@ -1117,7 +1117,7 @@ private fun AiAssistantSection(viewModel: SettingsViewModel, prefs: com.example.
             )
             SwitchRow(
                 label = "启用联网搜索",
-                subtitle = "模型自主判断是否联网，由服务端执行搜索",
+                subtitle = "默认开启。由模型与服务端决定是否检索；对话页的「智能搜索」开关可强制联网",
                 checked = prefs.aiWebSearchEnabled,
                 onCheckedChange = viewModel::setAiWebSearchEnabled,
             )
@@ -1221,6 +1221,11 @@ private fun AiAssistantSection(viewModel: SettingsViewModel, prefs: com.example.
                         shape = LiXingRadius.Pill,
                     ) { Text(if (testing) "测试中…" else "测试当前连接") }
                 }
+                OutlinedButton(
+                    onClick = viewModel::testWebSearch,
+                    enabled = !testing,
+                    shape = LiXingRadius.Pill,
+                ) { Text("检测联网搜索") }
             }
 
             val questionVisionId by viewModel.questionVisionProfileId.collectAsStateWithLifecycle()

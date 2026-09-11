@@ -74,7 +74,7 @@ class UserPreferencesRepository @Inject constructor(
             aiBaseUrl = p[PreferencesKeys.AI_BASE_URL] ?: "",
             aiModel = p[PreferencesKeys.AI_MODEL] ?: "",
             aiVisionEnabled = p[PreferencesKeys.AI_VISION_ENABLED] ?: false,
-            aiWebSearchEnabled = p[PreferencesKeys.AI_WEB_SEARCH_ENABLED] ?: false,
+            aiWebSearchEnabled = p[PreferencesKeys.AI_WEB_SEARCH_ENABLED] ?: true,
             assistantAutoContinue = p[PreferencesKeys.ASSISTANT_AUTO_CONTINUE] ?: 4,
             assistantNickname = p[PreferencesKeys.ASSISTANT_NICKNAME].orEmpty().trim().take(20),
             assistantCity = p[PreferencesKeys.ASSISTANT_CITY].orEmpty().trim().take(30),

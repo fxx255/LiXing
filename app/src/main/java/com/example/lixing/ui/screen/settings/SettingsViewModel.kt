@@ -537,6 +537,21 @@ class SettingsViewModel @Inject constructor(
         }
     }
 
+    /** 联网搜索自检：直接把「搜没搜、拿到几条来源」告诉用户，避免静默降级无处排查。 */
+    fun testWebSearch() {
+        viewModelScope.launch {
+            _aiTesting.value = true
+            _aiMessage.value = "正在检测联网搜索…"
+            try {
+                _aiMessage.value = assistantModelClient.testWebSearch()
+            } catch (e: Exception) {
+                _aiMessage.value = "检测失败：${e.message ?: "未知错误"}"
+            } finally {
+                _aiTesting.value = false
+            }
+        }
+    }
+
     fun deleteAiProfile(id: String) {
         viewModelScope.launch {
             val deletedName = _aiProfiles.value.firstOrNull { it.id == id }?.name.orEmpty()

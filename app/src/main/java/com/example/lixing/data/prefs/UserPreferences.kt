@@ -96,8 +96,8 @@ data class UserPreferences(
     val aiModel: String = "",
     /** 模型是否多模态。关闭时助手照片先经本地 OCR 提取文字。 */
     val aiVisionEnabled: Boolean = false,
-    /** 是否启用联网搜索（DeepSeek 内置）。默认关闭。 */
-    val aiWebSearchEnabled: Boolean = false,
+    /** 是否启用联网搜索（DeepSeek / MiMo 内置）。默认开启，可在设置页关闭。 */
+    val aiWebSearchEnabled: Boolean = true,
     /** 用户个性化：AI 对用户的称呼（空 = 不注入）。 */
     val assistantNickname: String = "",
     /** 用户个性化：所在城市（用于时区/昼夜/相对时间推断；空 = 不注入）。 */
