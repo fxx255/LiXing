@@ -118,6 +118,50 @@ data class OcrPreview(
 private const val REASONING_OMITTED_PREFIX = "…较早的思考内容已省略…\n"
 internal const val MAX_REASONING_DISPLAY_CHARS = 12_000
 
+/** 发给模型的历史上限：条数与总字符双限，超长时从最早的消息开始丢。 */
+private const val HISTORY_MAX_MESSAGES = 24
+private const val HISTORY_MAX_CHARS = 24_000
+
+/** 自动续写时回传给模型的「已生成内容」尾部长度：够它接上话，又不至于把请求撑爆。 */
+private const val CONTINUATION_ECHO_CHARS = 12_000
+
+/**
+ * 自动续写发送的内部指令。
+ *
+ * 只用于当次请求，**不写入会话**——早先它会被永久记录成用户发言，
+ * 反复追问几轮后历史里全是「继续」，既干扰模型也污染回看。
+ */
+private const val CONTINUE_INSTRUCTION = "继续，从刚才中断的地方接着输出，不要重复已有内容。"
+
+/**
+ * 构造真正发给模型的历史消息。
+ *
+ * 自动续写会把一条长回答切成多段 assistant 消息，这里先把相邻片段合并，
+ * 否则模型看到的是「一串半截回答」，很容易接不上；再按条数与总字符裁剪，
+ * 保证请求不会因为历史过长而超限。
+ */
+internal fun buildModelHistory(messages: List<AssistantMessage>): List<AssistantMessage> {
+    if (messages.isEmpty()) return emptyList()
+    val merged = mutableListOf<AssistantMessage>()
+    for (message in messages) {
+        val previous = merged.lastOrNull()
+        if (previous != null && previous.role == "assistant" && message.role == "assistant") {
+            merged[merged.lastIndex] = previous.copy(content = previous.content + message.content)
+        } else {
+            merged += message
+        }
+    }
+    var chars = 0
+    val kept = ArrayDeque<AssistantMessage>()
+    for (message in merged.takeLast(HISTORY_MAX_MESSAGES).asReversed()) {
+        val cost = message.content.length + 8
+        if (kept.isNotEmpty() && chars + cost > HISTORY_MAX_CHARS) break
+        kept.addFirst(message)
+        chars += cost
+    }
+    return kept.toList()
+}
+
 /** Keeps streaming UI updates bounded while retaining the most recent reasoning. */
 internal fun appendReasoningForDisplay(
     current: String,
@@ -527,14 +571,35 @@ class AssistantViewModel @Inject constructor(
         val maxContinuations = prefsRepository.current().assistantAutoContinue.coerceAtLeast(0)
         val minMeaningfulChars = 200
         val totalCharFuse = 240_000 // 约 12 万汉字量级的绝对熔断，正常永远到不了
+        // 本轮开始时的历史快照。续写必须以它为锚，不能再从消息列表尾部取窗口——
+        // 续写会把长回答切成多段压进列表，窗口一滑就把最初的问题挤出视野，
+        // 模型失去锚点后只能顺着「继续」往下编（这是续写之后出现幻觉的根因）。
+        val baseHistory = buildModelHistory(_state.value.messages)
+        // 本轮回答占用的那一条消息：全程只替换它，长回答不会再裂成好几个气泡。
+        // 初始为 -1，等真正拿到内容才插入——请求失败时就不会留下一个空气泡。
+        var answerIndex = -1
         var images = imageBase64s
+        var generated = ""
         var continuation = 0
         var totalChars = 0
         var lastReply: ParsedAssistantReply? = null
         while (true) {
-            val history = _state.value.messages.takeLast(10)
+            val firstRound = continuation == 0
+            val history = if (firstRound) {
+                baseHistory
+            } else {
+                // 显式带上「原对话 + 已生成的内容 + 继续指令」，模型才知道自己写到哪了
+                baseHistory +
+                    AssistantMessage("assistant", generated.takeLast(CONTINUATION_ECHO_CHARS)) +
+                    AssistantMessage("user", CONTINUE_INSTRUCTION)
+            }
+            // 联网只在首轮做：续写再搜一次既拖时间，又可能引入与上文冲突的材料
             val reply = modelClient.chatStreaming(
-                history, context, images, webSearchEnabled, forceWebSearch,
+                history,
+                context,
+                images,
+                webSearchEnabled && firstRound,
+                forceWebSearch && firstRound,
             ) { event ->
                 when (event) {
                     is AssistantStreamEvent.ReasoningDelta -> _state.update {
@@ -545,6 +610,7 @@ class AssistantViewModel @Inject constructor(
             }
             lastReply = reply
             images = emptyList() // 续写轮不再带图：首轮图片内容已在对话历史里
+            generated += reply.reply
             totalChars += reply.reply.length
 
             val hitLimit = reply.truncated
@@ -553,9 +619,14 @@ class AssistantViewModel @Inject constructor(
             val withinFuse = totalChars < totalCharFuse
             // 继续的条件：确实被截断 + 本轮产出够长（排除原地打转）+ 未触发任何刹车
             val shouldContinue = hitLimit && producedSomething && withinUserCap && withinFuse
-            // 继续写时原样入会话；收尾（不再续写且被截断）时才做修饰并明示
-            val text = if (hitLimit && !shouldContinue) polishTruncatedTail(reply.reply) else reply.reply
-            appendAssistantTurn(conversationId, text, reply, today)
+            // 收尾（不再续写且被截断）时才做修饰并明示；修饰作用于整篇而不是最后一段
+            val text = if (hitLimit && !shouldContinue) polishTruncatedTail(generated) else generated
+            if (answerIndex < 0) {
+                answerIndex = _state.value.messages.size
+                _state.update { it.copy(messages = it.messages + AssistantMessage("assistant", text)) }
+            } else {
+                replaceAnswerText(answerIndex, text)
+            }
             if (!shouldContinue) {
                 when {
                     !hitLimit -> Unit // 自然写完，无需提示
@@ -573,36 +644,44 @@ class AssistantViewModel @Inject constructor(
                         }
                     else -> Unit
                 }
+                lastReply?.let { appendAssistantTurn(conversationId, text, it, today, answerIndex) }
                 return lastReply
             }
             continuation++
-            val continueText = "继续，从刚才中断的地方接着输出，不要重复已有内容。"
-            chatRepository.appendMessage(conversationId, "user", continueText, emptyList(), null)
-            _state.update { it.copy(messages = it.messages + AssistantMessage("user", continueText)) }
         }
     }
 
-    /** 把一段回复写入会话与消息列表，并挂上计划/英语变更的待确认项。 */
+    /** 把本轮的流式回答写进指定的那条消息（替换而非追加，避免长回答裂成多个气泡）。 */
+    private fun replaceAnswerText(index: Int, text: String) {
+        _state.update { state ->
+            val list = state.messages.toMutableList()
+            if (index in list.indices && list[index].role == "assistant") {
+                list[index] = list[index].copy(content = text)
+            }
+            state.copy(messages = list)
+        }
+    }
+
+    /** 收尾：把整篇回答落库，并把本轮产生的待确认项挂到这条消息上。 */
     private suspend fun appendAssistantTurn(
         conversationId: String,
         text: String,
         reply: ParsedAssistantReply,
         today: LocalDate,
+        answerIndex: Int,
     ) {
         chatRepository.appendMessage(conversationId, "assistant", text)
         val previews = reply.actions.takeIf { it.isNotEmpty() }?.let { buildPreviews(it, today) }
         val englishPreviews = buildEnglishPreviews(reply.englishActions)
         _state.update { state ->
-            // 待确认项只挂到产生它的那条回复下面，不再自动跳到确认页。
-            val updatedMessages = state.messages + AssistantMessage("assistant", text)
-            val ownerIndex = updatedMessages.lastIndex
+            // 回答本身已在流式阶段写入 [answerIndex]，这里只挂待确认项：
+            // 不再追加消息，否则一条长回答会占好几个气泡、也会污染后续上下文。
             state.copy(
-                messages = updatedMessages,
                 pendingActions = previews ?: state.pendingActions,
-                pendingActionsOwnerIndex = if (previews != null) ownerIndex else state.pendingActionsOwnerIndex,
+                pendingActionsOwnerIndex = if (previews != null) answerIndex else state.pendingActionsOwnerIndex,
                 planReviewDate = if (previews != null) today else state.planReviewDate,
                 pendingEnglishActions = englishPreviews ?: state.pendingEnglishActions,
-                pendingEnglishOwnerIndex = if (englishPreviews != null) ownerIndex else state.pendingEnglishOwnerIndex,
+                pendingEnglishOwnerIndex = if (englishPreviews != null) answerIndex else state.pendingEnglishOwnerIndex,
             )
         }
     }
