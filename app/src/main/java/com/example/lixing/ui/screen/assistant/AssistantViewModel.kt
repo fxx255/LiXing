@@ -126,6 +126,14 @@ private const val HISTORY_MAX_CHARS = 24_000
 private const val CONTINUATION_ECHO_CHARS = 12_000
 
 /**
+ * 追问时回溯携带的历史图片：最多几条带图消息，以及 base64 总长度上限（约 6MB 原图）。
+ *
+ * 带太多会让每轮请求体迅速膨胀、token 翻倍，所以只回溯最近几次拍照。
+ */
+private const val HISTORY_IMAGE_MESSAGE_LIMIT = 2
+private const val HISTORY_IMAGE_MAX_BASE64_CHARS = 8_000_000
+
+/**
  * 自动续写发送的内部指令。
  *
  * 只用于当次请求，**不写入会话**——早先它会被永久记录成用户发言，
@@ -467,6 +475,38 @@ class AssistantViewModel @Inject constructor(
         }
     }
 
+    /**
+     * 给历史消息回溯带上图片。
+     *
+     * 大模型接口是无状态的：图片只在拍下那一轮发过一次，追问时不重发，模型就完全看不到
+     * （`imagePaths` 只是本机路径，从不外发）——英语阅读这类长材料会因此整篇丢失。
+     * 这里只回溯最近若干条带图消息，避免每轮把所有历史图片再传一遍；
+     * 当前轮由 [encodePhotos] 单独提供，所以跳过最后一条。
+     */
+    private suspend fun attachHistoryImages(messages: List<AssistantMessage>): List<AssistantMessage> {
+        val candidates = messages.indices
+            .filter { index ->
+                index != messages.lastIndex &&
+                    messages[index].role == "user" &&
+                    messages[index].imagePaths.isNotEmpty() &&
+                    messages[index].imageBase64s.isEmpty()
+            }
+            .takeLast(HISTORY_IMAGE_MESSAGE_LIMIT)
+        if (candidates.isEmpty()) return messages
+        val updated = messages.toMutableList()
+        var budget = HISTORY_IMAGE_MAX_BASE64_CHARS
+        for (index in candidates.asReversed()) {
+            val encoded = runCatching { encodePhotos(updated[index].imagePaths) }
+                .getOrElse { emptyList() }
+            val cost = encoded.sumOf { it.length }
+            // 照片已被清理或超出预算就跳过，绝不因此让整轮提问失败
+            if (encoded.isEmpty() || cost > budget) continue
+            budget -= cost
+            updated[index] = updated[index].copy(imageBase64s = encoded)
+        }
+        return updated
+    }
+
     private suspend fun encodePhotos(photoPaths: List<String>): List<String> {
         val encoded = withContext(Dispatchers.Default) {
             photoPaths.mapNotNull(AssistantImagePrep::encodeForVision)
@@ -574,7 +614,8 @@ class AssistantViewModel @Inject constructor(
         // 本轮开始时的历史快照。续写必须以它为锚，不能再从消息列表尾部取窗口——
         // 续写会把长回答切成多段压进列表，窗口一滑就把最初的问题挤出视野，
         // 模型失去锚点后只能顺着「继续」往下编（这是续写之后出现幻觉的根因）。
-        val baseHistory = buildModelHistory(_state.value.messages)
+        // 历史里的图片也要按策略回溯带上，否则追问时模型看不到之前拍的题/文章
+        val baseHistory = attachHistoryImages(buildModelHistory(_state.value.messages))
         // 本轮回答占用的那一条消息：全程只替换它，长回答不会再裂成好几个气泡。
         // 初始为 -1，等真正拿到内容才插入——请求失败时就不会留下一个空气泡。
         var answerIndex = -1

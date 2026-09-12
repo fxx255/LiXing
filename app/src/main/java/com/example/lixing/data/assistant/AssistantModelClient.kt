@@ -673,13 +673,19 @@ class AssistantModelClient @Inject constructor(
                 add(buildJsonObject { put("role", "assistant"); put("content", "好的，我已了解这些上下文。") })
             }
             messages.forEachIndexed { index, message ->
-                val withImages = imageBase64s.isNotEmpty() && index == messages.lastIndex && message.role == "user"
+                // 当前轮用调用方直接给出的图；历史消息用回溯填充的图。
+                // 接口是无状态的，不重发历史图片的话，追问时模型就看不到之前拍的题/文章。
+                val images = if (index == messages.lastIndex && message.role == "user" && imageBase64s.isNotEmpty()) {
+                    imageBase64s
+                } else {
+                    message.imageBase64s
+                }
                 add(buildJsonObject {
                     put("role", message.role)
-                    if (withImages) {
+                    if (images.isNotEmpty()) {
                         put("content", buildJsonArray {
                             add(buildJsonObject { put("type", "text"); put("text", message.content) })
-                            imageBase64s.forEach { base64 ->
+                            images.forEach { base64 ->
                                 add(buildJsonObject {
                                     put("type", "image_url")
                                     put("image_url", buildJsonObject { put("url", "data:image/jpeg;base64,$base64") })
@@ -1001,13 +1007,18 @@ class AssistantModelClient @Inject constructor(
                 add(buildJsonObject { put("role", "assistant"); put("content", "好的，我已了解这些上下文。") })
             }
             messages.forEachIndexed { index, message ->
-                val withImages = imageBase64s.isNotEmpty() && index == messages.lastIndex && message.role == "user"
+                // 同 Chat Completions：当前轮用现给的图，历史轮用回溯填充的图
+                val images = if (index == messages.lastIndex && message.role == "user" && imageBase64s.isNotEmpty()) {
+                    imageBase64s
+                } else {
+                    message.imageBase64s
+                }
                 add(buildJsonObject {
                     put("role", message.role)
-                    if (withImages) {
+                    if (images.isNotEmpty()) {
                         put("content", buildJsonArray {
                             add(buildJsonObject { put("type", "input_text"); put("text", message.content) })
-                            imageBase64s.forEach { base64 ->
+                            images.forEach { base64 ->
                                 add(buildJsonObject {
                                     put("type", "input_image")
                                     put("image_url", "data:image/jpeg;base64,$base64")

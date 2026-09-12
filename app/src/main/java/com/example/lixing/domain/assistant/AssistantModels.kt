@@ -22,6 +22,14 @@ data class AssistantMessage(
     val imagePaths: List<String> = emptyList(),
     /** Optional compact text shown in the chat UI; [content] remains the model-only body. */
     val displayContent: String? = null,
+    /**
+     * 仅运行时使用：本次请求要随这条消息发给模型的图片 base64。
+     *
+     * 大模型接口是无状态的，图片只在拍下那一轮发过一次，追问时不重发模型就完全
+     * 看不到（`imagePaths` 只是本机路径，从不外发）。历史消息的图片按策略回溯填充，
+     * 不落库、不进备份。
+     */
+    val imageBase64s: List<String> = emptyList(),
 )
 
 /**
