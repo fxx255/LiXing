@@ -372,12 +372,24 @@ class AssistantModelClient @Inject constructor(
         } else {
             AiSearchProtocol.RESPONSES
         }
-        val text = StringBuilder()
+        val text = StringBuilder("模型：").append(configured.model).append('\n')
         if (chosen != configured.searchProtocol) {
-            text.append("（该端点的 Responses 网关不支持 web_search 工具，已自动改用 Chat Completions 检测）\n\n")
+            text.append("（该端点的 Responses 网关不支持 web_search 工具，已自动改用 Chat Completions 检测）\n")
         }
-        text.append(primary.render("当前"))
-        if (!primary.searched) {
+        text.append('\n').append(primary.render("当前"))
+        if (!primary.searched && chosen == AiSearchProtocol.RESPONSES) {
+            // 再打一次「官方最小示例」形态的请求：只有 model / input / tools，
+            // 用来排除「是不是我们自己附加的字段把搜索挤掉了」这一可能。
+            val minimal = probeWebSearch(configured, chosen, minimal = true)
+            text.append("\n\n").append(minimal.render("最小请求"))
+            text.append(
+                if (minimal.searched) {
+                    "\n\n→ 精简到官方示例的字段就能搜到，说明是本地请求里的额外字段影响了搜索。"
+                } else {
+                    "\n\n→ 连官方最小示例都搜不到，说明该模型的服务端搜索当前未生效，请求格式没有问题。"
+                },
+            )
+        } else if (!primary.searched) {
             text.append("\n\n").append(probeWebSearch(configured, other).render("备选"))
         }
         text.toString()
@@ -415,22 +427,38 @@ class AssistantModelClient @Inject constructor(
         )
     }
 
+    /**
+     * 对齐官方最小示例的请求：只有 model / input / tools。
+     *
+     * 官方文档给的就是这么一条，用来判断「搜不到」是发生在我们的请求构造上，
+     * 还是发生在服务端本身。
+     */
+    private fun buildMinimalWebSearchPayload(
+        configured: ConfiguredModel,
+        prompt: String,
+    ): JsonObject = buildJsonObject {
+        put("model", configured.model)
+        put("input", prompt)
+        put("tools", buildJsonArray { add(buildJsonObject { put("type", "web_search") }) })
+        put("stream", false)
+    }
+
     /** 用一种协议探测一次联网搜索，结果与是否真的搜过一起返回。 */
     private suspend fun probeWebSearch(
         configured: ConfiguredModel,
         protocol: AiSearchProtocol,
+        minimal: Boolean = false,
     ): WebSearchProbe {
         val responses = protocol == AiSearchProtocol.RESPONSES
         val url = if (responses) deepSeekResponsesUrl(configured.baseUrl) else completionsUrl(configured.baseUrl)
-        val messages = listOf(
-            AssistantMessage("user", "请联网检索后回答：今天有什么重要的科技新闻？只说一条标题即可。"),
-        )
-        val payload = if (responses) {
-            buildDeepSeekResponsesPayload(
+        val prompt = "请联网检索后回答：今天有什么重要的科技新闻？只说一条标题即可。"
+        val messages = listOf(AssistantMessage("user", prompt))
+        val payload = when {
+            minimal && responses -> buildMinimalWebSearchPayload(configured, prompt)
+            responses -> buildDeepSeekResponsesPayload(
                 configured, messages, "", emptyList(), AssistantUserProfile(), forceWebSearch = true,
             )
-        } else {
-            buildChatPayload(configured, messages, "", emptyList(), stream = false, webSearchEnabled = true)
+            else -> buildChatPayload(configured, messages, "", emptyList(), stream = false, webSearchEnabled = true)
         }
         val request = Request.Builder()
             .url(url)

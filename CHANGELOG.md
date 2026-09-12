@@ -2,6 +2,13 @@
 
 > 按时间倒序记录功能变更。
 
+## v1.0.15 (2026-09-12) · 查清 DeepSeek 搜不到的根因
+
+- **结论：不是请求写错了，是服务端不再执行搜索**。8 月初社区实测 DeepSeek 的 `web_search` 可用，当时跑的是 V4-Flash；9 月 10 日 DeepSeek 上线 V4.1 Flash 并下线 V4 Flash（旧模型名 `deepseek-v4-flash` 会被路由到 V4.1 Flash）。V4.1 Flash 的 Responses 兼容层**忽略**内置工具（web search / file search / code interpreter / computer use / MCP），请求返回 200 但不会真的搜索——官方 API Reference 仍写着"支持、服务端执行"，与实测和官方兼容性明细表相矛盾；
+- **自检新增「最小请求」对照**：除了当前请求，会再发一条只有 `model` / `input` / `tools` 的官方最小示例请求。若连它都搜不到，就可判定是服务端问题，而不是本地附加字段（`instructions`、`max_output_tokens`、`tool_choice`）干扰；
+- **自检结果现在显示实际使用的模型名**，便于核对是不是踩到了已下线的旧模型名；
+- 联网仍然可用的是小米 MiMo（Chat Completions），DeepSeek 侧若要联网需等官方恢复或改用第三方搜索。
+
 ## v1.0.14 (2026-09-12) · 按服务商选对联网协议 + 自检挪进模型编辑
 
 - **MiMo 自动走对协议**：它的 Responses 网关明确拒绝 web_search（HTTP 400 `responses_feature_not_supported`），而 Chat Completions 实测可用（一次检索拿到 25 条来源）。现在只要端点是小米 MiMo，即使协议选了 Responses 也会自动改走 Chat Completions，不再白跑一次失败请求；
