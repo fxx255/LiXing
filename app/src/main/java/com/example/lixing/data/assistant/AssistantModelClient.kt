@@ -118,11 +118,12 @@ class AssistantModelClient @Inject constructor(
         val configured = requireConfigured()
         val prefs = prefsRepository.current()
         val userProfile = AssistantUserProfile(prefs.assistantNickname, prefs.assistantCity)
+        val searchProtocol = effectiveSearchProtocol(configured.baseUrl, configured.searchProtocol)
         val webSearchOn = webSearchEnabled &&
             prefs.aiWebSearchEnabled &&
-            configured.searchProtocol != AiSearchProtocol.OFF
+            searchProtocol != AiSearchProtocol.OFF
         var searchNote: String? = null
-        if (webSearchOn && configured.searchProtocol == AiSearchProtocol.RESPONSES) {
+        if (webSearchOn && searchProtocol == AiSearchProtocol.RESPONSES) {
             try {
                 return@withContext chatDeepSeekNativeResponses(
                     configured, messages, context, imageBase64s, userProfile, forceWebSearch, onEvent,
@@ -134,7 +135,7 @@ class AssistantModelClient @Inject constructor(
                 searchNote = "联网搜索未生效，已改用离线回答（${e.message ?: "未知原因"}）"
             }
         }
-        val chatCompletionsSearch = webSearchOn && configured.searchProtocol == AiSearchProtocol.CHAT_COMPLETIONS
+        val chatCompletionsSearch = webSearchOn && searchProtocol == AiSearchProtocol.CHAT_COMPLETIONS
         val payload = buildChatPayload(
             configured,
             messages,
@@ -353,22 +354,65 @@ class AssistantModelClient @Inject constructor(
      * 正式对话里联网失败是静默降级的（自动退回普通对话、界面无提示），
      * 没有这个入口就无法区分到底是开关、协议、模型还是服务端的问题。
      */
-    suspend fun testWebSearch(): String = withContext(io) {
-        val configured = requireConfigured()
-        if (configured.searchProtocol == AiSearchProtocol.OFF) {
-            return@withContext "这套模型配置的联网协议是「关闭」，不会发起搜索。请改成 Responses 或 Chat Completions 再测。"
+    suspend fun testWebSearch(
+        baseUrl: String? = null,
+        apiKey: String? = null,
+        model: String? = null,
+        protocol: AiSearchProtocol? = null,
+        profileId: String? = null,
+    ): String = withContext(io) {
+        val configured = resolveSearchTarget(baseUrl, apiKey, model, protocol, profileId)
+        val chosen = effectiveSearchProtocol(configured.baseUrl, configured.searchProtocol)
+        if (chosen == AiSearchProtocol.OFF) {
+            return@withContext "这套配置的联网协议是「关闭」，不会发起搜索。请改成 Responses 或 Chat Completions 再测。"
         }
-        val primary = probeWebSearch(configured, configured.searchProtocol)
-        val other = if (configured.searchProtocol == AiSearchProtocol.RESPONSES) {
+        val primary = probeWebSearch(configured, chosen)
+        val other = if (chosen == AiSearchProtocol.RESPONSES) {
             AiSearchProtocol.CHAT_COMPLETIONS
         } else {
             AiSearchProtocol.RESPONSES
         }
-        val text = StringBuilder(primary.render("当前"))
+        val text = StringBuilder()
+        if (chosen != configured.searchProtocol) {
+            text.append("（该端点的 Responses 网关不支持 web_search 工具，已自动改用 Chat Completions 检测）\n\n")
+        }
+        text.append(primary.render("当前"))
         if (!primary.searched) {
             text.append("\n\n").append(probeWebSearch(configured, other).render("备选"))
         }
         text.toString()
+    }
+
+    /**
+     * 解析自检目标：优先用「编辑器里正在编辑的这套配置」，字段缺省时回退到当前生效配置。
+     * 这样模型还没保存也能先测联网，密钥框留空则沿用该配置已存的密钥。
+     */
+    private suspend fun resolveSearchTarget(
+        baseUrl: String?,
+        apiKey: String?,
+        model: String?,
+        protocol: AiSearchProtocol?,
+        profileId: String?,
+    ): ConfiguredModel {
+        val prefs = prefsRepository.current()
+        val active = credentialStore.activeProfile()
+        val targetBaseUrl = baseUrl?.trim().orEmpty().ifEmpty { (active?.baseUrl ?: prefs.aiBaseUrl).trim() }
+        val targetModel = model?.trim().orEmpty().ifEmpty { (active?.model ?: prefs.aiModel).trim() }
+        val targetKey = resolveFetchKey(
+            inputKey = apiKey.orEmpty(),
+            profileKey = profileId?.let { credentialStore.credentialsFor(it)?.apiKey },
+            activeKey = credentialStore.load(),
+        )
+        require(targetBaseUrl.isNotEmpty()) { "请填写接口地址" }
+        require(targetModel.isNotEmpty()) { "请填写模型名" }
+        require(targetKey.isNotEmpty()) { "请先填写并保存 API 密钥" }
+        return ConfiguredModel(
+            baseUrl = targetBaseUrl,
+            model = targetModel,
+            apiKey = targetKey,
+            searchProtocol = protocol ?: active?.searchProtocol ?: AiSearchProtocol.RESPONSES,
+            reasoningEffort = active?.reasoningEffort ?: AiReasoningEffort.LOW,
+        )
     }
 
     /** 用一种协议探测一次联网搜索，结果与是否真的搜过一起返回。 */
@@ -574,11 +618,18 @@ class AssistantModelClient @Inject constructor(
             model = configured.model,
             effort = configured.reasoningEffort,
         ).forEach { (key, value) -> put(key, value) }
-        // Chat Completions 内置联网搜索（如小米 MiMo）：注入服务端 web_search 工具。
+        // Chat Completions 的联网方式各家不同，必须分开写：
+        // - 小米 MiMo：在 tools 里声明 web_search（配 force_search 强制检索），已实测可用；
+        // - 其它（如 DeepSeek）：tools 只接受 type=function，塞 web_search 会直接 400
+        //   （unknown variant `web_search`），改用顶层 web_search 开关字段。
         if (webSearchEnabled) {
-            put("tools", buildJsonArray {
-                add(buildJsonObject { put("type", "web_search"); put("force_search", true) })
-            })
+            if (isMiMoEndpoint(configured.baseUrl)) {
+                put("tools", buildJsonArray {
+                    add(buildJsonObject { put("type", "web_search"); put("force_search", true) })
+                })
+            } else {
+                put("web_search", buildJsonObject { put("enabled", true) })
+            }
         }
         put("messages", buildJsonArray {
             add(buildJsonObject { put("role", "system"); put("content", buildSystemPrompt(userProfile)) })
@@ -1101,6 +1152,23 @@ internal fun modelsUrl(baseUrl: String): String {
         .removeSuffix("/chat/completions")
     return if (trimmed.endsWith("/models")) trimmed else "$trimmed/models"
 }
+
+/** 该端点是不是小米 MiMo：目前只有它的 Chat Completions 支持在 tools 里声明 web_search。 */
+internal fun isMiMoEndpoint(baseUrl: String): Boolean = "mimo" in baseUrl.lowercase()
+
+/**
+ * 服务商实际可用的联网协议。
+ *
+ * MiMo 的 Responses 网关明确拒绝 web_search 工具
+ * （400 `responses_feature_not_supported`：「tool type 'web_search' is not supported by this
+ * gateway phase」），选了 Responses 只会白跑一次请求，这里直接改走实测可用的 Chat Completions。
+ */
+internal fun effectiveSearchProtocol(baseUrl: String, chosen: AiSearchProtocol): AiSearchProtocol =
+    if (chosen == AiSearchProtocol.RESPONSES && isMiMoEndpoint(baseUrl)) {
+        AiSearchProtocol.CHAT_COMPLETIONS
+    } else {
+        chosen
+    }
 
 /** 归一化到 DeepSeek OpenAI Responses API 端点。 */
 internal fun deepSeekResponsesUrl(baseUrl: String): String {

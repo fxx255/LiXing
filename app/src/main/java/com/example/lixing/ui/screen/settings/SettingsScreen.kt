@@ -1221,11 +1221,6 @@ private fun AiAssistantSection(viewModel: SettingsViewModel, prefs: com.example.
                         shape = LiXingRadius.Pill,
                     ) { Text(if (testing) "测试中…" else "测试当前连接") }
                 }
-                OutlinedButton(
-                    onClick = viewModel::testWebSearch,
-                    enabled = !testing,
-                    shape = LiXingRadius.Pill,
-                ) { Text("检测联网搜索") }
             }
 
             val questionVisionId by viewModel.questionVisionProfileId.collectAsStateWithLifecycle()
@@ -1259,15 +1254,19 @@ private fun AiAssistantSection(viewModel: SettingsViewModel, prefs: com.example.
 
     if (editorOpen) {
         val profile = profiles.firstOrNull { it.id == editingId }
+        val webSearchResult by viewModel.aiWebSearchResult.collectAsStateWithLifecycle()
         AiProfileEditorDialog(
             profile = profile,
             testing = testing,
             models = models,
             modelsBusy = modelsBusy,
             fetchMessage = message,
+            webSearchResult = webSearchResult,
             onFetchModels = viewModel::fetchAiModels,
+            onTestWebSearch = viewModel::testWebSearch,
+            onClearWebSearchResult = viewModel::clearAiWebSearchResult,
             onModelsInvalidated = viewModel::clearAiModels,
-            onDismiss = { editorOpen = false },
+            onDismiss = { editorOpen = false; viewModel.clearAiWebSearchResult() },
             onSave = { name, baseUrl, model, apiKey, visionEnabled, searchProtocol, reasoningEffort ->
                 viewModel.saveAndTestAiProfile(
                     id = profile?.id,
@@ -1306,7 +1305,10 @@ private fun AiProfileEditorDialog(
     models: List<String>,
     modelsBusy: Boolean,
     fetchMessage: String?,
+    webSearchResult: String?,
     onFetchModels: (String, String, String?) -> Unit,
+    onTestWebSearch: (String, String, String, AiSearchProtocol, String?) -> Unit,
+    onClearWebSearchResult: () -> Unit,
     onModelsInvalidated: () -> Unit,
     onDismiss: () -> Unit,
     onSave: (String, String, String, String, Boolean, AiSearchProtocol, AiReasoningEffort) -> Unit,
@@ -1430,7 +1432,7 @@ private fun AiProfileEditorDialog(
                     AiSearchProtocol.entries.forEach { protocol ->
                         FilterChip(
                             selected = searchProtocol == protocol,
-                            onClick = { searchProtocol = protocol },
+                            onClick = { searchProtocol = protocol; onClearWebSearchResult() },
                             label = {
                                 Text(
                                     when (protocol) {
@@ -1444,10 +1446,28 @@ private fun AiProfileEditorDialog(
                     }
                 }
                 Text(
-                    text = "Responses API 适用于 DeepSeek 等服务端搜索；Chat Completions 适用于小米 MiMo 等注入 web_search 工具的服务。不选默认 Responses API。",
+                    text = "小米 MiMo 请选 Chat Completions（它的 Responses 网关不支持 web_search）。改完协议可点下面按钮实测，会同时试两种协议并告诉你哪条路通。",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+                OutlinedButton(
+                    onClick = { onTestWebSearch(baseUrl, apiKey, model, searchProtocol, profile?.id) },
+                    enabled = !testing && baseUrl.isNotBlank() && model.isNotBlank(),
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    if (testing) {
+                        CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                        Spacer(Modifier.width(8.dp))
+                    }
+                    Text(if (testing) "正在检测…" else "测试联网搜索")
+                }
+                webSearchResult?.let {
+                    Text(
+                        it,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
                 Text("思考强度", style = MaterialTheme.typography.labelLarge)
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     AiReasoningEffort.entries.forEach { effort ->

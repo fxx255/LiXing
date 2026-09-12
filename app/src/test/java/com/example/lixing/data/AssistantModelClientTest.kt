@@ -3,6 +3,9 @@ package com.example.lixing.data
 import com.example.lixing.data.assistant.completionsUrl
 import com.example.lixing.data.assistant.extractText
 import com.example.lixing.data.assistant.AiReasoningEffort
+import com.example.lixing.data.assistant.AiSearchProtocol
+import com.example.lixing.data.assistant.effectiveSearchProtocol
+import com.example.lixing.data.assistant.isMiMoEndpoint
 import com.example.lixing.data.assistant.ParsedAssistantReply
 import com.example.lixing.data.assistant.guardMissingPlanActions
 import com.example.lixing.data.assistant.modelsUrl
@@ -68,6 +71,32 @@ class AssistantModelClientTest {
         assertEquals("active-key", resolveFetchKey("", "  ", "active-key"))
         // 都没有：返回空串，由上层提示「请填写 API 密钥」
         assertEquals("", resolveFetchKey("", null, null))
+    }
+
+    @Test
+    fun `routes mimo to chat completions because its responses gateway rejects web_search`() {
+        assertTrue(isMiMoEndpoint("https://api.xiaomimimo.com/v1"))
+        assertFalse(isMiMoEndpoint("https://api.deepseek.com"))
+
+        // MiMo 即使选了 Responses 也要改走 Chat Completions（Responses 网关会 400）
+        assertEquals(
+            AiSearchProtocol.CHAT_COMPLETIONS,
+            effectiveSearchProtocol("https://api.xiaomimimo.com/v1", AiSearchProtocol.RESPONSES),
+        )
+        // 其它服务保留用户选择
+        assertEquals(
+            AiSearchProtocol.RESPONSES,
+            effectiveSearchProtocol("https://api.deepseek.com", AiSearchProtocol.RESPONSES),
+        )
+        assertEquals(
+            AiSearchProtocol.CHAT_COMPLETIONS,
+            effectiveSearchProtocol("https://api.deepseek.com", AiSearchProtocol.CHAT_COMPLETIONS),
+        )
+        // 用户显式关闭联网时不被改写
+        assertEquals(
+            AiSearchProtocol.OFF,
+            effectiveSearchProtocol("https://api.xiaomimimo.com/v1", AiSearchProtocol.OFF),
+        )
     }
 
     @Test

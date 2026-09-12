@@ -82,6 +82,10 @@ class SettingsViewModel @Inject constructor(
     private val _aiModelsBusy = MutableStateFlow(false)
     val aiModelsBusy: StateFlow<Boolean> = _aiModelsBusy.asStateFlow()
 
+    /** 模型编辑对话框里的联网自检结果（按配置独立展示，不与会话级提示混用）。 */
+    private val _aiWebSearchResult = MutableStateFlow<String?>(null)
+    val aiWebSearchResult: StateFlow<String?> = _aiWebSearchResult.asStateFlow()
+
     /**
      * 模型列表请求序号。允许用户随时重复点击「获取模型列表」，
      * 只有最后一次请求的结果会被采纳，避免慢请求覆盖新结果。
@@ -537,19 +541,38 @@ class SettingsViewModel @Inject constructor(
         }
     }
 
-    /** 联网搜索自检：直接把「搜没搜、拿到几条来源」告诉用户，避免静默降级无处排查。 */
-    fun testWebSearch() {
+    /**
+     * 联网搜索自检，在模型编辑对话框里按「正在编辑的那套配置」发起，
+     * 所以未保存的地址/模型/协议也能先测；密钥留空则沿用该配置已保存的密钥。
+     */
+    fun testWebSearch(
+        baseUrl: String,
+        apiKey: String,
+        model: String,
+        protocol: AiSearchProtocol,
+        profileId: String?,
+    ) {
         viewModelScope.launch {
             _aiTesting.value = true
-            _aiMessage.value = "正在检测联网搜索…"
+            _aiWebSearchResult.value = "正在检测联网搜索…"
             try {
-                _aiMessage.value = assistantModelClient.testWebSearch()
+                _aiWebSearchResult.value = assistantModelClient.testWebSearch(
+                    baseUrl = baseUrl,
+                    apiKey = apiKey,
+                    model = model,
+                    protocol = protocol,
+                    profileId = profileId,
+                )
             } catch (e: Exception) {
-                _aiMessage.value = "检测失败：${e.message ?: "未知错误"}"
+                _aiWebSearchResult.value = "检测失败：${e.message ?: "未知错误"}"
             } finally {
                 _aiTesting.value = false
             }
         }
+    }
+
+    fun clearAiWebSearchResult() {
+        _aiWebSearchResult.value = null
     }
 
     fun deleteAiProfile(id: String) {
