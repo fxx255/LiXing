@@ -116,6 +116,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.IntSize
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.hilt.navigation.compose.hiltViewModel
@@ -1391,28 +1392,148 @@ private fun OcrPreviewDialog(
  * 插件默认行为是把 ParseException 包成 RuntimeException 抛出，会在 UI 线程把 App 带崩。
  * 这里做三层兜底：单条公式失败画占位 → 整段渲染失败回退纯文本 → 异常写入本地日志便于定位。
  */
+/** 含表格时表格画布相对气泡宽度的放大倍数：先给列宽更多空间，仍放不下再横向滑动。 */
+private const val TABLE_WIDTH_FACTOR = 1.8f
+
+/** 一段回答的渲染片段。 */
+internal data class MarkdownChunkSpec(val text: String, val isTable: Boolean)
+
+/**
+ * 把回答按「表格块 / 非表格块」切开。
+ *
+ * 目的是让渲染层单独对表格启用横向滚动：Markwon 的表格会压缩到容器宽度，
+ * 窄气泡里单元格内容（尤其行内公式）会被挤成一团——公式被压成小字号、
+ * 中文竖排。切开后表格按更宽的画布绘制，放不下时可以左右滑。
+ * 代码围栏内的 `|` 不算表格。
+ */
+internal fun splitMarkdownTableBlocks(markdown: String): List<MarkdownChunkSpec> {
+    val lines = markdown.split('\n')
+    val chunks = mutableListOf<MarkdownChunkSpec>()
+    val text = StringBuilder()
+    var fence: String? = null
+
+    fun flushText() {
+        if (text.isNotEmpty()) {
+            chunks += MarkdownChunkSpec(text.toString().trimEnd('\n'), isTable = false)
+            text.clear()
+        }
+    }
+
+    var i = 0
+    while (i < lines.size) {
+        val line = lines[i]
+        val trimmed = line.trimStart()
+        if (trimmed.startsWith("```") || trimmed.startsWith("~~~")) {
+            val marker = if (trimmed.startsWith("```")) "```" else "~~~"
+            fence = if (fence == null) marker else if (fence == marker) null else fence
+            text.append(line).append('\n')
+            i++
+            continue
+        }
+        if (fence != null) {
+            text.append(line).append('\n')
+            i++
+            continue
+        }
+        val header = lines.getOrNull(i + 1)
+        if ('|' in line && header != null && isTableSeparator(header)) {
+            flushText()
+            val table = StringBuilder().append(line).append('\n').append(header).append('\n')
+            var j = i + 2
+            while (j < lines.size && '|' in lines[j]) {
+                table.append(lines[j]).append('\n')
+                j++
+            }
+            chunks += MarkdownChunkSpec(table.toString().trimEnd('\n'), isTable = true)
+            i = j
+            continue
+        }
+        text.append(line).append('\n')
+        i++
+    }
+    flushText()
+    return chunks
+}
+
+/** Markdown 表格的分隔行：`| --- | :--: |` 这类。 */
+private fun isTableSeparator(line: String): Boolean {
+    val trimmed = line.trim()
+    if ('-' !in trimmed) return false
+    val cells = trimmed.trim('|').split('|')
+    return cells.isNotEmpty() && cells.all { cell ->
+        val token = cell.trim()
+        token.isNotEmpty() && token.all { it == '-' || it == ':' } && '-' in token
+    }
+}
+
+/**
+ * 回答正文渲染。
+ *
+ * 模型偶尔会输出 JLatexMath 解析不了的 LaTeX（缺右括号、残留 \tag、aligned 前导非法字符等），
+ * 插件默认行为是把 ParseException 包成 RuntimeException 抛出，会在 UI 线程把 App 带崩。
+ * 这里做三层兜底：单条公式失败画占位 → 整段渲染失败回退纯文本 → 异常写入本地日志便于定位。
+ *
+ * 含表格的回答按块拆开渲染，表格单独走「更宽画布 + 横向滚动」。
+ */
 @Composable
 private fun MarkdownAnswer(content: String) {
+    val chunks = remember(content) { splitMarkdownTableBlocks(content) }
+    // 绝大多数回答不含表格：沿用原来的单块路径，零回归
+    if (chunks.none { it.isTable }) {
+        MarkdownChunk(content, fixedWidthPx = null)
+        return
+    }
+    var containerWidthPx by remember { mutableIntStateOf(0) }
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .onSizeChanged { containerWidthPx = it.width },
+    ) {
+        chunks.forEach { chunk ->
+            if (!chunk.isTable || containerWidthPx <= 0) {
+                // 非表格块正常铺满；表格块等测量到宽度再渲染，避免按 0 宽拆分公式
+                if (!chunk.isTable) MarkdownChunk(chunk.text, fixedWidthPx = null)
+                return@forEach
+            }
+            val tableWidthPx = (containerWidthPx * TABLE_WIDTH_FACTOR).toInt()
+            val scroll = rememberScrollState()
+            Box(modifier = Modifier.fillMaxWidth().horizontalScroll(scroll)) {
+                MarkdownChunk(chunk.text, fixedWidthPx = tableWidthPx)
+            }
+        }
+    }
+}
+
+/** 单个 Markdown 片段：可指定固定宽度（表格用），否则铺满可用宽度。 */
+@Composable
+private fun MarkdownChunk(content: String, fixedWidthPx: Int?) {
     val textColor = MaterialTheme.colorScheme.onSurface.toArgb()
     val linkColor = MaterialTheme.colorScheme.primary.toArgb()
     // 实测宽度。公式是按「当前可用宽度」拆分的，宽度一变（旋转、平板横屏、分屏）
     // 必须按新宽度重新拆分，否则会留下按旧宽度算出的超长公式 → 右侧溢出被裁掉。
     var widthPx by remember { mutableIntStateOf(0) }
     var host by remember { mutableStateOf<TextView?>(null) }
+    // 固定宽度由外部给定；onSizeChanged 要等一帧才回来，先用它渲染以免闪一下空白
+    val renderWidthPx = fixedWidthPx ?: widthPx
 
-    LaunchedEffect(host, content, widthPx, textColor, linkColor) {
+    LaunchedEffect(host, content, renderWidthPx, textColor, linkColor) {
         val view = host ?: return@LaunchedEffect
-        renderMarkdown(view, content, widthPx, textColor, linkColor)
+        renderMarkdown(view, content, renderWidthPx, textColor, linkColor)
+    }
+
+    val density = LocalDensity.current
+    val widthModifier = if (fixedWidthPx != null) {
+        Modifier.width(with(density) { fixedWidthPx.coerceAtLeast(1).toDp() })
+    } else {
+        Modifier.fillMaxWidth()
     }
 
     AndroidView(
-        modifier = Modifier
-            .fillMaxWidth()
-            .onSizeChanged { widthPx = it.width },
+        modifier = widthModifier.onSizeChanged { widthPx = it.width },
         factory = { context -> createMarkdownTextView(context, textColor, linkColor) },
         update = { view ->
             host = view
-            renderMarkdown(view, content, widthPx, textColor, linkColor)
+            renderMarkdown(view, content, renderWidthPx, textColor, linkColor)
         },
     )
 }
