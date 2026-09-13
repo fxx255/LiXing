@@ -51,6 +51,60 @@ data class ParsedAssistantReply(
  * - 仍是截断的 JSON（常见于长回答撞上输出上限）→ 抢救已完整的 reply 正文和已完整的动作条目，而不是全部丢弃；
  * - 单条动作字段非法时跳过该动作并记录警告，不影响其余动作与正文。
  */
+/**
+ * 修复 JSON 字符串里的 LaTeX 反斜杠（模型最常踩的坑）。
+ *
+ * 模型在 reply 正文里写公式时经常直接输出单反斜杠（`\frac`、`\alpha`、`\cdot`），
+ * 而 JSON 只允许 `\" \\ \/ \b \f \n \r \t \uXXXX` 这几种转义：
+ * - `\a`、`\c` 这类**非法序列会让整包解析失败**，界面只能把协议原文（连同
+ *   `"plan_actions": []`）当回答显示出来；
+ * - `\f`、`\n`、`\t` 虽然合法，却会把 `\frac` 悄悄吃成「换页符 + rac」，公式被改坏。
+ *
+ * 判据：LaTeX 命令总是「反斜杠 + 多个字母」，而 JSON 转义只跟单个字符。
+ * 因此字符串内部「反斜杠 + b/f/n/r/t + 又一个 ASCII 字母」按 LaTeX 处理补成双反斜杠，
+ * 其余非法字母同理；真正的换行 `\n`（后面跟中文或标点）不受影响。
+ */
+internal fun sanitizeJsonEscapes(raw: String): String {
+    if ('\\' !in raw) return raw
+    val out = StringBuilder(raw.length + 32)
+    var inString = false
+    var i = 0
+    while (i < raw.length) {
+        val c = raw[i]
+        if (c == '"') {
+            inString = !inString
+            out.append(c)
+            i++
+            continue
+        }
+        if (!inString || c != '\\') {
+            out.append(c)
+            i++
+            continue
+        }
+        val next = raw.getOrNull(i + 1)
+        when {
+            next == null -> { out.append("\\\\"); i++ }
+            // 已经是合法转义（\\" \\\\ \/）：原样保留
+            next == '"' || next == '\\' || next == '/' -> { out.append(c).append(next); i += 2 }
+            next == 'u' && i + 5 < raw.length &&
+                raw.substring(i + 2, i + 6).all { it.isDigit() || it in 'a'..'f' || it in 'A'..'F' } -> {
+                out.append(c).append(next).append(raw, i + 2, i + 6)
+                i += 6
+            }
+            // \frac \nabla \text \rightarrow：合法转义字母后面还跟着字母 → 其实(LaTeX)
+            next in "bfnrt" && isAsciiLetter(raw.getOrNull(i + 2)) -> { out.append("\\\\"); i++ }
+            next in "bfnrt" -> { out.append(c).append(next); i += 2 }
+            // \alpha \cdot \delta 等：在 JSON 里本就是非法转义，按 LaTeX 还原
+            else -> { out.append("\\\\"); i++ }
+        }
+    }
+    return out.toString()
+}
+
+private fun isAsciiLetter(ch: Char?): Boolean =
+    ch != null && (ch in 'a'..'z' || ch in 'A'..'Z')
+
 object AssistantResponseParser {
 
     const val MAX_TARGET_VALUE = 9_999
@@ -84,7 +138,7 @@ object AssistantResponseParser {
     }
 
     private fun parseJsonObject(text: String): JsonObject? =
-        runCatching { json.parseToJsonElement(text) }.getOrNull() as? JsonObject
+        runCatching { json.parseToJsonElement(sanitizeJsonEscapes(text)) }.getOrNull() as? JsonObject
 
     /** 从消息中提取可能的 JSON 候选：```json 围栏块、首个 `{` 到末个 `}` 的子串。 */
     private fun jsonCandidates(raw: String): List<String> {
@@ -189,7 +243,8 @@ object AssistantResponseParser {
         }
         val warnings = mutableListOf<String>()
         val parsed = objects.mapIndexedNotNull { index, text ->
-            val element = runCatching { json.parseToJsonElement(text) }.getOrNull() ?: return@mapIndexedNotNull null
+            val element = runCatching { json.parseToJsonElement(sanitizeJsonEscapes(text)) }.getOrNull()
+                ?: return@mapIndexedNotNull null
             parseOne(element, index, warnings)
         }
         return parsed
@@ -199,7 +254,9 @@ object AssistantResponseParser {
     private fun partialReply(raw: String): String? {
         val match = Regex("\\\"reply\\\"\\s*:\\s*\\\"((?:\\\\.|[^\\\"\\\\])*)").find(raw) ?: return null
         val encoded = "\"${match.groupValues[1]}\""
-        return runCatching { json.parseToJsonElement(encoded).jsonPrimitive.contentOrNull }
+        return runCatching {
+            json.parseToJsonElement(sanitizeJsonEscapes(encoded)).jsonPrimitive.contentOrNull
+        }
             .getOrNull()
             ?.let(::normalizeAssistantMarkdown)
     }

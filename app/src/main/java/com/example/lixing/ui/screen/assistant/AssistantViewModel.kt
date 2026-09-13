@@ -139,7 +139,9 @@ private const val HISTORY_IMAGE_MAX_BASE64_CHARS = 8_000_000
  * 只用于当次请求，**不写入会话**——早先它会被永久记录成用户发言，
  * 反复追问几轮后历史里全是「继续」，既干扰模型也污染回看。
  */
-private const val CONTINUE_INSTRUCTION = "继续，从刚才中断的地方接着输出，不要重复已有内容。"
+private const val CONTINUE_INSTRUCTION =
+    "上面是这个长回答已经写出的部分（可能只截取了尾部）。请直接接着写未完成的内容，" +
+        "不要重复已写过的部分，也不要提前收尾或总结——除非确实已经全部写完。"
 
 /**
  * 构造真正发给模型的历史消息。
@@ -623,6 +625,7 @@ class AssistantViewModel @Inject constructor(
         var generated = ""
         var continuation = 0
         var totalChars = 0
+        var barrenRounds = 0
         var lastReply: ParsedAssistantReply? = null
         while (true) {
             val firstRound = continuation == 0
@@ -656,10 +659,13 @@ class AssistantViewModel @Inject constructor(
 
             val hitLimit = reply.truncated
             val producedSomething = reply.reply.length >= minMeaningfulChars
+            // 单轮产出过短先不急着判「打转」：模型可能把额度耗在思考上、答案刚开头就被截断，
+            // 这种情况本就该继续。连续两轮都挤不出内容才算真的收尾/打转。
+            if (producedSomething) barrenRounds = 0 else barrenRounds++
             val withinUserCap = continuation < maxContinuations
             val withinFuse = totalChars < totalCharFuse
-            // 继续的条件：确实被截断 + 本轮产出够长（排除原地打转）+ 未触发任何刹车
-            val shouldContinue = hitLimit && producedSomething && withinUserCap && withinFuse
+            // 继续的条件：确实被截断 + 没有连续空转 + 未触发任何刹车
+            val shouldContinue = hitLimit && barrenRounds < 2 && withinUserCap && withinFuse
             // 收尾（不再续写且被截断）时才做修饰并明示；修饰作用于整篇而不是最后一段
             val text = if (hitLimit && !shouldContinue) polishTruncatedTail(generated) else generated
             if (answerIndex < 0) {
@@ -671,9 +677,9 @@ class AssistantViewModel @Inject constructor(
             if (!shouldContinue) {
                 when {
                     !hitLimit -> Unit // 自然写完，无需提示
-                    !producedSomething ->
+                    barrenRounds >= 2 ->
                         _state.update {
-                            it.copy(error = "这一段几乎没有新内容，已停止自动续写；可发送「继续」重试")
+                            it.copy(error = "连续两段几乎没有新内容，已停止自动续写；可发送「继续」重试")
                         }
                     continuation >= maxContinuations && maxContinuations > 0 ->
                         _state.update {
