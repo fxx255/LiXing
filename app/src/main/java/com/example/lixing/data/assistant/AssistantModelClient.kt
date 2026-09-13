@@ -1102,6 +1102,7 @@ class AssistantModelClient @Inject constructor(
     - 也可以用 "points":[[x,y],...] 直接给数据点（如离散谱线、实测数据）
     - 可选字段：markLines:[{"x":5,"label":"f_c"}]、markAreas:[{"x0":4,"x1":6,"label":"B"}]、style:"line|dashed|marker"、fill:true
     - 坐标范围尽量给全（min/max），方便客户端确定刻度；一张图最多 6 条曲线，一次最多 4 张图
+    - 图内的 title / label / 标注文字请直接用纯文本或 Unicode 符号（如 π、²、≤、f_c），不要写 LaTeX、不要加美元符号——图里的标签不做公式排版，写了只会显示成反斜杠乱码
     - 没有画图需求时不要输出 plots；正文里也不要再重复粘贴公式图像的描述
 
 输出格式（必须是可以直接 JSON.parse 的单个对象，不要 Markdown 代码块）：

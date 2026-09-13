@@ -25,6 +25,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
@@ -1247,6 +1248,40 @@ private fun ThinkingPanel(
 private val BUBBLE_MAX_WIDTH = 1400.dp
 private const val BUBBLE_WIDTH_RATIO = 0.92f
 
+/**
+ * 内嵌在回答里的生成图：独占整行、宽度撑满气泡，点击可查看大图。
+ *
+ * 与缩略图分开处理的原因：缩略图适合「用户拍了一叠照片」的横向排布，
+ * 而生成的图表要看清刻度和曲线，必须占满整行才有意义。
+ */
+@Composable
+private fun InlineGeneratedImage(path: String, onClick: () -> Unit) {
+    val bitmap = remember(path) { decodeSampledBitmap(path, 1600) }
+    if (bitmap == null) {
+        // 图还没生成好或读取失败：给一个占位，避免整条回答的排版错位
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(110.dp)
+                .clip(RoundedCornerShape(10.dp))
+                .background(MaterialTheme.colorScheme.surfaceVariant),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text("图表加载中…", style = MaterialTheme.typography.labelMedium)
+        }
+        return
+    }
+    Image(
+        bitmap = bitmap.asImageBitmap(),
+        contentDescription = "生成的图表",
+        contentScale = ContentScale.FillWidth,
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(10.dp))
+            .clickable { onClick() },
+    )
+}
+
 @Composable
 private fun MessageBubble(
     role: String,
@@ -1276,7 +1311,8 @@ private fun MessageBubble(
                 ),
             ) {
                 Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    if (imagePaths.isNotEmpty()) {
+                    // 用户拍的题图：小缩略图排在文字上方（拍照问答的既有形态不变）
+                    if (isUser && imagePaths.isNotEmpty()) {
                         Row(
                             modifier = Modifier.horizontalScroll(rememberScrollState()),
                             horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -1295,6 +1331,18 @@ private fun MessageBubble(
                             Text(content, style = MaterialTheme.typography.bodyLarge)
                         } else {
                             MarkdownAnswer(content)
+                        }
+                    }
+                    // 助手生成的图表：内嵌在回答末尾、独占整行，宽度撑满气泡。
+                    // 与缩略图分开处理——图表要看清刻度和曲线，92dp 的小图没法用。
+                    if (!isUser && imagePaths.isNotEmpty()) {
+                        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                            imagePaths.forEachIndexed { index, path ->
+                                InlineGeneratedImage(
+                                    path = path,
+                                    onClick = { onImageClick(imagePaths, index) },
+                                )
+                            }
                         }
                     }
                 }
@@ -1832,32 +1880,49 @@ private fun ZoomablePhoto(
         return value.coerceIn(-bound, bound)
     }
 
+    val zoomed = scale.value > 1.0005f
     Box(
         modifier = Modifier
             .fillMaxSize()
             .onSizeChanged { boxSize = it }
-            .pointerInput(Unit) {
+            // 只有放大之后才接管全部手势；未放大时只处理纵向拖动，横向必须留给
+            // HorizontalPager —— 之前无论是否放大都用 detectTransformGestures，
+            // 它会把横向拖动一并消费，左右滑动翻页因此完全失效。
+            .pointerInput(zoomed) {
+                if (!zoomed) return@pointerInput
                 detectTransformGestures { _, pan, zoom, _ ->
                     val next = (scale.value * zoom).coerceIn(1f, VIEWER_MAX_SCALE)
                     scope.launch {
-                        if (next <= 1.0005f) {
-                            // 未放大（或缩到底）：向下拖动关闭，位移跟手，松手前回弹
-                            dragDown += pan.y
-                            if (dragDown > VIEWER_DRAG_DISMISS_PX) {
-                                onSwipeDownToClose()
-                                return@launch
-                            }
-                            scale.snapTo(1f)
-                            offsetX.snapTo(pan.x * 0.4f)
-                            offsetY.snapTo(dragDown)
-                        } else {
-                            dragDown = 0f
-                            scale.snapTo(next)
-                            offsetX.snapTo(clampX(offsetX.value + pan.x, next))
-                            offsetY.snapTo(clampY(offsetY.value + pan.y, next))
-                        }
+                        dragDown = 0f
+                        scale.snapTo(next)
+                        offsetX.snapTo(clampX(offsetX.value + pan.x, next))
+                        offsetY.snapTo(clampY(offsetY.value + pan.y, next))
                     }
                 }
+            }
+            .pointerInput(zoomed) {
+                if (zoomed) return@pointerInput
+                detectVerticalDragGestures(
+                    onVerticalDrag = { _, dy ->
+                        // 只认向下拖（关闭手势）；向上拖不跟手，避免图被拉出屏幕
+                        dragDown = (dragDown + dy).coerceAtLeast(0f)
+                        if (dragDown > VIEWER_DRAG_DISMISS_PX) {
+                            onSwipeDownToClose()
+                        } else {
+                            scope.launch { offsetY.snapTo(dragDown) }
+                        }
+                    },
+                    onDragEnd = {
+                        if (dragDown in 0.01f..VIEWER_DRAG_DISMISS_PX) {
+                            dragDown = 0f
+                            scope.launch { offsetY.animateTo(0f) }
+                        }
+                    },
+                    onDragCancel = {
+                        dragDown = 0f
+                        scope.launch { offsetY.animateTo(0f) }
+                    },
+                )
             }
             .pointerInput(Unit) {
                 detectTapGestures(

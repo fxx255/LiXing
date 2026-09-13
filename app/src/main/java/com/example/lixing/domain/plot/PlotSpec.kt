@@ -361,3 +361,58 @@ fun autoRange(values: List<Double?>, fallback: Pair<Double, Double> = -1.0 to 1.
     val pad = (hi - lo) * 0.08
     return (lo - pad) to (hi + pad)
 }
+
+private val LATEX_COMMAND_TO_SYMBOL = mapOf(
+    "\\pi" to "π", "\\alpha" to "α", "\\beta" to "β", "\\gamma" to "γ",
+    "\\delta" to "δ", "\\epsilon" to "ε", "\\varepsilon" to "ε",
+    "\\theta" to "θ", "\\lambda" to "λ", "\\mu" to "μ", "\\nu" to "ν",
+    "\\rho" to "ρ", "\\sigma" to "σ", "\\tau" to "τ", "\\phi" to "φ",
+    "\\varphi" to "φ", "\\chi" to "χ", "\\psi" to "ψ", "\\omega" to "ω",
+    "\\Gamma" to "Γ", "\\Delta" to "Δ", "\\Theta" to "Θ", "\\Lambda" to "Λ",
+    "\\Sigma" to "Σ", "\\Phi" to "Φ", "\\Psi" to "Ψ", "\\Omega" to "Ω",
+    "\\times" to "×", "\\cdot" to "·", "\\div" to "÷", "\\pm" to "±",
+    "\\leq" to "≤", "\\le" to "≤", "\\geq" to "≥", "\\ge" to "≥",
+    "\\neq" to "≠", "\\ne" to "≠", "\\approx" to "≈", "\\equiv" to "≡",
+    "\\infty" to "∞", "\\propto" to "∝", "\\partial" to "∂", "\\nabla" to "∇",
+    "\\rightarrow" to "→", "\\to" to "→", "\\leftarrow" to "←",
+    "\\Rightarrow" to "⇒", "\\in" to "∈", "\\notin" to "∉",
+    "\\sum" to "∑", "\\prod" to "∏", "\\int" to "∫", "\\sqrt" to "√",
+)
+
+/**
+ * 把图内文字里的 LaTeX 片段降级成能直接画在画布上的写法。
+ *
+ * 画布没有公式排版能力，但模型很爱把 `$S_c(f)$`、`\frac{a}{b}` 这类写法直接塞进
+ * 标题和轴标签，于是图上会冒出一堆美元符号和反斜杠。这里做**有损但可读**的处理：
+ * 剥掉定界符、把常见命令映射成 Unicode 符号、上标数字转成 ² / ³、分式退化成 a/b。
+ *
+ * 真正需要排版公式的地方是回答正文（那里有 KaTeX/JLatexMath），不是图里的标签；
+ * 提示词里也会要求模型图内文字直接用 Unicode，这里只是兜底。
+ */
+fun prettifyPlotLabel(raw: String): String {
+    if (raw.isBlank()) return raw
+    var s = raw.trim()
+    s = s.replace("$$", "").replace("$", "")
+    s = s.replace(Regex("""\\frac\s*\{([^{}]*)\}\s*\{([^{}]*)\}"""), "$1/$2")
+    s = s.replace(Regex("""\\text\s*\{([^{}]*)\}"""), "$1")
+    s = s.replace(Regex("""\\mathrm\s*\{([^{}]*)\}"""), "$1")
+    s = s.replace(Regex("""\\operatorname\s*\{([^{}]*)\}"""), "$1")
+    // 长命令先替换，否则 \leq 会被 \le 抢先吃掉
+    LATEX_COMMAND_TO_SYMBOL.entries
+        .sortedByDescending { it.key.length }
+        .forEach { (command, symbol) -> s = s.replace(command, symbol) }
+    // 上标：先处理带花括号的写法，再处理裸写法
+    for ((digit, superscript) in SUPERSCRIPTS) {
+        s = s.replace("^{$digit}", superscript)
+        s = s.replace("^$digit", superscript)
+    }
+    // 剩余的反斜杠命令（\begin 之类）直接去掉反斜杠，至少不再是乱码
+    s = s.replace(Regex("""\\([a-zA-Z]+)"""), "$1")
+    s = s.replace(Regex("""\s{2,}"""), " ")
+    return s.trim()
+}
+
+private val SUPERSCRIPTS = listOf(
+    '0' to "⁰", '1' to "¹", '2' to "²", '3' to "³", '4' to "⁴",
+    '5' to "⁵", '6' to "⁶", '7' to "⁷", '8' to "⁸", '9' to "⁹",
+)

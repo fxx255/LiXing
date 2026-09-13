@@ -13,6 +13,7 @@ import com.example.lixing.domain.plot.PlotSpec
 import com.example.lixing.domain.plot.Series
 import com.example.lixing.domain.plot.autoRange
 import com.example.lixing.domain.plot.niceTicks
+import com.example.lixing.domain.plot.prettifyPlotLabel
 import com.example.lixing.domain.plot.sampleSeries
 import kotlin.math.abs
 import kotlin.math.min
@@ -89,7 +90,10 @@ class PlotBitmapRenderer(
         // ---- 3. 布局与坐标变换 ----
         val padLeft = dp(62f)
         val padRight = dp(18f)
-        val padTop = if (spec.title.isNotEmpty()) dp(46f) else dp(22f)
+        val hasLegend = spec.legend || spec.series.size > 1
+        // 图例改到绘图区上方（标题下面），所以上边距要把它一并算进去
+        val padTop = (if (spec.title.isNotEmpty()) dp(42f) else dp(18f)) +
+            (if (hasLegend) dp(22f) else 0f)
         val padBottom = dp(46f)
         val plotX = padLeft
         val plotY = padTop
@@ -110,11 +114,12 @@ class PlotBitmapRenderer(
             fillPaint.pathEffect = null
             canvas.drawRect(min(a0, a1), plotY, maxOf(a0, a1), plotY + plotH, fillPaint)
             area.label?.let {
+                val text = prettifyPlotLabel(it)
                 textPaint.textSize = tickSize
                 textPaint.color = theme.subText
-                val w = textPaint.measureText(it)
-                // 画在区域内部顶部：markLine 标签占的是绘图区上方，两者同高会叠成 "fBc"
-                canvas.drawText(it, (a0 + a1) / 2 - w / 2, plotY + dp(18f), textPaint)
+                val w = textPaint.measureText(text)
+                // 画在区域内部靠上，并与 markLine 标签错开高度，避免叠字
+                canvas.drawText(text, (a0 + a1) / 2 - w / 2, plotY + dp(30f), textPaint)
             }
         }
 
@@ -166,12 +171,12 @@ class PlotBitmapRenderer(
         textPaint.textSize = tickSize
         textPaint.color = theme.subText
         for (t in xTicks) {
-            val label = spec.x.tickLabels[t] ?: formatTick(t)
+            val label = prettifyPlotLabel(spec.x.tickLabels[t] ?: formatTick(t))
             val w = textPaint.measureText(label)
             canvas.drawText(label, sx(t) - w / 2, plotY + plotH + dp(17f), textPaint)
         }
         for (t in yTicks) {
-            val label = spec.y.tickLabels[t] ?: formatTick(t)
+            val label = prettifyPlotLabel(spec.y.tickLabels[t] ?: formatTick(t))
             val w = textPaint.measureText(label)
             canvas.drawText(label, plotX - dp(8f) - w, sy(t) + dp(4f), textPaint)
         }
@@ -179,12 +184,14 @@ class PlotBitmapRenderer(
         // ---- 9. 轴标题 ----
         textPaint.textSize = labelSize
         textPaint.color = theme.text
-        if (spec.x.label.isNotEmpty()) {
-            val w = textPaint.measureText(spec.x.label)
-            canvas.drawText(spec.x.label, plotX + plotW / 2 - w / 2, height - dp(10f), textPaint)
+        val xLabel = prettifyPlotLabel(spec.x.label)
+        if (xLabel.isNotEmpty()) {
+            val w = textPaint.measureText(xLabel)
+            canvas.drawText(xLabel, plotX + plotW / 2 - w / 2, height - dp(10f), textPaint)
         }
         if (spec.y.label.isNotEmpty()) {
-            val label = if (spec.y.unit.isNotEmpty()) "${spec.y.label} (${spec.y.unit})" else spec.y.label
+            val withUnit = if (spec.y.unit.isNotEmpty()) "${spec.y.label} (${spec.y.unit})" else spec.y.label
+            val label = prettifyPlotLabel(withUnit)
             val w = textPaint.measureText(label)
             canvas.save()
             canvas.rotate(-90f, dp(14f), plotY + plotH / 2)
@@ -194,10 +201,11 @@ class PlotBitmapRenderer(
 
         // ---- 10. 标题 ----
         if (spec.title.isNotEmpty()) {
+            val title = prettifyPlotLabel(spec.title)
             textPaint.textSize = titleSize
             textPaint.color = theme.text
-            val w = textPaint.measureText(spec.title)
-            canvas.drawText(spec.title, (width - w) / 2, dp(26f), textPaint)
+            val w = textPaint.measureText(title)
+            canvas.drawText(title, (width - w) / 2, dp(26f), textPaint)
         }
 
         // ---- 11. markLine ----
@@ -209,26 +217,35 @@ class PlotBitmapRenderer(
             canvas.drawLine(sx(x), plotY, sx(x), plotY + plotH, linePaint)
             linePaint.pathEffect = null
             line.label?.let {
+                val text = prettifyPlotLabel(it)
                 textPaint.textSize = tickSize
                 textPaint.color = theme.subText
-                val w = textPaint.measureText(it)
-                canvas.drawText(it, sx(x) - w / 2, plotY - dp(6f), textPaint)
+                val w = textPaint.measureText(text)
+                // 放进绘图区顶部：绘图区上方已经让给图例了，放外面会叠在一起
+                canvas.drawText(text, sx(x) - w / 2, plotY + dp(13f), textPaint)
             }
         }
 
-        // ---- 12. 图例 ----
-        if (spec.legend || spec.series.size > 1) {
+        // ---- 12. 图例：横排在标题下方、绘图区之外 ----
+        // 早先画在绘图区内部左上角，会被曲线压住（左右对称的谱线尤其明显）。
+        if (hasLegend) {
             textPaint.textSize = tickSize
-            var yy = plotY + dp(12f)
+            val legendY = plotY - dp(8f)
+            var xx = plotX
             spec.series.forEach { s ->
-                if (s.label.isEmpty()) return@forEach
+                val label = prettifyPlotLabel(s.label)
+                if (label.isEmpty()) return@forEach
+                val itemWidth = dp(26f) + textPaint.measureText(label) + dp(14f)
+                // 排不下就不再画，绝不让图例伸出画布被裁成半截
+                if (xx + itemWidth > plotX + plotW + dp(16f)) return@forEach
                 val color = theme.seriesColors[s.colorIndex % theme.seriesColors.size]
                 linePaint.color = color
                 linePaint.strokeWidth = dp(2f)
-                canvas.drawLine(plotX + dp(12f), yy - dp(4f), plotX + dp(34f), yy - dp(4f), linePaint)
+                linePaint.pathEffect = null
+                canvas.drawLine(xx, legendY - dp(4f), xx + dp(20f), legendY - dp(4f), linePaint)
                 textPaint.color = theme.subText
-                canvas.drawText(s.label, plotX + dp(40f), yy, textPaint)
-                yy += dp(17f)
+                canvas.drawText(label, xx + dp(24f), legendY, textPaint)
+                xx += itemWidth
             }
         }
     }
