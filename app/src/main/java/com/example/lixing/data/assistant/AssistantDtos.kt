@@ -92,18 +92,51 @@ internal fun sanitizeJsonEscapes(raw: String): String {
                 out.append(c).append(next).append(raw, i + 2, i + 6)
                 i += 6
             }
-            // \frac \nabla \text \rightarrow：合法转义字母后面还跟着字母 → 其实(LaTeX)
-            next in "bfnrt" && isAsciiLetter(raw.getOrNull(i + 2)) -> { out.append("\\\\"); i++ }
-            next in "bfnrt" -> { out.append(c).append(next); i += 2 }
-            // \alpha \cdot \delta 等：在 JSON 里本就是非法转义，按 LaTeX 还原
+            // \n 的歧义最大，必须看后面的字母到底拼成什么：
+            // 「正文换行 + 英文单词开头」（\nf(x)、\nuv、\nnetwork）里的 \n 是真正的换行，
+            // 而 \nabla、\neq、\notin 才是 LaTeX 命令。
+            // 早先的判据是「转义字母后面还跟着字母」就按 LaTeX 处理，结果把前者也误还原成
+            // 字面反斜杠 n——换行被吃掉、文字连成一片，正文里直接冒出 \nf(x)、\nuv。
+            next == 'n' ->
+                // 从 n 本身开始取词（i 指向反斜杠），否则 \nabla 会被截成 abla
+                if (isLatexNCommand(raw, i + 1)) {
+                    out.append("\\\\"); i++
+                } else {
+                    out.append(c).append(next); i += 2
+                }
+            // 其余转义字母不用这么讲究：t/f/b/r 的真义（制表/换页/退格/回车）几乎不会出现在
+            // 正文里，而 \text \frac \beta \rightarrow 是高频命令；\alpha \cdot \delta 之类
+            // 在 JSON 里本就是非法转义，一律按 LaTeX 还原。
             else -> { out.append("\\\\"); i++ }
         }
     }
     return out.toString()
 }
 
-private fun isAsciiLetter(ch: Char?): Boolean =
-    ch != null && (ch in 'a'..'z' || ch in 'A'..'Z')
+/**
+ * `\n` 后面跟的字母是否拼成了一个已知的 n 开头 LaTeX 命令。
+ *
+ * 用精确匹配而不是前缀匹配：所有命令都是完整单词（`\nabla`、`\neq`、`\notin`），
+ * 而换行后的英文单词（`network`、`next`）拼出来是别的东西，不会误判。
+ */
+private fun isLatexNCommand(raw: String, start: Int): Boolean {
+    val word = StringBuilder()
+    var i = start
+    while (i < raw.length && (raw[i] in 'a'..'z' || raw[i] in 'A'..'Z')) {
+        word.append(raw[i])
+        i++
+    }
+    return word.isNotEmpty() && word.toString() in LATEX_N_COMMANDS
+}
+
+/** `\n` 开头的常见 LaTeX 命令（不含纯换行语义）。 */
+private val LATEX_N_COMMANDS = setOf(
+    "nabla", "ne", "neq", "neg", "not", "notin", "nu", "nmid", "natural",
+    "newline", "nearrow", "nwarrow", "nrightarrow", "nleftarrow",
+    "nRightarrow", "nLeftarrow", "nvdash", "nsubseteq", "nsupseteq",
+    "ngtr", "nless", "nleq", "ngeq", "nparallel", "nonumber", "normalsize",
+    "noindent", "nobreak",
+)
 
 object AssistantResponseParser {
 
