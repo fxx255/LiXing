@@ -2,6 +2,12 @@ package com.example.lixing.data.assistant
 
 import com.example.lixing.domain.assistant.EnglishEntryAction
 import com.example.lixing.domain.assistant.PlanAction
+import com.example.lixing.domain.plot.Axis
+import com.example.lixing.domain.plot.ExprEval
+import com.example.lixing.domain.plot.MarkArea
+import com.example.lixing.domain.plot.MarkLine
+import com.example.lixing.domain.plot.PlotSpec
+import com.example.lixing.domain.plot.Series
 import com.example.lixing.data.repository.EnglishEntryRepository
 import com.example.lixing.domain.english.EnglishEntryType
 import com.example.lixing.domain.model.RepeatRule
@@ -15,6 +21,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.doubleOrNull
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
@@ -40,6 +47,8 @@ data class ParsedAssistantReply(
     val englishActions: List<EnglishEntryAction> = emptyList(),
     /** 模型因达到输出长度上限（finish_reason=length）被截断。 */
     val truncated: Boolean = false,
+    /** 模型要求绘制的图表：结构化参数，由客户端本地渲染成图后挂到这条消息上。 */
+    val plots: List<PlotSpec> = emptyList(),
 )
 
 /**
@@ -197,12 +206,133 @@ object AssistantResponseParser {
         val englishActions = (root["english_actions"] as? JsonArray)
             ?.mapIndexedNotNull { index, element -> parseEnglishAction(element, index, warnings) }
             .orEmpty()
+        val plots = parsePlots(root, warnings)
 
         return ParsedAssistantReply(
             reply = reply.ifEmpty { trimmed },
             actions = actions,
             warnings = warnings,
             englishActions = englishActions,
+            plots = plots,
+        )
+    }
+
+    private const val MAX_PLOTS = 4
+    private const val MAX_SERIES = 6
+    private const val MAX_POINTS = 5000
+    private const val MAX_MARKS = 12
+    private val SERIES_STYLES = setOf("line", "dashed", "marker")
+
+    /**
+     * 解析模型给出的绘图请求（顶层 `plots` 数组，或单个 `plot` 对象）。
+     *
+     * 只做结构校验与上限夹紧，**绝不执行模型给的字符串**——表达式最终交给白名单
+     * 求值器 [ExprEval]；这里先试编译一次，把写坏的表达式挡在渲染之前。
+     * 单张图不合法就丢掉它并记警告，不影响正文和其它图。
+     */
+    private fun parsePlots(root: JsonObject, warnings: MutableList<String>): List<PlotSpec> {
+        val array = root["plots"] as? JsonArray
+        val single = root["plot"] as? JsonObject
+        val items: List<JsonElement> = when {
+            array != null -> array.take(MAX_PLOTS)
+            single != null -> listOf(single)
+            else -> return emptyList()
+        }
+        return items.mapNotNull { element ->
+            val obj = element as? JsonObject ?: return@mapNotNull null
+            runCatching { parsePlot(obj) }
+                .onFailure { warnings += "有一张图表没能生成：${it.message ?: "参数不合法"}" }
+                .getOrNull()
+        }
+    }
+
+    private fun parsePlot(obj: JsonObject): PlotSpec {
+        val seriesArray = obj["series"] as? JsonArray ?: throw IllegalArgumentException("缺少 series")
+        val series = seriesArray.take(MAX_SERIES).mapNotNull { element ->
+            parsePlotSeries(element as? JsonObject ?: return@mapNotNull null)
+        }
+        require(series.isNotEmpty()) { "series 为空" }
+        return PlotSpec(
+            title = (obj["title"] as? JsonPrimitive)?.contentOrNull.orEmpty().take(80),
+            x = parseAxis(obj["x"] as? JsonObject),
+            y = parseAxis(obj["y"] as? JsonObject),
+            series = series,
+            legend = (obj["legend"] as? JsonPrimitive)?.booleanOrNull ?: (series.size > 1),
+            markLines = (obj["markLines"] as? JsonArray)?.take(MAX_MARKS)
+                ?.mapNotNull { el ->
+                    val o = el as? JsonObject ?: return@mapNotNull null
+                    val x = (o["x"] as? JsonPrimitive)?.doubleOrNull
+                    val y = (o["y"] as? JsonPrimitive)?.doubleOrNull
+                    if (x == null && y == null) {
+                        null
+                    } else {
+                        MarkLine(x, y, (o["label"] as? JsonPrimitive)?.contentOrNull?.take(16))
+                    }
+                }
+                .orEmpty(),
+            markAreas = (obj["markAreas"] as? JsonArray)?.take(MAX_MARKS)
+                ?.mapNotNull { el ->
+                    val o = el as? JsonObject ?: return@mapNotNull null
+                    val x0 = (o["x0"] as? JsonPrimitive)?.doubleOrNull ?: return@mapNotNull null
+                    val x1 = (o["x1"] as? JsonPrimitive)?.doubleOrNull ?: return@mapNotNull null
+                    if (x1 <= x0) {
+                        null
+                    } else {
+                        MarkArea(x0, x1, (o["label"] as? JsonPrimitive)?.contentOrNull?.take(16))
+                    }
+                }
+                .orEmpty(),
+        )
+    }
+
+    private fun parsePlotSeries(obj: JsonObject): Series? {
+        val expr = (obj["expr"] as? JsonPrimitive)?.contentOrNull?.take(240)?.takeIf { it.isNotBlank() }
+        val points = (obj["points"] as? JsonArray)?.take(MAX_POINTS)?.mapNotNull { el ->
+            val pair = el as? JsonArray ?: return@mapNotNull null
+            if (pair.size < 2) return@mapNotNull null
+            val x = (pair[0] as? JsonPrimitive)?.doubleOrNull ?: return@mapNotNull null
+            val y = (pair[1] as? JsonPrimitive)?.doubleOrNull ?: return@mapNotNull null
+            if (!x.isFinite() || !y.isFinite()) null else x to y
+        }
+        if (expr == null && points.isNullOrEmpty()) return null
+        if (expr != null) {
+            // 表达式里出现分号/换行一律拒绝；再试编译一次，写坏的别留到渲染时才发现
+            require(expr.none { it == ';' || it == '\n' || it == '\r' }) { "表达式包含非法字符" }
+            ExprEval.compile(expr)
+        }
+        return Series(
+            label = (obj["label"] as? JsonPrimitive)?.contentOrNull.orEmpty().take(40),
+            expr = expr,
+            points = points,
+            style = (obj["style"] as? JsonPrimitive)?.contentOrNull
+                ?.takeIf { it in SERIES_STYLES } ?: "line",
+            fill = (obj["fill"] as? JsonPrimitive)?.booleanOrNull ?: false,
+            colorIndex = (((obj["colorIndex"] as? JsonPrimitive)?.doubleOrNull)?.toInt() ?: 0)
+                .coerceIn(0, 5),
+            opacity = ((obj["opacity"] as? JsonPrimitive)?.doubleOrNull ?: 1.0).coerceIn(0.05, 1.0),
+        )
+    }
+
+    private fun parseAxis(obj: JsonObject?): Axis {
+        if (obj == null) return Axis()
+        val min = (obj["min"] as? JsonPrimitive)?.doubleOrNull?.takeIf { it.isFinite() }
+        val max = (obj["max"] as? JsonPrimitive)?.doubleOrNull?.takeIf { it.isFinite() }
+        // 区间非法就退回自动范围，绝不把 min>=max 传进渲染器
+        val validRange = min != null && max != null && max > min
+        return Axis(
+            label = (obj["label"] as? JsonPrimitive)?.contentOrNull.orEmpty().take(24),
+            unit = (obj["unit"] as? JsonPrimitive)?.contentOrNull.orEmpty().take(16),
+            min = if (validRange) min else null,
+            max = if (validRange) max else null,
+            grid = (obj["grid"] as? JsonPrimitive)?.booleanOrNull ?: true,
+            ticks = (obj["ticks"] as? JsonArray)?.take(20)
+                ?.mapNotNull { (it as? JsonPrimitive)?.doubleOrNull }
+                ?.takeIf { it.isNotEmpty() },
+            tickLabels = (obj["tickLabels"] as? JsonObject)?.mapNotNull { (key, value) ->
+                val tick = key.toDoubleOrNull() ?: return@mapNotNull null
+                val text = (value as? JsonPrimitive)?.contentOrNull ?: return@mapNotNull null
+                tick to text.take(16)
+            }?.toMap().orEmpty(),
         )
     }
 

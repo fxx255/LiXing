@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>砺行 · 题 3.3 功率谱图</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+<style>
+  *{box-sizing:border-box}
+  body{margin:0;padding:26px 16px 70px;background:#f2f2f4;color:#1c1c1e;
+    font-family:-apple-system,"Segoe UI","Microsoft YaHei",system-ui,sans-serif;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:700px;margin:0 auto}
+  h1{font-size:18px;font-weight:600;margin:0 0 8px}
+  .sub{color:#6b6b70;font-size:13px;line-height:1.8;margin:0 0 20px}
+  .phone{background:#1c1c1e;border-radius:18px;padding:18px;color:#e6e6e6;font-size:15px;line-height:1.8}
+  .ask{background:#2c2c2e;border-radius:14px;padding:11px 14px;color:#cfcfd2;font-size:14px;line-height:1.75;margin-bottom:16px}
+  .ask b{color:#fff;font-weight:600}
+  .answer p{margin:0 0 13px}
+  .answer strong{color:#fff;font-weight:600}
+  .steps{margin:0 0 16px;padding-left:22px;color:#c9c9ce;font-size:14.5px;line-height:1.95}
+  .steps li{margin-bottom:5px}
+  .fig{margin:18px 0 20px}
+  .chart{width:100%;height:250px}
+  .chart.sq{height:270px}
+  .cap{text-align:center;color:#8e8e93;font-size:12px;margin-top:8px}
+  .katex{font-size:1.03em}
+  .answerbox{background:#232325;border-left:2px solid #3ddc97;border-radius:8px;padding:12px 14px;margin:0 0 18px}
+  .answerbox .lbl{color:#3ddc97;font-size:12px;margin-bottom:6px}
+  .spec{margin-top:30px}
+  .spec h2{font-size:15px;font-weight:600;margin:0 0 4px}
+  .spec .note{color:#6b6b70;font-size:12.5px;margin:0 0 10px;line-height:1.7}
+  .spec pre{background:#1c1c1e;color:#a5e8a0;border-radius:12px;padding:15px;font-size:12px;
+    line-height:1.7;overflow:auto;max-height:420px;font-family:ui-monospace,Consolas,monospace;margin:0}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>例：题 3.3 的功率谱图</h1>
+  <p class="sub">
+    白噪声经「双带通滤波器 → 微分器」后的同相 / 正交分量功率谱。三张图都是按解析式真实算出来再渲染的，
+    不是手绘示意图。参数归一化取 <b>f_c = 5、B = 2、N₀ = 1</b>。
+  </p>
+
+  <div class="phone">
+    <div class="ask">
+      <b>3.3</b> Y(t) 是平稳白噪声 n(t) 通过图 (a) 所示电路的输出，滤波器的传递函数 H(f) 如图 (b) 所示，
+      求 Y(t) 的同相分量及正交分量的功率谱密度，并画出功率谱图形。
+    </div>
+    <div class="answer">
+      <p><strong>思路</strong>：先把功率谱从输入推到输出，再做窄带搬移。</p>
+      <ol class="steps">
+        <li>白噪声双边谱为 $$S_n(f)=N_0/2$$，经 H(f) 与微分器（$$H_d(f)=j2\pi f$$）后：$$S_Y(f)=\frac{N_0}{2}\,|H(f)|^2\,(2\pi f)^2$$</li>
+        <li>Y(t) 是中心在 ±f_c 的窄带过程，同相/正交分量由频谱搬移得到：$$S_c(f)=S_s(f)=S_Y(f+f_c)+S_Y(f-f_c),\quad |f|\le B/2$$</li>
+      </ol>
+
+      <div class="fig"><div class="chart" id="fig1"></div>
+        <div class="cap">图 1 · H(f) 幅频特性（题给条件：中心 ±f_c、带宽 B 的双带通）</div></div>
+
+      <div class="fig"><div class="chart" id="fig2"></div>
+        <div class="cap">图 2 · 输出 Y(t) 的功率谱 S<sub>Y</sub>(f)：带内是 ∝f² 的抛物线，被 H(f) 限制在 ±f_c 两侧</div></div>
+
+      <div class="answerbox">
+        <div class="lbl">结论</div>
+        $$S_c(f)=S_s(f)=4\pi^2N_0\left(f_c^2+f^2\right),\quad |f|\le B/2$$
+        <div style="color:#9a9aa0;font-size:13px;margin-top:8px">
+          因双带通的上下两个边带各自搬移一次，幅度叠加为两倍。窄带近似（f_c ≫ B/2）下可视为高度 $$4\pi^2N_0f_c^2$$ 的矩形。
+        </div>
+      </div>
+
+      <div class="fig"><div class="chart sq" id="fig3"></div>
+        <div class="cap">图 3 · 同相分量与正交分量的功率谱（两条曲线完全重合：S<sub>c</sub>(f) = S<sub>s</sub>(f)）</div></div>
+
+      <p style="color:#9a9aa0;font-size:13.5px">
+        注意图 3 并非严格矩形——本题 f_c/B = 2.5，窄带条件并不极端，谱在带内随 f² 略微上翘
+        （边缘比中心高约 4%）。只有当 f_c ≫ B/2 时才退化为矩形。
+      </p>
+    </div>
+  </div>
+
+  <section class="spec">
+    <h2>图中数据来自解析式</h2>
+    <p class="note">与绘图原型一致：模型只需给出「用哪个表达式 / 哪组点、坐标系范围」，具体的采样与绘制由客户端完成。</p>
+    <pre id="specDump"></pre>
+  </section>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js"></script>
+<script>
+/* 归一化参数 */
+const FC = 5, B = 2, N0 = 1, HB = B / 2;
+
+/* S_Y(f) = (N0/2)|H(f)|²|j2πf|² —— 只在整个双带通的两个带内非零 */
+function SY(f) {
+  return Math.abs(Math.abs(f) - FC) <= HB + 1e-9
+    ? (N0 / 2) * Math.pow(2 * Math.PI * f, 2)
+    : 0;
+}
+
+/* 窄带搬移：S_c(f) = S_s(f) = S_Y(f+fc) + S_Y(f-fc)，|f| ≤ B/2 */
+function SC(f) {
+  return Math.abs(f) <= HB + 1e-9 ? SY(f + FC) + SY(f - FC) : 0;
+}
+
+/* 图 1：矩形双带通（手写点画出垂直跳变） */
+const hPoints = [
+  [-9, 0], [-FC - HB, 0], [-FC - HB, 1], [-FC + HB, 1], [-FC + HB, 0],
+  [FC - HB, 0], [FC - HB, 1], [FC + HB, 1], [FC + HB, 0], [9, 0],
+];
+
+/* 图 2：带内 ∝ f² */
+const syPoints = [];
+for (let f = -9; f <= 9.00001; f += 0.02) syPoints.push([f, SY(f)]);
+
+/* 图 3：基带，|f| ≤ B/2 */
+const scPoints = [];
+for (let f = -HB; f <= HB + 1e-9; f += B / 200) scPoints.push([f, SC(f)]);
+
+const C = { text: '#c9c9ce', sub: '#8e8e93', axis: '#4a4a4f', grid: '#2b2b2f',
+  blue: '#5aa9ff', amber: '#ffc857', green: '#3ddc97', pink: '#ff7eb6' };
+
+function axis(o) {
+  return Object.assign({
+    nameLocation: 'middle', nameGap: 28,
+    nameTextStyle: { color: C.sub, fontSize: 11 },
+    axisLine: { lineStyle: { color: C.axis } },
+    axisLabel: { color: C.sub, fontSize: 11 },
+    splitLine: { show: false, lineStyle: { color: C.grid } },
+  }, o);
+}
+
+function base(spec) {
+  return {
+    backgroundColor: 'transparent', animation: false, textStyle: { color: C.text },
+    grid: { left: 52, right: 24, top: 44, bottom: 46, containLabel: true },
+    title: { text: spec.title, left: 'center', top: 4,
+      textStyle: { color: '#d8d8dc', fontSize: 12.5, fontWeight: 400 } },
+    tooltip: { trigger: 'axis', backgroundColor: '#2c2c2e', borderWidth: 0,
+      textStyle: { color: '#e6e6e6', fontSize: 12 },
+      formatter: p => 'f = ' + Number(p[0].value[0]).toFixed(2) + '<br/>' + spec.yName + ' = ' + Number(p[0].value[1]).toFixed(1) },
+  };
+}
+
+const DASH = { silent: true, symbol: 'none', lineStyle: { color: '#6a6a70', type: 'dashed', width: 1 },
+  label: { color: C.sub, fontSize: 10.5, formatter: '{b}', position: 'end' } };
+
+/* ---------- 图 1 ---------- */
+echarts.init(document.getElementById('fig1')).setOption(Object.assign(base({
+  title: 'H(f)', yName: '|H(f)|',
+}), {
+  xAxis: axis({ type: 'value', name: 'f', min: -9, max: 9,
+    interval: 5, axisLabel: { color: C.sub, fontSize: 11, formatter: v => v === 0 ? '0' : (v === FC ? 'f_c' : (v === -FC ? '−f_c' : v)) } }),
+  yAxis: axis({ type: 'value', name: '|H(f)|', min: 0, max: 1.45, axisLabel: { color: C.sub, fontSize: 11 } }),
+  series: [{
+    type: 'line', data: hPoints, showSymbol: false, step: false,
+    lineStyle: { width: 2, color: C.blue },
+    areaStyle: { color: 'rgba(90,169,255,0.14)' },
+    markLine: Object.assign({}, DASH, {
+      data: [{ xAxis: -FC, name: '−f_c' }, { xAxis: FC, name: 'f_c' }],
+    }),
+  }],
+}));
+
+/* ---------- 图 2 ---------- */
+echarts.init(document.getElementById('fig2')).setOption(Object.assign(base({
+  title: 'S_Y(f)', yName: 'S_Y(f)',
+}), {
+  xAxis: axis({ type: 'value', name: 'f', min: -9, max: 9, interval: 5,
+    axisLabel: { color: C.sub, fontSize: 11, formatter: v => v === 0 ? '0' : (v === FC ? 'f_c' : (v === -FC ? '−f_c' : v)) } }),
+  yAxis: axis({ type: 'value', name: 'S_Y(f)', min: 0, axisLabel: { color: C.sub, fontSize: 11 } }),
+  series: [{
+    type: 'line', data: syPoints, showSymbol: false,
+    lineStyle: { width: 2, color: C.blue },
+    areaStyle: { color: 'rgba(90,169,255,0.16)' },
+    markLine: Object.assign({}, DASH, {
+      data: [{ xAxis: -FC, name: '−f_c' }, { xAxis: FC, name: 'f_c' }],
+    }),
+    markArea: {
+      silent: true,
+      itemStyle: { color: 'rgba(255,200,87,0.07)' },
+      label: { color: '#a8955c', fontSize: 10.5, position: 'top', formatter: 'B' },
+      data: [[{ xAxis: FC - HB, name: 'B' }, { xAxis: FC + HB }]],
+    },
+  }],
+}));
+
+/* ---------- 图 3 ---------- */
+const scale = 1 / 1000;
+const scScaled = scPoints.map(p => [p[0], p[1] * scale]);
+echarts.init(document.getElementById('fig3')).setOption(Object.assign(base({
+  title: 'S_c(f) 与 S_s(f)', yName: 'PSD',
+}), {
+  xAxis: axis({ type: 'value', name: 'f', min: -1.7, max: 1.7, interval: 1,
+    axisLabel: { color: C.sub, fontSize: 11, formatter: v => v === 0 ? '0' : v } }),
+  yAxis: axis({ type: 'value', name: 'PSD（×10³）', min: 0, max: 1.25,
+    axisLabel: { color: C.sub, fontSize: 11 } }),
+  series: [
+    { type: 'line', name: 'S_c(f)', data: scScaled, showSymbol: false,
+      lineStyle: { width: 2.4, color: C.green },
+      areaStyle: { color: 'rgba(61,220,151,0.15)' } },
+    { type: 'line', name: 'S_s(f)', data: scScaled, showSymbol: false,
+      lineStyle: { width: 1.4, color: C.pink, type: 'dashed' } },
+  ],
+  legend: { show: true, top: 6, textStyle: { color: C.sub, fontSize: 11 }, itemWidth: 16, itemHeight: 8 },
+  grid: { left: 58, right: 24, top: 56, bottom: 46, containLabel: true },
+  tooltip: { trigger: 'axis', backgroundColor: '#2c2c2e', borderWidth: 0,
+    textStyle: { color: '#e6e6e6', fontSize: 12 },
+    formatter: p => 'f = ' + Number(p[0].value[0]).toFixed(3) + '<br/>PSD = ' + (Number(p[0].value[1]) * 1000).toFixed(1) + ' ×10³' },
+}));
+
+/* ---------- 数学 ---------- */
+document.getElementById('specDump').textContent = JSON.stringify({
+  plots: [
+    { kind: 'FUNCTION', title: 'H(f)', points: 'rect bandpass',
+      x: { label: 'f', min: -9, max: 9 }, y: { label: '|H(f)|', min: 0, max: 1.45 } },
+    { kind: 'FUNCTION', title: 'S_Y(f)', expr: '(N0/2)*H(f)^2*(2*pi*f)^2',
+      x: { label: 'f', min: -9, max: 9 }, y: { label: 'S_Y(f)' } },
+    { kind: 'FUNCTION', title: 'S_c(f) = S_s(f)',
+      expr: '4*pi^2*N0*(fc^2 + f^2)', domain: '|f| <= B/2',
+      x: { label: 'f', min: -1.7, max: 1.7 }, y: { label: 'PSD' } },
+  ],
+  params: { fc: 5, B: 2, N0: 1 },
+}, null, 2);
+
+renderMathInElement(document.body, {
+  delimiters: [{ left: '$$', right: '$$', display: true }, { left: '$', right: '$', display: false }],
+  throwOnError: false,
+});
+</script>
+</body>
+</html>

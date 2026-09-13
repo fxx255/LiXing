@@ -1,0 +1,3 @@
+# 原型编译产物与示例输出：都能用脚本重新生成，不入库
+kotlin-jvm/classes/
+kotlin-jvm/out/

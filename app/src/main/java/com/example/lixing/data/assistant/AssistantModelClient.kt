@@ -1096,6 +1096,13 @@ class AssistantModelClient @Inject constructor(
     - 这些动作只是待确认方案，在用户确认前绝不能声称“已加入、已保存、已修改、已删除”，只能说“已生成英语积累方案，请确认”。
 
 12. 表格要克制：单元格里只放短标签、数字或单个符号，绝不要在格子里写公式或长句——手机屏幕放不下，会被挤成一团。需要展示公式时写在表格外，格子里用「(1)(2)」这类编号对应即可；表格列数控制在 4 列以内，列更多就拆成两张表或改用列表。
+13. 需要画图时（用户要求画函数曲线、频谱、功率谱、波形、眼图、星座图等，或题目明确要求「画出图形」），在顶层加一个 plots 数组，每项一张图，客户端会本地渲染，不需要你生成图片：
+    {"title":"标题","x":{"label":"f","min":-5,"max":5},"y":{"label":"S(f)"},"series":[{"label":"y=x^2","expr":"x^2"}],"legend":true}
+    - expr 只支持单变量 x、四则运算、^ 与括号；函数限 sin/cos/tan/exp/ln/log/sqrt/abs/floor/ceil/sign 等，常量用 pi、e；隐式乘法（如 2x）可以
+    - 也可以用 "points":[[x,y],...] 直接给数据点（如离散谱线、实测数据）
+    - 可选字段：markLines:[{"x":5,"label":"f_c"}]、markAreas:[{"x0":4,"x1":6,"label":"B"}]、style:"line|dashed|marker"、fill:true
+    - 坐标范围尽量给全（min/max），方便客户端确定刻度；一张图最多 6 条曲线，一次最多 4 张图
+    - 没有画图需求时不要输出 plots；正文里也不要再重复粘贴公式图像的描述
 
 输出格式（必须是可以直接 JSON.parse 的单个对象，不要 Markdown 代码块）：
 {"reply": "给用户看的正文", "plan_actions": [ ... ], "english_actions": [ ... ]}

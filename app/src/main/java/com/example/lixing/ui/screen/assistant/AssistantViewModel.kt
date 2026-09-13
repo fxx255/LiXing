@@ -16,6 +16,7 @@ import com.example.lixing.data.assistant.shouldUseWebSearch
 import com.example.lixing.data.backup.VersionedBackupRepository
 import com.example.lixing.data.local.entity.AssistantConversationEntity
 import com.example.lixing.data.prefs.UserPreferencesRepository
+import com.example.lixing.data.plot.PlotImageStore
 import com.example.lixing.data.repository.AssistantChatRepository
 import com.example.lixing.data.repository.EnglishEntryRepository
 import com.example.lixing.data.repository.PlanRepository
@@ -25,6 +26,7 @@ import com.example.lixing.domain.assistant.AssistantMessage
 import com.example.lixing.domain.assistant.EnglishEntryAction
 import com.example.lixing.domain.assistant.PlanAction
 import com.example.lixing.domain.assistant.PlanChangeApplier
+import com.example.lixing.domain.plot.PlotSpec
 import com.example.lixing.domain.english.EnglishEntryType
 import com.example.lixing.domain.model.TaskStatus
 import com.example.lixing.domain.time.StudyClock
@@ -203,6 +205,7 @@ class AssistantViewModel @Inject constructor(
     private val textRecognizer: LocalTextRecognizer,
     private val aiCredentialStore: AiCredentialStore,
     private val generationGuard: AssistantGenerationGuard,
+    private val plotImageStore: PlotImageStore,
 ) : ViewModel() {
 
     private val _state = MutableStateFlow(AssistantUiState())
@@ -691,7 +694,18 @@ class AssistantViewModel @Inject constructor(
                         }
                     else -> Unit
                 }
-                lastReply?.let { appendAssistantTurn(conversationId, text, it, today, answerIndex) }
+                lastReply?.let { reply ->
+                    // 图表放在正文之后渲染：文字先上屏、图好了再挂上去，两件事互不阻塞；
+                    // 渲染失败返回空列表，绝不能因为画图失败而影响这条回答。
+                    appendAssistantTurn(
+                        conversationId = conversationId,
+                        text = text,
+                        reply = reply,
+                        today = today,
+                        answerIndex = answerIndex,
+                        imagePaths = renderPlots(reply.plots),
+                    )
+                }
                 return lastReply
             }
             continuation++
@@ -709,27 +723,51 @@ class AssistantViewModel @Inject constructor(
         }
     }
 
-    /** 收尾：把整篇回答落库，并把本轮产生的待确认项挂到这条消息上。 */
+    /** 收尾：把整篇回答与生成的图表落库，并把本轮产生的待确认项挂到这条消息上。 */
     private suspend fun appendAssistantTurn(
         conversationId: String,
         text: String,
         reply: ParsedAssistantReply,
         today: LocalDate,
         answerIndex: Int,
+        imagePaths: List<String> = emptyList(),
     ) {
-        chatRepository.appendMessage(conversationId, "assistant", text)
+        chatRepository.appendMessage(conversationId, "assistant", text, imagePaths, null)
         val previews = reply.actions.takeIf { it.isNotEmpty() }?.let { buildPreviews(it, today) }
         val englishPreviews = buildEnglishPreviews(reply.englishActions)
         _state.update { state ->
-            // 回答本身已在流式阶段写入 [answerIndex]，这里只挂待确认项：
+            // 回答本身已在流式阶段写入 [answerIndex]，这里只补图片与待确认项：
             // 不再追加消息，否则一条长回答会占好几个气泡、也会污染后续上下文。
+            val messages = if (imagePaths.isEmpty()) {
+                state.messages
+            } else {
+                state.messages.toMutableList().also { list ->
+                    if (answerIndex in list.indices) {
+                        list[answerIndex] = list[answerIndex].copy(imagePaths = imagePaths)
+                    }
+                }
+            }
             state.copy(
+                messages = messages,
                 pendingActions = previews ?: state.pendingActions,
                 pendingActionsOwnerIndex = if (previews != null) answerIndex else state.pendingActionsOwnerIndex,
                 planReviewDate = if (previews != null) today else state.planReviewDate,
                 pendingEnglishActions = englishPreviews ?: state.pendingEnglishActions,
                 pendingEnglishOwnerIndex = if (englishPreviews != null) answerIndex else state.pendingEnglishOwnerIndex,
             )
+        }
+    }
+
+    /**
+     * 渲染模型请求的图表。
+     *
+     * 放后台线程做（采样 900 点 + 逐条绘制），失败就返回空列表——
+     * 画不出图绝不能影响这条文字回答。
+     */
+    private suspend fun renderPlots(plots: List<PlotSpec>): List<String> {
+        if (plots.isEmpty()) return emptyList()
+        return withContext(Dispatchers.Default) {
+            plots.mapNotNull { spec -> plotImageStore.render(spec) }
         }
     }
 

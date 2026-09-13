@@ -1,0 +1,565 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>砺行 · 绘图能力原型</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+<style>
+  *{box-sizing:border-box}
+  body{margin:0;padding:26px 16px 70px;background:#f2f2f4;color:#1c1c1e;
+    font-family:-apple-system,"Segoe UI","Microsoft YaHei",system-ui,sans-serif;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:700px;margin:0 auto}
+  h1{font-size:18px;font-weight:600;margin:0 0 8px}
+  .sub{color:#6b6b70;font-size:13px;line-height:1.8;margin:0 0 20px}
+  .sub code{background:#e6e6ea;padding:1px 5px;border-radius:4px;font-size:12px}
+  .phone{background:#1c1c1e;border-radius:18px;padding:18px;color:#e6e6e6;font-size:15px;line-height:1.8}
+  .ask{background:#2c2c2e;border-radius:14px;padding:11px 14px;color:#cfcfd2;font-size:14px;line-height:1.7;margin-bottom:16px}
+  .answer p{margin:0 0 13px}
+  .answer strong{color:#fff;font-weight:600}
+  .fig{margin:18px 0 20px}
+  .chart{width:100%;height:250px}
+  .chart.tall{height:270px}
+  .cap{text-align:center;color:#8e8e93;font-size:12px;margin-top:8px}
+  .mermaid-out{background:#232325;border-radius:10px;padding:10px;overflow-x:auto;text-align:center}
+  .katex{font-size:1.03em}
+  .badge{display:inline-block;background:#2f4a6b;color:#9ecbff;font-size:11px;padding:2px 8px;border-radius:999px;margin-left:6px;vertical-align:middle}
+  .spec{margin-top:30px}
+  .spec h2{font-size:15px;font-weight:600;margin:0 0 4px}
+  .spec .note{color:#6b6b70;font-size:12.5px;margin:0 0 10px;line-height:1.7}
+  .spec pre{background:#1c1c1e;color:#a5e8a0;border-radius:12px;padding:15px;font-size:12px;
+    line-height:1.7;overflow:auto;max-height:460px;font-family:ui-monospace,Consolas,monospace;margin:0}
+  .err{color:#ff9f9f;font-size:12px;padding:8px 12px;background:#3a1f1f;border-radius:8px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>绘图能力原型</h1>
+  <p class="sub">
+    模拟「模型输出 spec → 客户端渲染」的完整链路，所有图表都是真实渲染的（不是截图）。
+    依赖联网加载 KaTeX / ECharts / Mermaid，这三个库将来会打包进 Android 的
+    <code>assets</code>，离线可用。
+  </p>
+
+  <div class="phone">
+    <div class="ask">帮我画一下 y=x² 与 y=2x² 的对比曲线，再给一个矩形脉冲的幅度谱、BPSK 眼图和 QPSK 星座图，最后画一个收发链路的框图。</div>
+    <div class="answer" id="answer"></div>
+  </div>
+
+  <section class="spec">
+    <h2>驱动上面这些图的中间表示</h2>
+    <p class="note">模型实际输出的就是这一段结构化数据（与文字 reply 同级）。客户端只负责校验、采样、转成目标格式——不执行任何模型产出的代码。</p>
+    <pre id="specDump"></pre>
+  </section>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10.9.1/dist/mermaid.min.js"></script>
+<script>
+/* ============================================================
+   1. 安全表达式求值器：白名单函数 + 白名单变量，绝不 eval
+   ============================================================ */
+const MATH_CONST = { pi: Math.PI, e: Math.E };
+const MATH_FUNC = {
+  sin: Math.sin, cos: Math.cos, tan: Math.tan, asin: Math.asin, acos: Math.acos,
+  atan: Math.atan, exp: Math.exp, ln: Math.log, log: Math.log10, log2: Math.log2,
+  sqrt: Math.sqrt, abs: Math.abs, floor: Math.floor, ceil: Math.ceil,
+  round: Math.round, sign: Math.sign, sinh: Math.sinh, cosh: Math.cosh, tanh: Math.tanh,
+};
+const PREC = { '+': 1, '-': 1, '*': 2, '/': 2, '^': 3 };
+const UNARY_PREC = 2.5;
+
+function tokenize(src) {
+  const out = [];
+  let i = 0;
+  while (i < src.length) {
+    const c = src[i];
+    if (/\s/.test(c)) { i++; continue; }
+    if (/[0-9.]/.test(c)) {
+      let j = i;
+      while (j < src.length && /[0-9.]/.test(src[j])) j++;
+      out.push({ t: 'num', v: parseFloat(src.slice(i, j)) }); i = j; continue;
+    }
+    if (/[A-Za-z_]/.test(c)) {
+      let j = i;
+      while (j < src.length && /[A-Za-z_0-9]/.test(src[j])) j++;
+      out.push({ t: 'name', v: src.slice(i, j) }); i = j; continue;
+    }
+    if ('+-*/^(),'.includes(c)) { out.push({ t: 'op', v: c }); i++; continue; }
+    throw new Error('非法字符 ' + c);
+  }
+  return out;
+}
+
+function insertImplicitMul(tokens) {
+  const out = [];
+  for (const cur of tokens) {
+    const prev = out[out.length - 1];
+    if (prev) {
+      const prevIsValue =
+        prev.t === 'num' ||
+        (prev.t === 'name' && !(MATH_FUNC[prev.v] && cur.t === 'op' && cur.v === '(')) ||
+        (prev.t === 'op' && prev.v === ')');
+      const curStartsValue =
+        cur.t === 'num' || cur.t === 'name' || (cur.t === 'op' && cur.v === '(');
+      if (prevIsValue && curStartsValue) out.push({ t: 'op', v: '*' });
+    }
+    out.push(cur);
+  }
+  return out;
+}
+
+function toRpn(tokens) {
+  const out = [], ops = [];
+  let prev = null;
+  for (let k = 0; k < tokens.length; k++) {
+    const tk = tokens[k];
+    if (tk.t === 'num') { out.push(tk); prev = tk; continue; }
+    if (tk.t === 'name') {
+      const next = tokens[k + 1];
+      if (MATH_FUNC[tk.v] && next && next.t === 'op' && next.v === '(') {
+        ops.push({ t: 'func', v: tk.v });
+      } else out.push(tk);
+      prev = tk; continue;
+    }
+    const v = tk.v;
+    if (v === '(') { ops.push(tk); prev = tk; continue; }
+    if (v === ')') {
+      while (ops.length && ops[ops.length - 1].v !== '(') out.push(ops.pop());
+      ops.pop();
+      if (ops.length && ops[ops.length - 1].t === 'func') out.push(ops.pop());
+      prev = tk; continue;
+    }
+    if (v === ',') {
+      while (ops.length && ops[ops.length - 1].v !== '(') out.push(ops.pop());
+      prev = tk; continue;
+    }
+    const isUnary = (v === '-' || v === '+') && (prev === null || (prev.t === 'op' && prev.v !== ')'));
+    if (isUnary) { ops.push({ t: 'op', v: 'u-' }); prev = tk; continue; }
+    const p = PREC[v];
+    while (ops.length) {
+      const top = ops[ops.length - 1];
+      if (top.v === '(') break;
+      const tp = top.v === 'u-' ? UNARY_PREC : PREC[top.v];
+      const shouldPop = v === '^' ? tp > p : tp >= p;
+      if (shouldPop) out.push(ops.pop()); else break;
+    }
+    ops.push(tk); prev = tk;
+  }
+  while (ops.length) out.push(ops.pop());
+  return out;
+}
+
+function evalRpn(rpn, vars) {
+  const st = [];
+  for (const tk of rpn) {
+    if (tk.t === 'num') { st.push(tk.v); continue; }
+    if (tk.t === 'name') {
+      if (Object.prototype.hasOwnProperty.call(vars, tk.v)) st.push(vars[tk.v]);
+      else if (Object.prototype.hasOwnProperty.call(MATH_CONST, tk.v)) st.push(MATH_CONST[tk.v]);
+      else throw new Error('未知符号 ' + tk.v);
+      continue;
+    }
+    if (tk.t === 'func') { st.push(MATH_FUNC[tk.v](st.pop())); continue; }
+    if (tk.v === 'u-') { st.push(-st.pop()); continue; }
+    const b = st.pop(), a = st.pop();
+    if (tk.v === '+') st.push(a + b);
+    else if (tk.v === '-') st.push(a - b);
+    else if (tk.v === '*') st.push(a * b);
+    else if (tk.v === '/') st.push(a / b);
+    else if (tk.v === '^') st.push(Math.pow(a, b));
+  }
+  if (st.length !== 1) throw new Error('表达式不完整');
+  return st[0];
+}
+
+function compileExpr(expr) {
+  const rpn = toRpn(insertImplicitMul(tokenize(expr)));
+  return vars => evalRpn(rpn, vars);
+}
+
+/* ============================================================
+   2. spec → 采样点（表达式部分）
+   ============================================================ */
+const SAMPLE_COUNT = 900;
+
+function sampleSeries(series, xMin, xMax) {
+  if (series.points && series.points.length) {
+    return series.points.map(p => [p[0], p[1]]);
+  }
+  const f = compileExpr(series.expr);
+  const data = [];
+  let finiteCount = 0;
+  for (let i = 0; i <= SAMPLE_COUNT; i++) {
+    const x = xMin + (xMax - xMin) * i / SAMPLE_COUNT;
+    let y;
+    try { y = f({ x }); } catch (e) { y = NaN; }
+    if (Number.isFinite(y)) { data.push([x, y]); finiteCount++; }
+    else data.push([x, null]);
+  }
+  if (finiteCount === 0) throw new Error('表达式在给定区间内没有有效取值');
+  return data;
+}
+
+function autoRange(seriesList, key, fallback) {
+  let lo = Infinity, hi = -Infinity;
+  for (const s of seriesList) {
+    for (const p of s.points) {
+      const v = p[key];
+      if (Number.isFinite(v)) { if (v < lo) lo = v; if (v > hi) hi = v; }
+    }
+  }
+  if (!Number.isFinite(lo) || !Number.isFinite(hi)) return fallback;
+  if (lo === hi) return [lo - 1, hi + 1];
+  const pad = (hi - lo) * 0.08;
+  return [lo - pad, hi + pad];
+}
+
+/* ============================================================
+   3. 各类图的数据准备
+   ============================================================ */
+function sinc(x) { return x === 0 ? 1 : Math.sin(Math.PI * x) / (Math.PI * x); }
+
+function makeSpectrum(duty = 0.25, harmonics = 26) {
+  const bars = [], envelope = [];
+  const top = 0.5;
+  for (let n = 1; n <= harmonics; n++) {
+    const amp = Math.abs(Math.sin(Math.PI * n * duty) / (Math.PI * n));
+    bars.push([n, amp]);
+  }
+  for (let n = 1; n <= harmonics; n += 0.1) {
+    envelope.push([n, Math.abs(sinc(n * duty)) * duty]);
+  }
+  return { bars, envelope, top };
+}
+
+function makeWaveform(symbols = 8, cyclesPerSymbol = 4, samplesPerSymbol = 48) {
+  const bits = [];
+  for (let k = 0; k < symbols; k++) bits.push(Math.random() < 0.5 ? 0 : 1);
+  const data = [], envelopeTop = [], envelopeBottom = [];
+  const total = symbols * samplesPerSymbol;
+  for (let i = 0; i <= total; i++) {
+    const t = i / samplesPerSymbol;
+    const symIndex = Math.min(symbols - 1, Math.floor(t));
+    const phase = bits[symIndex] === 0 ? 0 : Math.PI;
+    const v = Math.sin(2 * Math.PI * cyclesPerSymbol * t + phase);
+    data.push([t, v]);
+    const sign = bits[symIndex] === 0 ? 1 : -1;
+    envelopeTop.push([t, sign]);
+    envelopeBottom.push([t, -sign]);
+  }
+  return { data, envelopeTop, envelopeBottom, bits };
+}
+
+function makeEye(traces = 110, sps = 40, span = 2, noise = 0.05) {
+  const symbols = [];
+  const symCount = traces + 8;
+  for (let k = 0; k < symCount; k++) symbols.push(Math.random() < 0.5 ? -1 : 1);
+  const total = symCount * sps;
+  const wave = new Float64Array(total);
+  for (let n = 0; n < total; n++) {
+    let v = 0;
+    for (let k = -4; k <= symCount + 4; k++) {
+      const a = symbols[k] !== undefined ? symbols[k] : (k < 0 ? symbols[0] : symbols[symCount - 1]);
+      v += a * sinc(n / sps - k);
+    }
+    wave[n] = v + (Math.random() - 0.5) * 2 * noise;
+  }
+  const out = [];
+  const start = 6 * sps;
+  for (let s = 0; s < traces; s++) {
+    const base = start + s * sps;
+    if (base + span * sps >= total) break;
+    const pts = [];
+    for (let i = 0; i <= span * sps; i++) pts.push([i / sps, wave[base + i]]);
+    out.push(pts);
+  }
+  return out;
+}
+
+function gauss() {
+  let u = 0, v = 0;
+  while (u === 0) u = Math.random();
+  while (v === 0) v = Math.random();
+  return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+}
+
+function makeConstellation(count = 420, noise = 0.075) {
+  const s = 1 / Math.SQRT2;
+  const ideal = [[s, s], [s, -s], [-s, s], [-s, -s]];
+  const rx = [];
+  for (let k = 0; k < count; k++) {
+    const p = ideal[Math.floor(Math.random() * 4)];
+    rx.push([p[0] + gauss() * noise, p[1] + gauss() * noise]);
+  }
+  return { ideal, rx };
+}
+
+/* ============================================================
+   4. 深色主题下的 ECharts 基础样式
+   ============================================================ */
+const C = {
+  text: '#c9c9ce', sub: '#8e8e93', axis: '#4a4a4f', grid: '#2b2b2f',
+  blue: '#5aa9ff', amber: '#ffc857', green: '#3ddc97', pink: '#ff7eb6', purple: '#b28dff',
+};
+
+function axisCommon(spec, which) {
+  const a = spec[which] || {};
+  return {
+    name: a.label || '',
+    nameLocation: 'middle',
+    nameGap: which === 'x' ? 26 : 34,
+    nameTextStyle: { color: C.sub, fontSize: 11 },
+    min: a.min !== undefined && a.min !== null ? a.min : undefined,
+    max: a.max !== undefined && a.max !== null ? a.max : undefined,
+    scale: a.min === undefined || a.min === null,
+    axisLine: { lineStyle: { color: C.axis } },
+    axisLabel: { color: C.sub, fontSize: 11 },
+    splitLine: { show: a.grid !== false, lineStyle: { color: C.grid } },
+  };
+}
+
+function baseOption(spec, extra) {
+  return Object.assign({
+    backgroundColor: 'transparent',
+    animation: false,
+    textStyle: { color: C.text },
+    grid: { left: 50, right: 22, top: spec.legend ? 42 : 18, bottom: 42, containLabel: true },
+    legend: spec.legend ? {
+      top: 6, textStyle: { color: C.sub, fontSize: 11 }, itemWidth: 16, itemHeight: 8,
+    } : { show: false },
+    tooltip: { trigger: 'axis', backgroundColor: '#2c2c2e', borderWidth: 0,
+      textStyle: { color: '#e6e6e6', fontSize: 12 } },
+  }, extra);
+}
+
+const RENDERERS = {
+  FUNCTION(spec) {
+    const xMin = (spec.x && spec.x.min !== undefined) ? spec.x.min : -5;
+    const xMax = (spec.x && spec.x.max !== undefined) ? spec.x.max : 5;
+    const series = [], samples = [];
+    for (const s of spec.series) {
+      const data = sampleSeries(s, xMin, xMax);
+      samples.push({ points: data });
+      series.push({
+        type: 'line', name: s.label || s.expr, data,
+        showSymbol: s.style === 'marker', symbolSize: 6,
+        lineStyle: { width: 2, color: undefined, type: s.style === 'dashed' ? 'dashed' : 'solid' },
+        connectNulls: false,
+      });
+    }
+    const yRange = spec.y && spec.y.min !== undefined ? null : autoRange(samples, 1, [-1, 1]);
+    const opt = baseOption(spec, {
+      xAxis: axisCommon(spec, 'x'),
+      yAxis: Object.assign(axisCommon(spec, 'y'), yRange ? { min: yRange[0], max: yRange[1] } : {}),
+      series,
+    });
+    return opt;
+  },
+
+  SPECTRUM(spec) {
+    const { bars, envelope } = makeSpectrum(spec.duty || 0.25, spec.harmonics || 26);
+    return baseOption(spec, {
+      xAxis: Object.assign(axisCommon(spec, 'x'), { name: spec.x && spec.x.label || '谐波次数 n', type: 'value' }),
+      yAxis: Object.assign(axisCommon(spec, 'y'), { name: spec.y && spec.y.label || '幅度' }),
+      series: [
+        { type: 'bar', name: '谐波幅度', data: bars, barWidth: '46%',
+          itemStyle: { color: 'rgba(90,169,255,0.55)', borderRadius: [3, 3, 0, 0] } },
+        { type: 'line', name: 'sinc 包络', data: envelope, smooth: true, showSymbol: false,
+          lineStyle: { width: 1.6, color: C.amber } },
+      ],
+    });
+  },
+
+  WAVEFORM(spec) {
+    const { data, envelopeTop, envelopeBottom } = makeWaveform(
+      spec.symbols || 8, spec.cyclesPerSymbol || 4, 48);
+    return baseOption(spec, {
+      xAxis: Object.assign(axisCommon(spec, 'x'), { name: spec.x && spec.x.label || '时间 t (符号周期)' }),
+      yAxis: Object.assign(axisCommon(spec, 'y'), { name: spec.y && spec.y.label || '幅度', min: -1.35, max: 1.35 }),
+      series: [
+        { type: 'line', name: '调制波形', data, showSymbol: false,
+          lineStyle: { width: 1.4, color: C.blue } },
+        { type: 'line', name: '包络', data: envelopeTop, showSymbol: false, step: 'end',
+          lineStyle: { width: 1, color: C.green, type: 'dashed' } },
+        { type: 'line', name: '', data: envelopeBottom, showSymbol: false, step: 'start',
+          lineStyle: { width: 1, color: C.green, type: 'dashed' }, silent: true },
+      ],
+    });
+  },
+
+  EYE(spec) {
+    const traces = makeEye(spec.traces || 110, 40, spec.span || 2, spec.noise || 0.05);
+    const series = traces.map((pts, idx) => ({
+      type: 'line', data: pts, showSymbol: false, silent: true,
+      lineStyle: { width: 1, color: C.purple, opacity: 0.22 },
+      tooltip: { show: false },
+    }));
+    const opt = baseOption(spec, {
+      xAxis: Object.assign(axisCommon(spec, 'x'), {
+        name: spec.x && spec.x.label || '时间（符号周期 T）', type: 'value',
+        min: 0, max: spec.span || 2, splitLine: { show: false },
+      }),
+      yAxis: Object.assign(axisCommon(spec, 'y'), { name: spec.y && spec.y.label || '幅度', min: -1.2, max: 1.2 }),
+      series,
+    });
+    opt.legend = { show: false };
+    opt.tooltip = { show: false };
+    return opt;
+  },
+
+  CONSTELLATION(spec) {
+    const { ideal, rx } = makeConstellation(spec.count || 420, spec.noise || 0.075);
+    return baseOption(spec, {
+      grid: { left: 46, right: 24, top: 18, bottom: 40, containLabel: true },
+      xAxis: Object.assign(axisCommon(spec, 'x'), {
+        name: spec.x && spec.x.label || 'I', type: 'value', min: -1.4, max: 1.4,
+      }),
+      yAxis: Object.assign(axisCommon(spec, 'y'), {
+        name: spec.y && spec.y.label || 'Q', min: -1.4, max: 1.4,
+      }),
+      series: [
+        { type: 'scatter', name: '接收点', data: rx, symbolSize: 5,
+          itemStyle: { color: 'rgba(90,169,255,0.45)' } },
+        { type: 'scatter', name: '理想星座点', data: ideal, symbolSize: 14,
+          symbol: 'diamond', itemStyle: { color: 'transparent', borderColor: C.amber, borderWidth: 2 },
+          tooltip: { show: false } },
+      ],
+      legend: { show: true, top: 2, textStyle: { color: C.sub, fontSize: 11 }, itemWidth: 14, itemHeight: 8 },
+    });
+  },
+};
+
+/* ============================================================
+   5. 页面内容（模拟模型输出）
+   ============================================================ */
+const SPEC = {
+  reply: `结论：y=2x² 相对 y=x² 是**纵向拉伸 2 倍**，两条曲线都是开口向上的抛物线，顶点都在原点。
+
+两者之差恒为 $$y=2x^2-x^2=x^2\\ge 0$$，所以 2x² 始终在 x² 上方，且随 |x| 增大差距迅速拉开——这就是拉伸系数在图像上的直接体现。
+
+矩形脉冲的频谱是 sinc 形状，第一零点位于 $$f=1/\\tau$$，脉宽越窄主瓣越宽；这对理解带宽与脉宽的反比关系很关键。`,
+
+  plots: [
+    { kind: 'FUNCTION', title: '抛物线族对比', legend: true,
+      x: { label: 'x', min: -3, max: 3, grid: true },
+      y: { label: 'y', grid: true },
+      series: [
+        { label: 'y = x²', expr: 'x^2' },
+        { label: 'y = 2x²', expr: '2*x^2', style: 'dashed' },
+      ] },
+
+    { kind: 'SPECTRUM', title: '矩形脉冲串幅度谱（占空比 25%）', legend: true,
+      x: { label: '谐波次数 n' }, y: { label: '归一化幅度' },
+      duty: 0.25, harmonics: 26 },
+
+    { kind: 'WAVEFORM', title: 'BPSK 调制波形（红色虚线为包络）', legend: false,
+      x: { label: '时间 t（符号周期）' }, y: { label: '幅度' },
+      symbols: 8, cyclesPerSymbol: 4 },
+
+    { kind: 'EYE', title: 'BPSK 眼图（sinc 脉冲成形，含噪声）',
+      x: { label: '时间（符号周期 T）' }, y: { label: '幅度' },
+      traces: 110, span: 2, noise: 0.05 },
+
+    { kind: 'CONSTELLATION', title: 'QPSK 星座图（含加性噪声）', legend: true,
+      x: { label: 'I' }, y: { label: 'Q' },
+      count: 420, noise: 0.075 },
+  ],
+
+  diagram: [
+    'graph LR',
+    '  A[信源] --> B[信道编码]',
+    '  B --> C[脉冲成形]',
+    '  C --> D[调制]',
+    '  D --> E((信道))',
+    '  E --> F[解调]',
+    '  F --> G[匹配滤波]',
+    '  G --> H[译码]',
+    '  H --> I[信宿]',
+  ].join('\n'),
+};
+
+const CAPTIONS = [
+  '图 1 · 函数曲线（表达式采样）',
+  '图 2 · 频谱图（离散谐波 + 包络）',
+  '图 3 · 信号波形（BPSK）',
+  '图 4 · 眼图（多段叠加）',
+  '图 5 · 星座图（IQ 散点）',
+];
+
+/* ============================================================
+   6. 渲染流程
+   ============================================================ */
+function esc(s) {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function renderReplyMarkdown(md) {
+  return md.split('\n\n').map(p => {
+    let s = esc(p).replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+    return '<p>' + s.replace(/\n/g, '<br>') + '</p>';
+  }).join('');
+}
+
+function buildDom() {
+  const answer = document.getElementById('answer');
+  const parts = [renderReplyMarkdown(SPEC.reply)];
+  SPEC.plots.forEach((spec, i) => {
+    parts.push(`<div class="fig"><div class="chart${spec.kind === 'EYE' ? ' tall' : ''}" id="fig${i}"></div>` +
+      `<div class="cap">${CAPTIONS[i] || ''}</div></div>`);
+  });
+  parts.push('<div class="fig"><div class="mermaid-out" id="fig-diagram"></div>' +
+    '<div class="cap">图 6 · 系统框图（Mermaid）</div></div>');
+  answer.innerHTML = parts.join('');
+}
+
+function renderCharts() {
+  SPEC.plots.forEach((spec, i) => {
+    const el = document.getElementById('fig' + i);
+    if (!el) return;
+    try {
+      const renderer = RENDERERS[spec.kind];
+      if (!renderer) throw new Error('不支持的图表类型 ' + spec.kind);
+      const chart = echarts.init(el, null, { renderer: 'canvas' });
+      chart.setOption(renderer(spec), true);
+      window.addEventListener('resize', () => chart.resize());
+    } catch (e) {
+      el.innerHTML = '<div class="err">⚠ 图表生成失败：' + esc(e.message) + '</div>';
+    }
+  });
+}
+
+async function renderDiagram() {
+  const el = document.getElementById('fig-diagram');
+  try {
+    const { svg } = await mermaid.render('rx-diagram', SPEC.diagram);
+    el.innerHTML = svg;
+  } catch (e) {
+    el.innerHTML = '<div class="err">⚠ 框图渲染失败：' + esc(e.message || String(e)) + '</div>';
+  }
+}
+
+function renderMath() {
+  if (typeof renderMathInElement !== 'function') return;
+  renderMathInElement(document.getElementById('answer'), {
+    delimiters: [
+      { left: '$$', right: '$$', display: true },
+      { left: '$', right: '$', display: false },
+    ],
+    throwOnError: false,
+  });
+}
+
+document.getElementById('specDump').textContent = JSON.stringify(SPEC, null, 2);
+
+mermaid.initialize({ startOnLoad: false, theme: 'dark', securityLevel: 'strict',
+  flowchart: { htmlLabels: false, curve: 'basis' } });
+
+buildDom();
+renderCharts();
+renderDiagram().then(renderMath);
+</script>
+</body>
+</html>
