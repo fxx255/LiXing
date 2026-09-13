@@ -75,6 +75,12 @@ class LatexCapabilityProbeTest {
             "\\rule{1cm}{1pt}", "\\raisebox{1pt}{x}", "\\hspace{1cm}", "\\vspace{1cm}",
             // 直接输入的 Unicode 数学符号（输入法/OCR 常见）
             "a ≤ b", "α + β", "x → 0", "∑_{i}", "a × b", "a ≠ b", "√x", "∫_0^1",
+            // 公式内容里带换行（JSON 的 \n 被正确还原后就是这个形态，
+            // 用来确认「换行不再被误判成 LaTeX 之后」渲染器依然吃得下）
+            "\nf(x)",
+            "f(x)\n",
+            "f(x) \\le \\frac{1}{2}\n= \\frac{1}{2}Muv",
+            "\n\nf(x)\n\n",
             // 结构性畸形
             "\\begin{array}{cc} a & b",
             "a & b",

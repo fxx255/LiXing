@@ -23,6 +23,24 @@ MIRROR="${UPDATE_MIRROR:-https://ghfast.top/}"
 
 cd "$(dirname "$0")/.."
 
+# changelog 需要 JSON 转义（换行 / 引号 / 反斜杠），纯 bash 做不可靠，这里探测可用的 Python。
+# 找不到就明确报错退出——绝不能写出 `"changelog": ,` 这种非法 JSON，
+# 那会让云函数和 App 的检查更新整体失效（v1.0.20 发版时踩过一次）。
+PYTHON_BIN="${PYTHON_BIN:-}"
+if [ -z "$PYTHON_BIN" ]; then
+  for candidate in python3 python py; do
+    if command -v "$candidate" >/dev/null 2>&1; then
+      PYTHON_BIN="$candidate"
+      break
+    fi
+  done
+fi
+if [ -z "$PYTHON_BIN" ]; then
+  echo "错误：未找到 python3 / python / py，无法安全生成 update.json" >&2
+  exit 1
+fi
+echo "==> 使用 $PYTHON_BIN 生成清单"
+
 # versionCode 必须与 BuildConfig.VERSION_CODE 完全一致：
 # 早先用日期生成（260907 之类），会导致装完最新版仍被判定为「有新版本」。
 VERSION_CODE=$(grep -m1 '^[[:space:]]*versionCode' app/build.gradle.kts | grep -o '[0-9]\+')
@@ -57,11 +75,16 @@ cat > build/update.json <<JSON
   "apkUrl": "${MIRROR}https://github.com/${REPO}/releases/download/v${VERSION_NAME}/${APK_NAME}",
   "sha256": "${SHA256}",
   "sizeBytes": ${SIZE},
-  "changelog": $(printf '%s' "$CHANGELOG" | python -c 'import json,sys; print(json.dumps(sys.stdin.read()))'),
+  "changelog": $(printf '%s' "$CHANGELOG" | "$PYTHON_BIN" -c 'import json,sys; print(json.dumps(sys.stdin.read()))'),
   "minSdk": ${MIN_SDK},
   "force": false
 }
 JSON
+
+# 发布前强制校验：清单一旦不是合法 JSON，云函数与 App 的检查更新会全线失效
+"$PYTHON_BIN" -c 'import json; json.load(open("build/update.json", encoding="utf-8"))' \
+  || { echo "错误：build/update.json 不是合法 JSON，已中止发布" >&2; exit 1; }
+echo "==> update.json JSON 校验通过"
 
 cp "$APK" "build/${APK_NAME}"
 
