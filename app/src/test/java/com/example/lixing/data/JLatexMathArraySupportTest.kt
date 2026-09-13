@@ -2,6 +2,7 @@ package com.example.lixing.data
 
 import android.app.Application
 import com.example.lixing.data.assistant.sanitizeAssistantLatex
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Before
@@ -101,6 +102,27 @@ class JLatexMathArraySupportTest {
             .find(sanitized)
         assertTrue("aligned 应被转换为 array，实际: $sanitized", arrayMatch != null)
         assertParses(arrayMatch!!.value)
+    }
+
+    @Test
+    fun equationEnvironmentIsUnwrappedSoItRenders() {
+        // equation 是 JLatexMath 唯一不认识的常见环境（实测 "Unknown environment: equation"，
+        // 而 align/gather/multline/eqnarray/split 都能渲染）。
+        // 清洗后必须剥掉标签并补上 $$ 才能渲染——否则每次都会失败，
+        // 表现为「同一处公式怎么改都渲染不出来」。
+        val markdown = "\\begin{equation}\nE = mc^2\n\\end{equation}"
+        val sanitized = sanitizeAssistantLatex(markdown)
+        assertFalse("equation 标签应被剥掉，实际: $sanitized", sanitized.contains("\\begin{equation}"))
+        val math = Regex("""\$\$([\s\S]*?)\$\$""").find(sanitized)
+        assertTrue("应被 $$ 包裹成公式块，实际: $sanitized", math != null)
+        assertParses(math!!.groupValues[1].trim())
+    }
+
+    @Test
+    fun missingPackageCommandsAreDowngradedSoTheyRender() {
+        // cancel / xcolor 等命令在 JLatexMath 里不存在，降级后必须可解析
+        assertParses(sanitizeAssistantLatex("\\cancel{x}").trim())
+        assertParses(sanitizeAssistantLatex("\\color{red} x").trim())
     }
 
     @Test

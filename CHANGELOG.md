@@ -2,6 +2,14 @@
 
 > 按时间倒序记录功能变更。
 
+## v1.0.19 (2026-09-13) · 揪出「怎么改都渲染不出来」的那类公式
+
+- **根因：`equation` 环境没人转换**。清洗管线用一张白名单（aligned / align / gather / equation / cases / matrix …）决定给哪些数学环境补 `$$` 包裹，但真正做环境改写的函数**只处理 `aligned`**，其余原样放行。而实测证明 **JLatexMath 恰好不认识 `equation`**（报 `Unknown environment: equation`），于是 `\begin{equation}…\end{equation}` 被补上 `$$` 后直接送进渲染器，**每次都抛异常、每次都落到占位符**——这就是「同一处公式改多少遍都渲染不出来」的原因；
+- **修法**：equation 只表示「独立成行 + 编号」，剥掉标签对公式内容毫无影响，现在会剥壳后再由外层补 `$$`；
+- **顺带降级一批需要额外宏包的命令**（逐个实测确认 JLatexMath 里不存在）：`\cancel{x}` → `x`、`\color{…}` → 剔除、`\intertext{…}` → 换行 + `\text{}`、`\begin{dcases}` → `cases`；
+- **澄清两个曾被怀疑的「结构性缺陷」，实测都不成立**：JLatexMath 对中文（`\text{持续}`、`\mbox{中文}`）和直接输入的 Unicode 数学符号（`≤ α → ∑ × ≠ √ ∫`）都能正常渲染，无需特殊处理；
+- 新增 `LatexCapabilityProbeTest`：105 个常见 LaTeX 构造逐个喂给真实解析器、结果写进 `build/latex-probe.txt`。以后再遇到「某个公式渲染不出来」，跑一次就能分清是**库本身不支持**还是**清洗没覆盖**。
+
 ## v1.0.18 (2026-09-13) · 公式把 JSON 协议撑破，导致回答变「乱码」
 
 - **现象**：部分回答会把模型的协议原文直接显示出来（正文开头是 `{"reply": "…`，结尾拖着一串 `plan_actions: [], "english_actions": []`）；有时公式又变成乱码样的字符；

@@ -673,6 +673,15 @@ private fun removeUnsupportedLatexCommands(text: String): String {
         Regex("""\[\d+(?:\.\d+)?(?:pt|em|ex|mm|cm|in)\]""", RegexOption.IGNORE_CASE),
         "",
     )
+    // 需要额外宏包、JLatexMath 里根本不存在的命令（已逐个实测确认）。
+    // 按语义降级，而不是留着让整段公式渲染失败：
+    result = result.replace(Regex("""\\cancel\s*\{([^{}]*)\}""")) { it.groupValues[1] } // cancel 包
+    result = result.replace(Regex("""\\color\s*\{[^{}]*\}"""), "") // xcolor 的 \color
+    result = result.replace(Regex("""\\intertext\s*\{([^{}]*)\}""")) {
+        "\\\\ \\text{${it.groupValues[1]}}" // amsmath：降级成「换行 + 文本」
+    }
+    result = result.replace(Regex("""\\begin\{dcases\}"""), "\\begin{cases}") // mathtools
+    result = result.replace(Regex("""\\end\{dcases\}"""), "\\end{cases}")
     return result
 }
 
@@ -781,6 +790,17 @@ private fun convertAlignedEnvironments(markdown: String): String {
  * 这里先算出最大 `&` 数，再给每行补齐到统一列数。
  */
 private fun transformEnvironment(block: String, envName: String): String {
+    // equation 是 JLatexMath 唯一不认识的常见环境（实测报 "Unknown environment: equation"；
+    // align / gather / multline / eqnarray / split / aligned 都能渲染）。
+    // 它只表示「独立成行 + 编号」，剥掉标签对公式内容毫无影响，外层 $$ 由调用方补。
+    // 之前 KNOWN_MATH_ENVIRONMENTS 把它列进白名单却没人转换它，于是每次都原样送进渲染器、
+    // 每次都抛异常 → 表现为「同一处公式反复修也渲染不出来」。
+    if (envName == "equation" || envName == "equation*") {
+        return block
+            .replace(Regex("""\\begin\{equation\*?\}"""), "")
+            .replace(Regex("""\\end\{equation\*?\}"""), "")
+            .trim()
+    }
     if (envName != "aligned" && envName != "aligned*") return block
     val begin = "\\begin{$envName}"
     val end = "\\end{$envName}"
