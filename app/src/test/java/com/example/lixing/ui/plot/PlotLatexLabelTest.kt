@@ -7,10 +7,13 @@ import com.example.lixing.domain.plot.MarkArea
 import com.example.lixing.domain.plot.PlotSpec
 import com.example.lixing.domain.plot.Series
 import org.junit.Assert.assertTrue
+import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
+import org.robolectric.RuntimeEnvironment
 import org.robolectric.annotation.Config
+import ru.noties.jlatexmath.JLatexMathAndroid
 
 /**
  * 图内 LaTeX 公式渲染。
@@ -30,6 +33,16 @@ import org.robolectric.annotation.Config
 class PlotLatexLabelTest {
 
     private val renderer = PlotBitmapRenderer(density = 2f)
+
+    /**
+     * 公式排版必须先初始化 JLatexMath（同 LiXingApplication）。
+     * 漏掉时 TeXFormula 静态初始化失败，而且**粘性**——同一 JVM 内之后
+     * 所有用到它的测试都会 `NoClassDefFoundError`（曾把 JLatexCjkMetricsTest 整类带崩）。
+     */
+    @Before
+    fun setUp() {
+        JLatexMathAndroid.init(RuntimeEnvironment.getApplication())
+    }
 
     private fun specWith(
         title: String = "",

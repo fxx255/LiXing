@@ -12,7 +12,6 @@ import com.example.lixing.domain.plot.MarkArea
 import com.example.lixing.domain.plot.MarkLine
 import com.example.lixing.domain.plot.PlotSpec
 import com.example.lixing.domain.plot.Series
-import com.example.lixing.domain.plot.autoRange
 import com.example.lixing.domain.plot.niceTicks
 import com.example.lixing.domain.plot.prettifyPlotLabel
 import com.example.lixing.domain.plot.sampleSeries
@@ -95,20 +94,34 @@ class PlotBitmapRenderer(
         val gap = if (pieces.size > 1) dp(3f) else 0f
         val total = widths.sum() + gap * (pieces.size - 1)
         var cursorX = if (alignCenter) x - total / 2f else x
+        // 标签不许画到画布外：公式过长或度量异常时宁可贴边、右边被裁，
+        // 也不能整块跑到画布外面（历史上出现过「文字全挤在左上角」的观感）。
+        val leftLimit = dp(2f)
+        val rightLimit = canvas.width - dp(2f)
+        if (cursorX < leftLimit) cursorX = leftLimit
+        if (total <= rightLimit - leftLimit && cursorX + total > rightLimit) {
+            cursorX = rightLimit - total
+        }
         pieces.forEachIndexed { index, piece ->
             val w = widths[index]
             val latex = piece.latex
-            val drawable = if (latex != null) texDrawable(latex, textSizePx) else null
+            val texWidth = if (latex != null) texWidthOrNull(latex, textSizePx) else null
+            val drawable = if (latex != null && texWidth != null) texDrawable(latex, textSizePx) else null
             if (drawable != null) {
                 val h = drawable.intrinsicHeight
                 // 公式以「视觉垂直居中于原文字行」的方式对齐：基线大致在行高的 72% 处
                 val top = baselineY - h * 0.72f
-                drawable.setBounds(cursorX.toInt(), top.toInt(), (cursorX + w).toInt(), (top + h).toInt())
+                // 用 canvas 平移定位、给 drawable 一个「原点在 (0,0)」的 bounds：
+                // 位置完全由我们决定，不依赖库对 bounds.left/top 的处理方式。
+                val save = canvas.save()
+                canvas.translate(cursorX, top)
+                drawable.setBounds(0, 0, w.toInt(), h)
                 // 公式颜色跟随当前主题文字色
                 drawable.setColorFilter(color, PorterDuff.Mode.SRC_IN)
                 drawable.draw(canvas)
+                canvas.restoreToCount(save)
             } else {
-                // 纯文本片段；公式构造失败时把公式源码按纯文本画出来（带降级替换）
+                // 纯文本片段；公式不可用时把公式源码按纯文本画出来（带降级替换）
                 drawPlainText(canvas, latex ?: piece.text, cursorX, baselineY, textSizePx, color)
             }
             cursorX += w + gap
@@ -129,11 +142,26 @@ class PlotBitmapRenderer(
         canvas.drawText(prettifyPlotLabel(raw), x, baselineY, textPaint)
     }
 
+    /**
+     * 公式排版的可用宽度；**不可用时返回 null**（构造失败、或量出的尺寸异常）。
+     *
+     * 尺寸异常必须挡住：零/负宽会让 `setBounds` 变成空矩形（画不出东西），
+     * 宽到没边（超过 [MAX_TEX_WIDTH_EM] 个字号）则说明这条公式的度量不可信，
+     * 直接把标签挤出画布。两种情况都回落成纯文本更可控。
+     */
+    private fun texWidthOrNull(latex: String, textSizePx: Float): Float? {
+        val drawable = texDrawable(latex, textSizePx) ?: return null
+        val w = drawable.intrinsicWidth
+        val h = drawable.intrinsicHeight
+        if (w <= 0 || h <= 0 || w > textSizePx * MAX_TEX_WIDTH_EM) return null
+        return w.toFloat()
+    }
+
     /** 单个片段的绘制宽度。 */
     private fun pieceWidth(piece: LabelPiece, textSizePx: Float): Float {
         val latex = piece.latex
         if (latex != null) {
-            texDrawable(latex, textSizePx)?.let { return it.intrinsicWidth.toFloat() }
+            texWidthOrNull(latex, textSizePx)?.let { return it }
             return plainTextWidth(latex, textSizePx)
         }
         return plainTextWidth(piece.text, textSizePx)
@@ -173,7 +201,8 @@ class PlotBitmapRenderer(
         return bitmap
     }
 
-    private fun drawAll(canvas: Canvas, spec: PlotSpec, width: Float, height: Float) {
+    /** 绘制入口（internal 便于测试注入记录型 Canvas 校验定位）。 */
+    internal fun drawAll(canvas: Canvas, spec: PlotSpec, width: Float, height: Float) {
         val titleSize = dp(15f)
         val labelSize = dp(12.5f)
         val tickSize = dp(11.5f)
@@ -186,17 +215,15 @@ class PlotBitmapRenderer(
         }
         val allPoints = sampled.flatten()
 
-        // ---- 2. 数据范围（保守策略）----
-        // 以前模型一旦给了 min/max 就直接当坐标范围用，而提示词又要求它「范围尽量给全」，
-        // 于是范围恰好等于数据的极值 ⇒ 曲线极值贴着框线（抛物线的谷底压在坐标轴底线、
-        // 峰顶顶到上边框），整体形状被切掉、特征丢失。
-        // 现在坐标范围**必须覆盖全部数据并保留边距**：模型范围只在「比数据更宽」时生效
-        // （相当于缩小视野），绝不用来裁剪数据。autoRange 已含 8% 边距。
+        // ---- 2. 数据范围 ----
+        // x 轴是「定义域」：以模型声明的区间为准，但要保证点集不越出视野。
+        // y 轴用 balancedRange：主体完整 + 适当边距 + 极端离群点折叠（见其注释）。
         val xDataLo = allPoints.minOfOrNull { it.first } ?: -1.0
         val xDataHi = allPoints.maxOfOrNull { it.first } ?: 1.0
         val (xLo, xHi) = conservativeRange(xDataLo, xDataHi, spec.x.min, spec.x.max)
-        val yAuto = autoRange(allPoints.map { it.second })
-        val (yLo, yHi) = conservativeRange(yAuto.first, yAuto.second, spec.y.min, spec.y.max)
+        val yRange = balancedRange(allPoints.map { it.second }, spec.y.min, spec.y.max)
+        val yLo = yRange.lo
+        val yHi = yRange.hi
         val spanX = if (xHi - xLo == 0.0) 1.0 else xHi - xLo
         val spanY = if (yHi - yLo == 0.0) 1.0 else yHi - yLo
 
@@ -247,6 +274,9 @@ class PlotBitmapRenderer(
         }
 
         // ---- 6. 序列：面积 → 折线 ----
+        // 裁剪到绘图区：被折叠到范围外的极端点不应画到框外（会压住轴标签）。
+        val seriesSave = canvas.save()
+        canvas.clipRect(plotX, plotY, plotX + plotW, plotY + plotH)
         spec.series.forEachIndexed { index, s ->
             val pts = sampled[index]
             if (pts.isEmpty()) return@forEachIndexed
@@ -269,6 +299,7 @@ class PlotBitmapRenderer(
                 drawPolyline(canvas, pts, ::sx, ::sy, withAlpha(base, (255 * s.opacity).toInt()), s.width, s.style == "dashed")
             }
         }
+        canvas.restoreToCount(seriesSave)
 
         // ---- 7. 坐标轴 ----
         linePaint.color = theme.axis
@@ -276,6 +307,10 @@ class PlotBitmapRenderer(
         linePaint.pathEffect = null
         canvas.drawLine(plotX, plotY + plotH, plotX + plotW, plotY + plotH, linePaint)
         canvas.drawLine(plotX, plotY, plotX, plotY + plotH, linePaint)
+
+        // ---- 7b. 断轴标记：有数据被折叠到范围外时，在竖直轴上画「断口」 ----
+        if (yRange.foldedHigh) drawAxisBreak(canvas, plotX, plotY + dp(9f))
+        if (yRange.foldedLow) drawAxisBreak(canvas, plotX, plotY + plotH - dp(9f))
 
         // ---- 8. 刻度与标签 ----
         for (t in xTicks) {
@@ -342,6 +377,21 @@ class PlotBitmapRenderer(
                 xx += itemWidth
             }
         }
+    }
+
+    /**
+     * 断轴标记：两条短斜线（制图惯例符号）画在竖直坐标轴上，表示「轴在此处被折叠，
+     * 仍有超出范围的数据被压缩显示」——保证数据不被无声丢弃。
+     */
+    private fun drawAxisBreak(canvas: Canvas, axisX: Float, y: Float) {
+        linePaint.color = theme.axis
+        linePaint.strokeWidth = dp(1.2f)
+        linePaint.pathEffect = null
+        val w = dp(5f)
+        val h = dp(4f)
+        val gap = dp(2.6f)
+        canvas.drawLine(axisX - w, y + h, axisX + w, y - h, linePaint)
+        canvas.drawLine(axisX - w, y + h + gap, axisX + w, y - h + gap, linePaint)
     }
 
     /** 画折线：null 处断开——发散点（1/x 在 0 等）绝不能连成一条竖直长线。 */
@@ -433,12 +483,92 @@ class PlotBitmapRenderer(
 /** 标签片段：要么是交给 JLatexMath 的公式（[latex]），要么是直接画的普通文字（[text]）。 */
 internal data class LabelPiece(val text: String = "", val latex: String? = null)
 
+/** 公式宽度的可信上限（按字号计）：超过这么多 em 说明度量不可信，回落纯文本。 */
+private const val MAX_TEX_WIDTH_EM = 40f
+
+/**
+ * 坐标范围（可带折叠标记）。
+ *
+ * [foldedLow]/[foldedHigh] 为 true 表示该侧有数据落在范围之外、被**折叠**到边界：
+ * 曲线在边界处被裁断，并在轴上画出断轴标记，提示「这里还有数据，只是被压缩显示」。
+ */
+internal data class AxisRange(
+    val lo: Double,
+    val hi: Double,
+    val foldedLow: Boolean = false,
+    val foldedHigh: Boolean = false,
+)
+
+/**
+ * 平衡的坐标范围：**主体数据完整显示 + 适当边距 + 极端离群点折叠**。
+ *
+ * 背景：早先「模型给什么范围就用什么范围」会让曲线极值贴框（谷底压在坐标轴底线上）；
+ * 而改成「必须覆盖全部数据」又走到另一个极端——个别离群点会把主体曲线压成一条线。
+ * 现在折中（[fenceFactor] 为 Tukey 围栏系数）：
+ * 1. 用 **Tukey 规则**识别离群点：`Q1 - k·IQR` / `Q3 + k·IQR` 之外的点才算离群；
+ *    **没有离群点时主体 = 全量数据**（不像分位数那样把正常的极值也裁掉）；
+ * 2. 模型显式给的范围优先，但**至少要覆盖主体范围**（否则视为把主体裁掉，会扩展它）；
+ * 3. 最后统一加 [marginRatio] 边距，保证曲线不贴框线；
+ * 4. 落在最终范围外的数据**不撑大坐标轴**，而是折叠到边界（由调用方裁剪 + 画断轴标记）。
+ */
+internal fun balancedRange(
+    values: List<Double?>,
+    specLo: Double?,
+    specHi: Double?,
+    marginRatio: Double = 0.06,
+    fenceFactor: Double = 1.5,
+): AxisRange {
+    val finite = values.filter { it != null && it.isFinite() }.map { it!! }.sorted()
+    if (finite.isEmpty()) return AxisRange(specLo ?: -1.0, specHi ?: 1.0)
+
+    val dataLo = finite.first()
+    val dataHi = finite.last()
+    // Tukey 围栏：IQR 为 0（大量重复值，如阶梯/常数）时不裁剪，直接用完整范围
+    val q1 = quantile(finite, 0.25)
+    val q3 = quantile(finite, 0.75)
+    val iqr = q3 - q1
+    val lowerFence = q1 - fenceFactor * iqr
+    val upperFence = q3 + fenceFactor * iqr
+    val coreLo = finite.firstOrNull { it >= lowerFence } ?: dataLo
+    val coreHi = finite.lastOrNull { it <= upperFence } ?: dataHi
+    val (useLo, useHi) = if (iqr <= 0.0 || coreHi <= coreLo) dataLo to dataHi else coreLo to coreHi
+
+    var lo = specLo ?: useLo
+    var hi = specHi ?: useHi
+    // 模型范围不能裁掉主体（极少数情况下它给的窗口会把主要特征切掉）
+    if (lo > useLo) lo = useLo
+    if (hi < useHi) hi = useHi
+
+    if (hi - lo <= 0.0) {
+        val pad = (abs(lo) + 1.0) * 0.1
+        lo -= pad
+        hi += pad
+    }
+    // 边距按**主体范围**四周留白：极端点被折叠时，贴框的必须是「主体的边缘」而不是
+    // 离群点，所以用主体跨度算边距、并且只做外扩（minOf/maxOf）——模型给的更宽窗口不会被缩掉。
+    val coreMargin = ((useHi - useLo).takeIf { it > 0.0 } ?: 0.0) * marginRatio
+    if (coreMargin > 0.0) {
+        lo = minOf(lo, useLo - coreMargin)
+        hi = maxOf(hi, useHi + coreMargin)
+    }
+    return AxisRange(lo, hi, foldedLow = dataLo < lo, foldedHigh = dataHi > hi)
+}
+
+/** 线性插值分位数（[sorted] 必须已升序）。 */
+private fun quantile(sorted: List<Double>, p: Double): Double {
+    if (sorted.isEmpty()) return 0.0
+    val idx = (sorted.size - 1) * p.coerceIn(0.0, 1.0)
+    val lower = idx.toInt()
+    val upper = (lower + 1).coerceAtMost(sorted.lastIndex)
+    val frac = idx - lower
+    return sorted[lower] + (sorted[upper] - sorted[lower]) * frac
+}
+
 /**
  * 保守的坐标范围：**保证覆盖 [dataLo]..[dataHi]，模型给的范围只在更宽时生效**。
  *
- * 模型（与提示词）倾向于给出「刚好等于数据极值」的范围，直接采用会让曲线极值
- * 贴着框线（抛物线的谷底压在坐标轴底线上），整体形状被切掉、特征丢失。
- * 传入的 [dataLo]/[dataHi] 应当已经含好边距（y 轴用 `autoRange` 的 8% 边距）。
+ * 专用于 x 轴（定义域）：以模型声明的区间为准，但点集不得越出视野被画到框外。
+ * y 轴请用 [balancedRange]（带离群点折叠与边距）。
  */
 internal fun conservativeRange(
     dataLo: Double,

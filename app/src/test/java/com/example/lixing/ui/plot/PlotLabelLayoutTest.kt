@@ -1,8 +1,18 @@
 package com.example.lixing.ui.plot
 
+import android.app.Application
+import com.example.lixing.domain.plot.Axis
+import com.example.lixing.domain.plot.PlotSpec
+import com.example.lixing.domain.plot.Series
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
+import org.junit.Before
 import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
+import org.robolectric.RuntimeEnvironment
+import org.robolectric.annotation.Config
+import ru.noties.jlatexmath.JLatexMathAndroid
 
 /**
  * 图内标签的分段排布 + 保守坐标范围（纯函数测试，不需要 Robolectric）。
@@ -19,7 +29,21 @@ import org.junit.Test
  * 文字，位图上量不到文字像素（实测标题带跨度恒为 0）。文字是否真的画出来需要真机验证，
  * 这里钉住的是不会退化的核心不变量：**交给公式排版器的片段永不含中文**。
  */
+@RunWith(RobolectricTestRunner::class)
+@Config(sdk = [33], application = Application::class)
 class PlotLabelLayoutTest {
+
+    private val renderer = PlotBitmapRenderer(density = 2f)
+
+    /**
+     * 用公式排版必须先初始化 JLatexMath（与 LiXingApplication 里一样）。
+     * 漏掉这一步时 TeXFormula 的静态初始化会失败，而且是**粘性**的：
+     * 同一 JVM 内后续所有用到它的测试都会 `NoClassDefFoundError`。
+     */
+    @Before
+    fun setUp() {
+        JLatexMathAndroid.init(RuntimeEnvironment.getApplication())
+    }
 
     // ---------- 分段规则（纯函数） ----------
 
@@ -119,6 +143,59 @@ class PlotLabelLayoutTest {
         assertEquals(1.08, hi, 1e-9)
     }
 
+    // ---------- 平衡坐标范围（主体完整 + 边距 + 极端点折叠） ----------
+
+    @Test
+    fun `没有离群点时范围覆盖全数据并留边距`() {
+        // 抛物线 3950..3987（提示词要求模型「范围给全」，这里模拟它给的就是数据极值）
+        val values = (0..100).map { 3950.0 + 37.0 * (it / 100.0) * (it / 100.0) }
+        val (lo, hi) = balancedRange(values, 3950.0, 3987.0).let { it.lo to it.hi }
+        assertTrue("下边距应把谷底抬离轴线（lo=$lo）", lo < 3950.0)
+        assertTrue("上边距应留出余量（hi=$hi）", hi > 3987.0)
+        assertTrue("范围不该扩张到离谱（span=${hi - lo}）", hi - lo < 80.0)
+    }
+
+    @Test
+    fun `有极端离群点时主体仍占据大部分视野且标记折叠`() {
+        // 主体 0..50，另有一个 990 的尖峰
+        val values = (0..100).map { 0.0 + 50.0 * (it / 100.0) } + 990.0
+        val range = balancedRange(values, null, null)
+        assertTrue("尖峰应被折叠（hi=${range.hi}）", range.foldedHigh)
+        assertTrue("主体上界必须落在视野内（hi=${range.hi}）", range.hi > 50.0)
+        assertTrue("视野不该被尖峰撑大（span=${range.hi - range.lo}）", range.hi - range.lo < 120.0)
+    }
+
+    @Test
+    fun `模型范围比主体更窄时被扩展到覆盖主体`() {
+        val values = listOf(0.0, 10.0, 20.0, 30.0, 40.0, 50.0)
+        val range = balancedRange(values, 20.0, 30.0)
+        assertTrue("下界应被扩到主体之外（lo=${range.lo}）", range.lo < 0.0 || range.lo <= 0.0)
+        assertTrue("上界应被扩到主体之外（hi=${range.hi}）", range.hi >= 50.0)
+    }
+
+    @Test
+    fun `模型给了更宽的视野时予以保留`() {
+        val values = listOf(3950.0, 3960.0, 3990.0)
+        val range = balancedRange(values, 0.0, 4000.0)
+        // 模型窗口更宽时不能被收窄（可能因为「数据贴上边界」在其外侧再加一点边距）
+        assertTrue("下界不该被收窄（lo=${range.lo}）", range.lo <= 0.0)
+        assertTrue("上界不该被收窄（hi=${range.hi}）", range.hi >= 4000.0)
+        assertTrue("模型视野更宽时不应判为折叠", !range.foldedLow && !range.foldedHigh)
+    }
+
+    @Test
+    fun `没有数据时用模型范围兜底`() {
+        val range = balancedRange(listOf(null, Double.NaN), -1.0, 1.0)
+        assertEquals(-1.0, range.lo, 1e-9)
+        assertEquals(1.0, range.hi, 1e-9)
+    }
+
+    @Test
+    fun `恒定值不会产生零跨度范围`() {
+        val range = balancedRange(listOf(5.0, 5.0, 5.0), null, null)
+        assertTrue("恒定值也要有非零跨度（lo=${range.lo} hi=${range.hi}）", range.hi > range.lo)
+    }
+
     // ---------- 核心不变量：任何情况下都不能把中文交给公式排版器 ----------
 
     /**
@@ -165,5 +242,48 @@ class PlotLabelLayoutTest {
         val latex = pieces.mapNotNull { it.latex }
         assertTrue("中文部分不能丢（实际「$text」）", text.contains("功率谱密度") && text.contains("的对比"))
         assertEquals(listOf("S_c(f)"), latex)
+    }
+
+    /** 录制型 Canvas：记下每次平移，用来验证「标签画在哪里」。 */
+    private class RecordingCanvas(width: Int, height: Int) :
+        android.graphics.Canvas(android.graphics.Bitmap.createBitmap(width, height, android.graphics.Bitmap.Config.ARGB_8888)) {
+        val translations = mutableListOf<Pair<Float, Float>>()
+        override fun translate(dx: Float, dy: Float) {
+            translations += dx to dy
+            super.translate(dx, dy)
+        }
+    }
+
+    /**
+     * 关键回归：图内公式标签必须**按计算出的位置平移后再画**。
+     *
+     * 根因（v1.0.30 定位）：`JLatexMathDrawable.draw()` 只按 `bounds` 的**宽高**算居中偏移，
+     * `translate` 的参数里**完全没有 `bounds.left/top`**（反编译确认）——也就是说
+     * `setBounds(left, top, …)` 对位置毫无作用，**公式一律画在画布原点**，
+     * 于是所有公式标签都堆在图的左上角、相互重叠（用户反馈的「文字固定在左上角」）。
+     * 修复方式是自己 `canvas.translate(位置)` 后再给 drawable 原点 bounds。
+     *
+     * 这条测试验证的正是「有按位置平移」这件事：公式存在时，必须出现一次横向平移
+     * 到标签起点（> 0）；修复前这里只会看到 (0,0)（即不产生平移）。
+     */
+    @Test
+    fun `图内公式标签必须按位置平移后再绘制`() {
+        val canvas = RecordingCanvas(900, 540)
+        renderer.drawAll(
+            canvas,
+            PlotSpec(
+                title = "\$P_{Y_c}(f)\$",
+                x = Axis(min = -1.0, max = 1.0),
+                y = Axis(),
+                series = listOf(Series(label = "\$S_c(f)\$", expr = "x^2")),
+            ),
+            width = 900f,
+            height = 540f,
+        )
+        val horizontalOffsets = canvas.translations.map { it.first }
+        assertTrue(
+            "公式标签必须被平移到自己的位置（实际平移 x 值：$horizontalOffsets）",
+            horizontalOffsets.any { it > 100f },
+        )
     }
 }
