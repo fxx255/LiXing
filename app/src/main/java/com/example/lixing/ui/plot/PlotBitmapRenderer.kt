@@ -69,13 +69,16 @@ class PlotBitmapRenderer(
      * 画一段文本，**自动识别 LaTeX 并排版**。
      *
      * 图上的标题 / 轴标签 / 图例都是模型自由填的字符串，它经常直接塞 `$S_c(f)$`、
-     * `\frac{1}{T}`、`\sum`。以前一律按纯文本画，于是图上出现美元符号和反斜杠。
-     * 现在分两条路：
-     * - 能识别出 LaTeX（含 `$...$` 或反斜杠命令）→ 交给 JLatexMath 排版成公式；
-     * - 否则按纯文本画（走 [prettifyPlotLabel] 降级，保持旧行为）。
+     * `\frac{1}{T}`、`\sum`，也经常**中英混排**（「功率谱密度 $S_c(f)$」）。
+     *
+     * 关键约束：**公式片段里绝不能出现中文**。JLatexMath 的字体没有 CJK 字形，
+     * 汉字宽度退化为 0（实测：`功率谱功率谱功率谱` 量出的宽度与单个「功率谱」
+     * 完全相同，都是 12px）⇒ 所有汉字堆在同一坐标，图上文字重叠成一团。
+     * 所以 [splitLabelPieces] 会把标签切成「公式 / 普通文字」交替的片段，
+     * 公式交给 JLatexMath、其余交给 Canvas 文字，逐段排布。
      *
      * 公式排不出来（写法不合法）时**回落到纯文本**，绝不让绘图整体失败。
-     * [alignCenter] 为 true 时 [x] 表示中心，否则表示左边界；[baselineY] 是文字基线。
+     * [alignCenter] 为 true 时 [x] 表示整段的中心，否则表示左边界；[baselineY] 是文字基线。
      */
     private fun drawSmartText(
         canvas: Canvas,
@@ -86,59 +89,68 @@ class PlotBitmapRenderer(
         color: Int,
         alignCenter: Boolean = false,
     ) {
-        val tex = findLatex(raw)
-        if (tex != null) {
-            val drawable = texDrawable(tex, textSizePx)
+        val pieces = splitLabelPieces(raw)
+        if (pieces.isEmpty()) return
+        val widths = pieces.map { pieceWidth(it, textSizePx) }
+        val gap = if (pieces.size > 1) dp(3f) else 0f
+        val total = widths.sum() + gap * (pieces.size - 1)
+        var cursorX = if (alignCenter) x - total / 2f else x
+        pieces.forEachIndexed { index, piece ->
+            val w = widths[index]
+            val latex = piece.latex
+            val drawable = if (latex != null) texDrawable(latex, textSizePx) else null
             if (drawable != null) {
-                val w = drawable.intrinsicWidth
                 val h = drawable.intrinsicHeight
-                val left = if (alignCenter) x - w / 2f else x
-                // 公式以「视觉垂直居中于原文字行」的方式对齐：基线大致在行高的 70% 处
+                // 公式以「视觉垂直居中于原文字行」的方式对齐：基线大致在行高的 72% 处
                 val top = baselineY - h * 0.72f
-                drawable.setBounds(left.toInt(), top.toInt(), (left + w).toInt(), (top + h).toInt())
+                drawable.setBounds(cursorX.toInt(), top.toInt(), (cursorX + w).toInt(), (top + h).toInt())
                 // 公式颜色跟随当前主题文字色
                 drawable.setColorFilter(color, PorterDuff.Mode.SRC_IN)
                 drawable.draw(canvas)
-                return
+            } else {
+                // 纯文本片段；公式构造失败时把公式源码按纯文本画出来（带降级替换）
+                drawPlainText(canvas, latex ?: piece.text, cursorX, baselineY, textSizePx, color)
             }
+            cursorX += w + gap
         }
-        // 纯文本路径
-        textPaint.textSize = textSizePx
-        textPaint.color = color
-        val text = prettifyPlotLabel(raw)
-        val w = textPaint.measureText(text)
-        canvas.drawText(text, if (alignCenter) x - w / 2f else x, baselineY, textPaint)
     }
 
-    /** 量出 [drawSmartText] 会画的宽度，用于居中/避让。 */
-    private fun smartTextWidth(raw: String, textSizePx: Float): Float {
-        val tex = findLatex(raw)
-        if (tex != null) {
-            texDrawable(tex, textSizePx)?.let { return it.intrinsicWidth.toFloat() }
+    /** 画一段纯文本（含 LaTeX 命令的 Unicode 降级）。 */
+    private fun drawPlainText(
+        canvas: Canvas,
+        raw: String,
+        x: Float,
+        baselineY: Float,
+        textSizePx: Float,
+        color: Int,
+    ) {
+        textPaint.textSize = textSizePx
+        textPaint.color = color
+        canvas.drawText(prettifyPlotLabel(raw), x, baselineY, textPaint)
+    }
+
+    /** 单个片段的绘制宽度。 */
+    private fun pieceWidth(piece: LabelPiece, textSizePx: Float): Float {
+        val latex = piece.latex
+        if (latex != null) {
+            texDrawable(latex, textSizePx)?.let { return it.intrinsicWidth.toFloat() }
+            return plainTextWidth(latex, textSizePx)
         }
+        return plainTextWidth(piece.text, textSizePx)
+    }
+
+    private fun plainTextWidth(raw: String, textSizePx: Float): Float {
         textPaint.textSize = textSizePx
         return textPaint.measureText(prettifyPlotLabel(raw))
     }
 
-    /**
-     * 从标签里提取可排版的 LaTeX 源码。
-     *
-     * 认两种写法：`$...$`（含 `$$...$$`）优先取中间那段；
-     * 否则若整串里含反斜杠命令（`\frac`、`\sum`…）就当整串是公式。
-     * 都不是则返回 null（走纯文本）。
-     */
-    private fun findLatex(raw: String): String? {
-        val trimmed = raw.trim()
-        if (trimmed.isEmpty()) return null
-        // 优先取 $...$ 的内容
-        val dollar = Regex("""\$\$?(.+?)\$\$?""").find(trimmed)
-        if (dollar != null) {
-            val body = dollar.groupValues[1].trim()
-            return body.ifEmpty { null }
-        }
-        // 没有美元符号，但含反斜杠命令：整串当公式
-        if (Regex("""\\[a-zA-Z]{2,}""").containsMatchIn(trimmed)) return trimmed
-        return null
+    /** 量出 [drawSmartText] 会画的总宽度，用于居中/避让。 */
+    private fun smartTextWidth(raw: String, textSizePx: Float): Float {
+        val pieces = splitLabelPieces(raw)
+        if (pieces.isEmpty()) return 0f
+        val gap = if (pieces.size > 1) dp(3f) else 0f
+        return pieces.sumOf { pieceWidth(it, textSizePx).toDouble() }.toFloat() +
+            gap * (pieces.size - 1)
     }
 
     /** 构造（并缓存）公式 drawable；写法非法时返回 null，由调用方回落到纯文本。 */
@@ -174,12 +186,17 @@ class PlotBitmapRenderer(
         }
         val allPoints = sampled.flatten()
 
-        // ---- 2. 数据范围 ----
-        val xLo = spec.x.min ?: allPoints.minOfOrNull { it.first } ?: -1.0
-        val xHi = spec.x.max ?: allPoints.maxOfOrNull { it.first } ?: 1.0
+        // ---- 2. 数据范围（保守策略）----
+        // 以前模型一旦给了 min/max 就直接当坐标范围用，而提示词又要求它「范围尽量给全」，
+        // 于是范围恰好等于数据的极值 ⇒ 曲线极值贴着框线（抛物线的谷底压在坐标轴底线、
+        // 峰顶顶到上边框），整体形状被切掉、特征丢失。
+        // 现在坐标范围**必须覆盖全部数据并保留边距**：模型范围只在「比数据更宽」时生效
+        // （相当于缩小视野），绝不用来裁剪数据。autoRange 已含 8% 边距。
+        val xDataLo = allPoints.minOfOrNull { it.first } ?: -1.0
+        val xDataHi = allPoints.maxOfOrNull { it.first } ?: 1.0
+        val (xLo, xHi) = conservativeRange(xDataLo, xDataHi, spec.x.min, spec.x.max)
         val yAuto = autoRange(allPoints.map { it.second })
-        val yLo = spec.y.min ?: yAuto.first
-        val yHi = spec.y.max ?: yAuto.second
+        val (yLo, yHi) = conservativeRange(yAuto.first, yAuto.second, spec.y.min, spec.y.max)
         val spanX = if (xHi - xLo == 0.0) 1.0 else xHi - xLo
         val spanY = if (yHi - yLo == 0.0) 1.0 else yHi - yLo
 
@@ -411,4 +428,78 @@ class PlotBitmapRenderer(
         abs(v) >= 10000 -> String.format("%.0f", v)
         else -> String.format("%.4f", v).trimEnd('0').trimEnd('.').ifEmpty { "0" }
     }
+}
+
+/** 标签片段：要么是交给 JLatexMath 的公式（[latex]），要么是直接画的普通文字（[text]）。 */
+internal data class LabelPiece(val text: String = "", val latex: String? = null)
+
+/**
+ * 保守的坐标范围：**保证覆盖 [dataLo]..[dataHi]，模型给的范围只在更宽时生效**。
+ *
+ * 模型（与提示词）倾向于给出「刚好等于数据极值」的范围，直接采用会让曲线极值
+ * 贴着框线（抛物线的谷底压在坐标轴底线上），整体形状被切掉、特征丢失。
+ * 传入的 [dataLo]/[dataHi] 应当已经含好边距（y 轴用 `autoRange` 的 8% 边距）。
+ */
+internal fun conservativeRange(
+    dataLo: Double,
+    dataHi: Double,
+    specLo: Double?,
+    specHi: Double?,
+): Pair<Double, Double> = minOf(specLo ?: dataLo, dataLo) to maxOf(specHi ?: dataHi, dataHi)
+
+/** `$...$` / `$$...$$` 分组（非贪婪，取第一对定界符之间的内容）。 */
+private val DOLLAR_LATEX_GROUP = Regex("""\$\$?(.+?)\$\$?""")
+
+/** 反斜杠命令（`\frac`、`\sum`…）：没有美元符号时用它判断整串是不是公式。 */
+private val LATEX_COMMAND = Regex("""\\[a-zA-Z]{2,}""")
+
+/**
+ * CJK 及全角标点区间。这类字符**不能**交给 JLatexMath：
+ * 其内置字体没有中文字形，字符宽度退化为 0（实测「功率谱」与
+ * 「功率谱功率谱功率谱」量出的宽度同为 12px）⇒ 所有汉字堆叠在同一坐标，
+ * 图上文字重叠成一团（用户反馈的「文字全挤在一起」）。
+ */
+private val CJK_RANGE = Regex("""[\u2E80-\u9FFF\uF900-\uFAFF\uFE30-\uFE4F\uFF00-\uFFEF\u3000-\u303F]""")
+
+/** 该串是否含中文字符（含 CJK 标点与全角形式）。 */
+internal fun containsCjk(text: String): Boolean = CJK_RANGE.containsMatchIn(text)
+
+/**
+ * 把标签切成「公式 / 普通文字」交替的片段。
+ *
+ * 规则：
+ * 1. `$...$` 分组 → 公式片段；**公式体内含中文时退回普通文字**（否则会叠成一团）；
+ * 2. 分组之外的内容 → 普通文字片段（含 LaTeX 命令时由 `prettifyPlotLabel` 降级成 Unicode）；
+ * 3. 整串没有美元分组、也不含中文、但含反斜杠命令（如 `\frac{N_0}{2}`）→ 整串当公式；
+ * 4. 其余情况 → 一个普通文字片段（保持旧行为）。
+ *
+ * 这样「功率谱密度 $S_c(f)$」会拆成两段依次排布，中文与公式各自清晰可读。
+ */
+internal fun splitLabelPieces(raw: String): List<LabelPiece> {
+    val trimmed = raw.trim()
+    if (trimmed.isEmpty()) return emptyList()
+
+    val pieces = mutableListOf<LabelPiece>()
+    var cursor = 0
+    for (match in DOLLAR_LATEX_GROUP.findAll(trimmed)) {
+        val before = trimmed.substring(cursor, match.range.first).trim()
+        if (before.isNotEmpty()) pieces += LabelPiece(text = before)
+        val body = match.groupValues[1].trim()
+        when {
+            body.isEmpty() -> Unit
+            containsCjk(body) -> pieces += LabelPiece(text = body)
+            else -> pieces += LabelPiece(latex = body)
+        }
+        cursor = match.range.last + 1
+    }
+    val tail = trimmed.substring(cursor).trim()
+    if (tail.isNotEmpty()) pieces += LabelPiece(text = tail)
+
+    if (pieces.isEmpty()) return listOf(LabelPiece(text = trimmed))
+    if (pieces.size == 1 && pieces[0].latex == null &&
+        !containsCjk(trimmed) && LATEX_COMMAND.containsMatchIn(trimmed)
+    ) {
+        return listOf(LabelPiece(latex = trimmed))
+    }
+    return pieces
 }
