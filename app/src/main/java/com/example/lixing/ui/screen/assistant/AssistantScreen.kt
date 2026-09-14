@@ -137,6 +137,7 @@ import java.io.File
 import androidx.core.content.FileProvider
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import com.example.lixing.R
 import com.example.lixing.data.local.entity.AssistantConversationEntity
 import com.example.lixing.data.assistant.normalizeAssistantMarkdown
 import com.example.lixing.data.assistant.sanitizeAssistantLatex
@@ -1735,8 +1736,30 @@ internal fun MarkdownChunk(content: String, fixedWidthPx: Int?, selectable: Bool
         val view = host ?: return@LaunchedEffect
         renderMarkdown(view, content, renderWidthPx, textColor, linkColor)
         // wrap_content 的真实高度：宽度已被 widthModifier 约束好，直接量即可
-        val measured = view.measuredHeightCompat(renderWidthPx)
+        var measured = view.measuredHeightCompat(renderWidthPx)
         if (measured > 0) measuredHeight = measured
+        // 公式是**异步**渲染的（JLatexMathPlugin 的 placeholder() 返回 null，
+        // 后台线程算完才通过 Handler 回主线程 setResult）。setMarkdown 返回时量到的高度
+        // 缺了所有公式的高度；等公式就绪，插件会用 setText(同文本) 强制重排、内容变高。
+        // 若不跟着更新，框高就一直停在当初那个偏小的值 ⇒ 内容比框高 ⇒
+        // LinkMovementMethod（继承 ScrollingMovementMethod）允许在框内**拖动文字**，
+        // 表现为「上下滑动时文字在气泡内上下位移，头尾交替被挡」。
+        // 这里持续复测到高度稳定为止，把最终真实高度报给 Compose。
+        if (!mayRenderLatex(content)) return@LaunchedEffect
+        var stablePolls = 0
+        repeat(HEIGHT_POLL_MAX_POLLS) {
+            delay(HEIGHT_POLL_INTERVAL_MS)
+            val latest = view.measuredHeightCompat(renderWidthPx)
+            if (latest > 0 && latest != measured) {
+                measured = latest
+                measuredHeight = latest
+                // 高度一变就复位内部滚动，清掉公式加载窗口里可能被拖出来的偏移
+                view.scrollTo(0, 0)
+                stablePolls = 0
+            } else if (++stablePolls >= HEIGHT_STABLE_POLLS) {
+                return@LaunchedEffect
+            }
+        }
     }
 
     val density = LocalDensity.current
@@ -1759,12 +1782,27 @@ internal fun MarkdownChunk(content: String, fixedWidthPx: Int?, selectable: Bool
         },
         update = { view ->
             host = view
-            renderMarkdown(view, content, renderWidthPx, textColor, linkColor)
+            // 内容/宽度/配色没变就不重复 setMarkdown：LazyColumn 的重组（滚动、状态变化）
+            // 会反复调用 update，而每次 setMarkdown 都会把公式 span 重置成待加载状态、
+            // 重新排队异步渲染——白费算力，还会让公式短暂缩回 0 高。
+            val renderKey = "$content|$renderWidthPx|$textColor|$linkColor"
+            if (view.getTag(R.id.markdown_render_key) != renderKey) {
+                view.setTag(R.id.markdown_render_key, renderKey)
+                renderMarkdown(view, content, renderWidthPx, textColor, linkColor)
+            }
             val measured = view.measuredHeightCompat(renderWidthPx)
             if (measured > 0) measuredHeight = measured
         },
     )
 }
+
+/** 内容里可能出现异步渲染的 LaTeX（`$…$` / `$$…$$`）时为 true。 */
+internal fun mayRenderLatex(content: String): Boolean = content.contains('$')
+
+/** 公式异步渲染的复测节奏：每 100ms 量一次，连续 5 次不变即认定稳定，最多 30 次（约 3 秒）。 */
+private const val HEIGHT_POLL_INTERVAL_MS = 100L
+private const val HEIGHT_STABLE_POLLS = 5
+private const val HEIGHT_POLL_MAX_POLLS = 30
 
 /**
  * 量出 TextView 在给定宽度下 wrap_content 的真实高度（像素）。
@@ -1851,6 +1889,10 @@ private fun renderMarkdown(
     )
     runCatching {
         (view.tag as Markwon).setMarkdown(view, rendered)
+        // 重渲染后复位内部滚动：LinkMovementMethod 继承自 ScrollingMovementMethod，
+        // 内容比框高的瞬间用户能把文字拖出偏移，重新渲染时必须清零，
+        // 否则新内容会带着旧的滚动偏移显示（头尾被挡的观感来源之一）。
+        view.scrollTo(0, 0)
     }.onFailure { error ->
         Log.e(RENDER_LOG_TAG, "markdown render failed, fallback to plain text", error)
         appendRenderErrorLog(view.context, rendered, error)

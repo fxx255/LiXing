@@ -222,6 +222,25 @@ internal fun salvageReplyFromReasoningText(rawReasoning: String): String {
 }
 
 /**
+ * 把正文里的插图锚点 `[[FIGURE:n]]` 整体平移 [base]（n 是 1-based 的图下标）。
+ *
+ * 用于多轮自动续写时合并各轮的图表列表：续写轮里的模型不知道之前已经输出过几张图，
+ * 锚点会从 1 重新编号，直接拼进全文就会指向错误的图。平移后每个锚点都指向
+ * 合并列表中的同一张图。锚点格式与 [splitFigureSegments] 的解析保持一致
+ * （大小写不敏感、允许行内留白、单独成行）。
+ */
+internal fun offsetFigureAnchors(text: String, base: Int): String {
+    if (base <= 0 || !text.contains("[[")) return text
+    if (!FIGURE_ANCHOR_PATTERN.containsMatchIn(text)) return text
+    return FIGURE_ANCHOR_PATTERN.replace(text) { match ->
+        val shifted = (match.groupValues[1].toIntOrNull() ?: return@replace match.value) + base
+        "[[FIGURE:$shifted]]"
+    }
+}
+
+private val FIGURE_ANCHOR_PATTERN = Regex("""(?im)^[ \t]*\[\[\s*FIGURE\s*:\s*(\d+)\s*\]\][ \t]*$""")
+
+/**
  * AI 学习助手页的状态机。
  *
  * 会话持久化在本地数据库：首条消息发出时创建会话，之后每条消息追加；
@@ -666,6 +685,8 @@ class AssistantViewModel @Inject constructor(
         var totalChars = 0
         var barrenRounds = 0
         var lastReply: ParsedAssistantReply? = null
+        // 跨轮累积的图表：见下方 accumulation 处注释（只用最后一轮的 plots 会丢图）
+        val accumulatedPlots = mutableListOf<PlotSpec>()
         while (true) {
             val firstRound = continuation == 0
             val history = if (firstRound) {
@@ -706,7 +727,18 @@ class AssistantViewModel @Inject constructor(
             } else {
                 ""
             }
-            generated += reply.reply.ifBlank { salvaged }
+            var part = reply.reply.ifBlank { salvaged }
+            // 续写轮里模型并不知道前面已输出过几张图，锚点通常从 1 重新编号。
+            // 按「已累积的图表数」平移，保证 [[FIGURE:n]] 始终指向合并列表里的正确下标；
+            // 不平移的话，第 2 轮的 [[FIGURE:1]] 会错误地指到第 1 轮的第一张图上。
+            if (accumulatedPlots.isNotEmpty()) {
+                part = offsetFigureAnchors(part, accumulatedPlots.size)
+            }
+            generated += part
+            // 图表必须跨轮累积：只用 lastReply.plots 会丢掉前面轮次已经产出的图。
+            // 典型场景是长推导撞上输出上限自动续写——第 1 轮「见下图」+ 输出 plots，
+            // 第 2 轮只续写文字（plots 为空），结果正文写着「见下图」而图整个消失。
+            accumulatedPlots += reply.plots
             totalChars = generated.length
 
             val hitLimit = reply.truncated
@@ -752,7 +784,8 @@ class AssistantViewModel @Inject constructor(
                         reply = reply,
                         today = today,
                         answerIndex = answerIndex,
-                        imagePaths = renderPlots(reply.plots),
+                        // 用跨轮累积的图表，而不是最后一轮的 reply.plots（后者会丢图）
+                        imagePaths = renderPlots(accumulatedPlots),
                     )
                 }
                 return lastReply
