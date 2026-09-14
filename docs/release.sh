@@ -93,7 +93,24 @@ mkdir -p docs/mappings
 cp app/build/outputs/mapping/release/mapping.txt "docs/mappings/mapping-v${VERSION_NAME}.txt"
 
 echo "==> 创建 GitHub Release v${VERSION_NAME}"
-gh release create "v${VERSION_NAME}" \
+
+# gh 可能不在 PATH（WorkBuddy 沙箱就找不到），允许 GH_BIN 显式指定，
+# 否则探测默认安装位置（gh auth status 显示的真实路径）
+GH_BIN="${GH_BIN:-}"
+if [ -z "$GH_BIN" ]; then
+  if command -v gh >/dev/null 2>&1; then
+    GH_BIN="gh"
+  elif [ -f "$LOCALAPPDATA/Programs/GitHub CLI/gh.exe" ]; then
+    GH_BIN="$LOCALAPPDATA/Programs/GitHub CLI/gh.exe"
+  elif [ -f "C:/Users/17611/.workbuddy/tools/gh/bin/gh.exe" ]; then
+    GH_BIN="C:/Users/17611/.workbuddy/tools/gh/bin/gh.exe"
+  else
+    echo "错误：未找到 gh CLI（可设 GH_BIN=<gh路径> 后重试）" >&2
+    exit 1
+  fi
+fi
+
+"$GH_BIN" release create "v${VERSION_NAME}" \
   "build/${APK_NAME}" \
   "build/update.json" \
   --repo "$REPO" \
