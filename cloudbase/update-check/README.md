@@ -39,6 +39,15 @@ CloudBase **免费版**的 `update-check` 函数执行超时最多只能选 **3 
 
 每次发版后，把 `build/update.json` 的内容整段粘进 `UPDATE_MANIFEST_JSON` 即可（就是一行压缩过的 JSON）。
 
+#### 2026-09-14 实测：函数对所有版本都报「暂时无法获取更新信息」
+
+- 现象：`update/check?versionCode=<任意值>` 一律返回 `{"ok":false,"error":"暂时无法获取更新信息"}`；
+  而同一份清单在本机（走代理/直连）拉取正常（HTTP 200、1187 字节）。
+- 根因：`FETCH_TIMEOUT_MS` 默认 **1200ms** × GitHub 直链常态 2~10 秒 ⇒ 必然超时。
+  早期几次发版能通只是网络恰好够快，属于「赌运气」配置。
+- 修法：**把源换成国内可达的加速镜像**（`gh-proxy.com` 实测 ≈1.4s），配 `MANIFEST_FETCH_TIMEOUT_MS=2000`，
+  并填好 `UPDATE_MANIFEST_JSON` 兜底；源码默认超时也从 1200 提到 2000（并夹住上限 2500，不超 3 秒函数预算）。
+
 ## 部署步骤（普通事件函数，推荐）
 
 1. 打开 [CloudBase 控制台](https://console.cloud.tencent.com/tcb) → 环境 `lixing-d7g243r7kcad67750`（上海）；

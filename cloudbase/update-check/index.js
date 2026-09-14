@@ -26,8 +26,22 @@
 
 const CACHE_TTL_MS = 10 * 60 * 1000;
 
-/** 单个清单源的回源超时（毫秒）。可用环境变量 MANIFEST_FETCH_TIMEOUT_MS 覆盖。 */
-const FETCH_TIMEOUT_MS = Number(process.env.MANIFEST_FETCH_TIMEOUT_MS || 1200);
+/**
+ * 单个清单源的回源超时（毫秒）。可用环境变量 MANIFEST_FETCH_TIMEOUT_MS 覆盖。
+ *
+ * ⚠️ 默认值曾是 1200ms：**免费版函数执行超时上限只有 3 秒**，单源超时必须留足余量，
+ * 所以压得很小。但 GitHub 直链从 CloudBase（上海）回源要 DNS + TCP + TLS + 一次 302
+ * 跳转到 CDN 再下载，常态就是 2~10 秒 ⇒ 超时必然发生，函数整体报
+ * 「暂时无法获取更新信息」（2026-09-14 实测：同一清单在本机直连 200，云函数连续全失败）。
+ *
+ * 正确解法是**换更快的源**而不是拉长超时：把 `UPDATE_MANIFEST_URL` 指向
+ * gh-proxy.com / ghfast.top 这类国内可达的加速镜像（实测 gh-proxy.com ≈ 1.4s），
+ * 再把本值设在 2000ms 左右。这里同时做上限保护：不超过 2500ms，避免把 3 秒函数预算吃光。
+ */
+const FETCH_TIMEOUT_MS = Math.min(
+  Number(process.env.MANIFEST_FETCH_TIMEOUT_MS || 2000) || 2000,
+  2500,
+);
 
 /** 带超时的 JSON 拉取：慢源直接放弃换下一个，不让整个函数被拖到超时。 */
 async function fetchJsonWithTimeout(url, timeoutMs, extraHeaders) {
