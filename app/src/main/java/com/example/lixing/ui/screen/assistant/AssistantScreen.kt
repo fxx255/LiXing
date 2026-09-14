@@ -13,6 +13,7 @@ import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import android.provider.Settings
 import android.text.method.LinkMovementMethod
+import android.view.View
 import android.widget.TextView
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -47,6 +48,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.wrapContentWidth
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -94,6 +96,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateListOf
@@ -1533,23 +1536,29 @@ private fun AssistantMarkdownBody(
     if (!hasInlineFigure) {
         // 没写锚点：正文 + 末尾图（保持旧排版，模型偶尔不守约定时也不会丢图）
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            if (content.isNotBlank()) MarkdownAnswer(content)
+            if (content.isNotBlank()) key("text") { MarkdownAnswer(content) }
             imagePaths.forEachIndexed { index, path ->
-                InlineGeneratedImage(path = path) { onImageClick(imagePaths, index) }
+                key("figure-$index") {
+                    InlineGeneratedImage(path = path) { onImageClick(imagePaths, index) }
+                }
             }
         }
         return
     }
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        segments.forEach { segment ->
-            if (segment.figureIndex != null) {
-                val index = segment.figureIndex
-                // 锚点越界（模型写了 [[FIGURE:3]] 但只有 2 张图）直接跳过
-                if (index in imagePaths.indices) {
-                    InlineGeneratedImage(path = imagePaths[index]) { onImageClick(imagePaths, index) }
+        // 显式 key，理由同 MarkdownAnswer：图文交替时槽位会增减，
+        // 按位置复用会让内层 AndroidView 错配，后面的图/表格随之失去交互。
+        segments.forEachIndexed { segmentIndex, segment ->
+            key("seg-$segmentIndex") {
+                if (segment.figureIndex != null) {
+                    val index = segment.figureIndex
+                    // 锚点越界（模型写了 [[FIGURE:3]] 但只有 2 张图）直接跳过
+                    if (index in imagePaths.indices) {
+                        InlineGeneratedImage(path = imagePaths[index]) { onImageClick(imagePaths, index) }
+                    }
+                } else if (segment.text.isNotBlank()) {
+                    MarkdownAnswer(segment.text)
                 }
-            } else if (segment.text.isNotBlank()) {
-                MarkdownAnswer(segment.text)
             }
         }
     }
@@ -1611,28 +1620,52 @@ private fun MarkdownAnswer(content: String) {
             .fillMaxWidth()
             .onSizeChanged { containerWidthPx = it.width },
     ) {
-        chunks.forEach { chunk ->
-            if (!chunk.isTable || containerWidthPx <= 0) {
-                // 非表格块正常铺满；表格块等测量到宽度再渲染，避免按 0 宽拆分公式
-                if (!chunk.isTable) MarkdownChunk(chunk.text, fixedWidthPx = null)
-                return@forEach
-            }
-            val tableWidthPx = (containerWidthPx * TABLE_WIDTH_FACTOR).toInt()
-            val scroll = rememberScrollState()
-            // 宽表格可左右拖动：fixedWidthPx 让 TextView 比容器宽，外层 horizontalScroll 接管横滑。
-            // v1.0.23 拖不动是因为外层 SelectionContainer 把横向拖动消费掉了（已改到只包文字）。
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .horizontalScroll(scroll, reverseScrolling = false),
-            ) {
-                MarkdownChunk(chunk.text, fixedWidthPx = tableWidthPx)
+        chunks.forEachIndexed { index, chunk ->
+            // 显式 key：Column 的内容没有 key 时按**位置**做差量复用，上一帧的
+            // [文字块, 表格块] 变成这一帧的 [文字块, 图, 表格块] 时，第 2 个槽位会被
+            // 原地复用成「图」——而里面挂的 AndroidView 是真实 Android 视图，
+            // 复用/重建时机比纯 Compose 节点脆弱得多，容易留下尺寸与位置都错配的旧视图，
+            // 表现为后面的图与表格点不动、拖不动。给 key 让 Compose 按身份匹配。
+            key(index) {
+                // 注意：key 的 lambda 里**不能写 return@key**——那会让 Kotlin 给这个
+                // 匿名函数生成非法方法名 `<anonymous>`，运行期直接 ClassFormatError
+                // （编译能过、全套单测一起爆）。所以这里用 if/else 而不是提前返回。
+                if (!chunk.isTable || containerWidthPx <= 0) {
+                    // 非表格块正常铺满；表格块等测量到宽度再渲染，避免按 0 宽拆分公式
+                    if (!chunk.isTable) MarkdownChunk(chunk.text, fixedWidthPx = null)
+                } else {
+                    val tableWidthPx = (containerWidthPx * TABLE_WIDTH_FACTOR).toInt()
+                    val scroll = rememberScrollState()
+                    // 宽表格可左右拖动。
+                    //
+                    // 两个必须同时成立的条件（缺一个就拖不动）：
+                    // ① 外层 Box 用 wrapContentWidth 而不是 fillMaxWidth —— horizontalScroll 只在
+                    //    「内容宽度 > 容器宽度」时才产生可滚动区间；若外层被 fillMaxWidth 撑满，
+                    //    可滚动距离就是 0，横滑毫无反应；
+                    // ② 内层 TextView 给足固定宽度 tableWidthPx（1.8 倍气泡宽），它才是那个「更宽的内容」。
+                    Box(
+                        modifier = Modifier
+                            .wrapContentWidth()
+                            .horizontalScroll(scroll, reverseScrolling = false),
+                    ) {
+                        MarkdownChunk(chunk.text, fixedWidthPx = tableWidthPx)
+                    }
+                }
             }
         }
     }
 }
 
-/** 单个 Markdown 片段：可指定固定宽度（表格用），否则铺满可用宽度。 */
+/**
+ * 单个 Markdown 片段：可指定固定宽度（表格用），否则铺满可用宽度。
+ *
+ * 高度必须由内容**真实上报**给 Compose，否则会连锁引发「只有第一个控件能点」的怪现象：
+ * [AndroidView] 在测量阶段拿到的是一个**刚创建、还空着的** TextView（内容要等 update /
+ * LaunchedEffect 才写入），于是量出来只有一行高度；等文字/公式/表格填进去，实际高度
+ * 早已超出这个数字。父 Column 仍按「一行高」为后续兄弟节点排布 ⇒ 后面的图与表格被
+ * 压到前面那块被撑开的区域里，触摸命中测试也随之错乱，表现为「只有第一张图能点开」。
+ * 所以这里在内容变化后主动把 `view.height` 报给 Compose（wrap_content 量出的真实高度）。
+ */
 @Composable
 private fun MarkdownChunk(content: String, fixedWidthPx: Int?) {
     val textColor = MaterialTheme.colorScheme.onSurface.toArgb()
@@ -1641,12 +1674,18 @@ private fun MarkdownChunk(content: String, fixedWidthPx: Int?) {
     // 必须按新宽度重新拆分，否则会留下按旧宽度算出的超长公式 → 右侧溢出被裁掉。
     var widthPx by remember { mutableIntStateOf(0) }
     var host by remember { mutableStateOf<TextView?>(null) }
+    // 内容渲染完成后量出的真实高度；0 表示「尚未测量」，此时交给 Compose 正常量。
+    var measuredHeight by remember { mutableIntStateOf(0) }
     // 固定宽度由外部给定；onSizeChanged 要等一帧才回来，先用它渲染以免闪一下空白
     val renderWidthPx = fixedWidthPx ?: widthPx
 
+    // 渲染 + 高度上报。放在同一个 effect 里：渲染完立刻同步测量，避免中间多一帧错位。
     LaunchedEffect(host, content, renderWidthPx, textColor, linkColor) {
         val view = host ?: return@LaunchedEffect
         renderMarkdown(view, content, renderWidthPx, textColor, linkColor)
+        // wrap_content 的真实高度：宽度已被 widthModifier 约束好，直接量即可
+        val measured = view.measuredHeightCompat(renderWidthPx)
+        if (measured > 0) measuredHeight = measured
     }
 
     val density = LocalDensity.current
@@ -1655,15 +1694,37 @@ private fun MarkdownChunk(content: String, fixedWidthPx: Int?) {
     } else {
         Modifier.fillMaxWidth()
     }
+    // 量到真实高度之前不写死高度，避免第一帧被卡成 0 高（那会连第一次测量都拿不到宽度）
+    val heightModifier = if (measuredHeight > 0) {
+        Modifier.height(with(density) { measuredHeight.toDp() })
+    } else {
+        Modifier
+    }
 
     AndroidView(
-        modifier = widthModifier.onSizeChanged { widthPx = it.width },
+        modifier = widthModifier.then(heightModifier).onSizeChanged { widthPx = it.width },
         factory = { context -> createMarkdownTextView(context, textColor, linkColor) },
         update = { view ->
             host = view
             renderMarkdown(view, content, renderWidthPx, textColor, linkColor)
+            val measured = view.measuredHeightCompat(renderWidthPx)
+            if (measured > 0) measuredHeight = measured
         },
     )
+}
+
+/**
+ * 量出 TextView 在给定宽度下 wrap_content 的真实高度（像素）。
+ *
+ * 不能直接用 `view.height`：那是上一次布局的结果，内容刚更新时还是旧值。
+ * 这里按精确宽度重新 measure 一次，拿到的就是当前内容的高度。
+ */
+private fun TextView.measuredHeightCompat(widthPx: Int): Int {
+    if (widthPx <= 0) return 0
+    val widthSpec = View.MeasureSpec.makeMeasureSpec(widthPx, View.MeasureSpec.EXACTLY)
+    val heightSpec = View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED)
+    measure(widthSpec, heightSpec)
+    return measuredHeight
 }
 
 private fun createMarkdownTextView(context: Context, textColor: Int, linkColor: Int): TextView =
