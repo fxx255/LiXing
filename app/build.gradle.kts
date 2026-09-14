@@ -25,8 +25,8 @@ android {
         applicationIdSuffix = ".debug"
         minSdk = 26
         targetSdk = 35
-        versionCode = 24
-        versionName = "1.0.23"
+        versionCode = 25
+        versionName = "1.0.24"
 
         // 只包含公开的 OAuth 中转地址；百度 SecretKey 始终只保存在 Worker 中。
         buildConfigField(

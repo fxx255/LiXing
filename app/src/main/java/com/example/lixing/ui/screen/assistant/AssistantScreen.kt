@@ -23,9 +23,11 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
-import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
@@ -110,6 +112,7 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
@@ -124,6 +127,7 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlin.math.abs
 import kotlin.math.sin
 import java.io.File
 import androidx.core.content.FileProvider
@@ -1296,54 +1300,44 @@ private fun MessageBubble(
     // 收缩宽度的 Box，否则靠右对齐失效（v1.0.5 用户气泡全跑到左边的根因）。
     BoxWithConstraints(Modifier.fillMaxWidth()) {
         val bubbleMaxWidth = minOf(maxWidth * BUBBLE_WIDTH_RATIO, BUBBLE_MAX_WIDTH)
-        SelectionContainer(
+        Surface(
             modifier = Modifier
                 .align(if (isUser) Alignment.CenterEnd else Alignment.CenterStart)
                 .widthIn(max = bubbleMaxWidth),
+            color = if (isUser) MaterialTheme.colorScheme.primaryContainer
+            else MaterialTheme.colorScheme.surfaceContainerHigh,
+            shape = RoundedCornerShape(
+                topStart = 14.dp, topEnd = 14.dp,
+                bottomStart = if (isUser) 14.dp else 4.dp,
+                bottomEnd = if (isUser) 4.dp else 14.dp,
+            ),
         ) {
-            Surface(
-                color = if (isUser) MaterialTheme.colorScheme.primaryContainer
-                else MaterialTheme.colorScheme.surfaceContainerHigh,
-                shape = RoundedCornerShape(
-                    topStart = 14.dp, topEnd = 14.dp,
-                    bottomStart = if (isUser) 14.dp else 4.dp,
-                    bottomEnd = if (isUser) 4.dp else 14.dp,
-                ),
-            ) {
-                Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    // 用户拍的题图：小缩略图排在文字上方（拍照问答的既有形态不变）
-                    if (isUser && imagePaths.isNotEmpty()) {
-                        Row(
-                            modifier = Modifier.horizontalScroll(rememberScrollState()),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        ) {
-                            imagePaths.forEachIndexed { index, path ->
-                                AssistantThumbnail(
-                                    path = path,
-                                    modifier = Modifier.size(92.dp),
-                                    onClick = { onImageClick(imagePaths, index) },
-                                )
-                            }
+            Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                // 用户拍的题图：小缩略图排在文字上方（拍照问答的既有形态不变）
+                if (isUser && imagePaths.isNotEmpty()) {
+                    Row(
+                        modifier = Modifier.horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        imagePaths.forEachIndexed { index, path ->
+                            AssistantThumbnail(
+                                path = path,
+                                modifier = Modifier.size(92.dp),
+                                onClick = { onImageClick(imagePaths, index) },
+                            )
                         }
                     }
-                    if (content.isNotBlank()) {
-                        if (isUser) {
-                            Text(content, style = MaterialTheme.typography.bodyLarge)
-                        } else {
-                            MarkdownAnswer(content)
-                        }
-                    }
-                    // 助手生成的图表：内嵌在回答末尾、独占整行，宽度撑满气泡。
-                    // 与缩略图分开处理——图表要看清刻度和曲线，92dp 的小图没法用。
-                    if (!isUser && imagePaths.isNotEmpty()) {
-                        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                            imagePaths.forEachIndexed { index, path ->
-                                InlineGeneratedImage(
-                                    path = path,
-                                    onClick = { onImageClick(imagePaths, index) },
-                                )
-                            }
-                        }
+                }
+                if (content.isNotBlank()) {
+                    // v1.0.23 的 bug：SelectionContainer 原先包在整个气泡外层，
+                    // 它会安装自己的 pointerInput 并把事件标记为已消费，
+                    // 结果内层的表格 horizontalScroll 拖不动、图片的 clickable 也失效
+                    // （用户反馈「表格无法拖动、图片点不开」）。
+                    // 现在只把「可选择的长按复制」限制在文字上，图片与滚动容器放在外面。
+                    if (isUser) {
+                        SelectionContainer { Text(content, style = MaterialTheme.typography.bodyLarge) }
+                    } else {
+                        AssistantMarkdownBody(content, imagePaths, onImageClick)
                     }
                 }
             }
@@ -1515,6 +1509,86 @@ private fun isTableSeparator(line: String): Boolean {
 }
 
 /**
+ * 助手回答正文：把生成的图表**插进正文里**，而不是统一堆在气泡末尾。
+ *
+ * v1.0.23 的 bug：`InlineGeneratedImage` 直接追加在 `MarkdownAnswer` 之后的
+ * Column 末尾，于是「正文里说『见图 1』」和真正的图隔着好几段文字，
+ * 用户反馈「图像没有嵌入在文字中间，而是附加在消息气泡末尾」。
+ *
+ * 现在的做法是解析正文里的插图锚点，按锚点把内容切成
+ * 「文字段 / 图 / 文字段 / 图 …」交替渲染：
+ * - 模型按提示词约定输出独立一行 `[[FIGURE:1]]`（1-based，对应 plots 数组下标）
+ * - 没有锚点时：正文照常渲染，图表统一接在末尾（旧行为兜底，不会丢图）
+ *
+ * @param segments 已解析出的「文字/图」交替片段
+ */
+@Composable
+private fun AssistantMarkdownBody(
+    content: String,
+    imagePaths: List<String>,
+    onImageClick: (List<String>, Int) -> Unit,
+) {
+    val segments = remember(content, imagePaths.size) { splitFigureSegments(content, imagePaths.size) }
+    val hasInlineFigure = segments.any { it.figureIndex != null }
+    if (!hasInlineFigure) {
+        // 没写锚点：正文 + 末尾图（保持旧排版，模型偶尔不守约定时也不会丢图）
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            if (content.isNotBlank()) MarkdownAnswer(content)
+            imagePaths.forEachIndexed { index, path ->
+                InlineGeneratedImage(path = path) { onImageClick(imagePaths, index) }
+            }
+        }
+        return
+    }
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        segments.forEach { segment ->
+            if (segment.figureIndex != null) {
+                val index = segment.figureIndex
+                // 锚点越界（模型写了 [[FIGURE:3]] 但只有 2 张图）直接跳过
+                if (index in imagePaths.indices) {
+                    InlineGeneratedImage(path = imagePaths[index]) { onImageClick(imagePaths, index) }
+                }
+            } else if (segment.text.isNotBlank()) {
+                MarkdownAnswer(segment.text)
+            }
+        }
+    }
+}
+
+/** 正文片段：要么是一段 Markdown 文字，要么指向某张生成图（0-based）。 */
+internal data class FigureSegment(val text: String, val figureIndex: Int?)
+
+/** 模型插入的插图锚点：单独一行的 `[[FIGURE:n]]`（大小写不敏感，允许行内留白）。 */
+private val FIGURE_ANCHOR = Regex("""(?im)^[ \t]*\[\[\s*FIGURE\s*:\s*(\d+)\s*\]\][ \t]*$""")
+
+/**
+ * 按 `[[FIGURE:n]]` 锚点把正文切成文字段与图段交替的列表。
+ *
+ * `figureCount` 用于拦掉越界锚点（越界时该锚点退化成空文字段，不产生占位）。
+ */
+internal fun splitFigureSegments(content: String, figureCount: Int): List<FigureSegment> {
+    if (figureCount <= 0) return listOf(FigureSegment(content, null))
+    val matches = FIGURE_ANCHOR.findAll(content).toList()
+    if (matches.isEmpty()) return listOf(FigureSegment(content, null))
+
+    val segments = mutableListOf<FigureSegment>()
+    var cursor = 0
+    matches.forEach { match ->
+        val before = content.substring(cursor, match.range.first).trim('\n')
+        if (before.isNotBlank()) segments += FigureSegment(before, null)
+        val oneBased = match.groupValues[1].toIntOrNull()
+        val index = oneBased?.minus(1)
+        if (index != null && index in 0 until figureCount) {
+            segments += FigureSegment("", index)
+        }
+        cursor = match.range.last + 1
+    }
+    val tail = content.substring(cursor).trim('\n')
+    if (tail.isNotBlank()) segments += FigureSegment(tail, null)
+    return segments
+}
+
+/**
  * 回答正文渲染。
  *
  * 模型偶尔会输出 JLatexMath 解析不了的 LaTeX（缺右括号、残留 \tag、aligned 前导非法字符等），
@@ -1545,7 +1619,13 @@ private fun MarkdownAnswer(content: String) {
             }
             val tableWidthPx = (containerWidthPx * TABLE_WIDTH_FACTOR).toInt()
             val scroll = rememberScrollState()
-            Box(modifier = Modifier.fillMaxWidth().horizontalScroll(scroll)) {
+            // 宽表格可左右拖动：fixedWidthPx 让 TextView 比容器宽，外层 horizontalScroll 接管横滑。
+            // v1.0.23 拖不动是因为外层 SelectionContainer 把横向拖动消费掉了（已改到只包文字）。
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(scroll, reverseScrolling = false),
+            ) {
                 MarkdownChunk(chunk.text, fixedWidthPx = tableWidthPx)
             }
         }
@@ -1856,6 +1936,8 @@ private fun ZoomablePhoto(
     val offsetX = remember { Animatable(0f) }
     val offsetY = remember { Animatable(0f) }
     var boxSize by remember { mutableStateOf(IntSize.Zero) }
+    // 未放大时的下拉位移（用于「下拉关闭」）。放在 pointerInput 外面：
+    // detectTransformGestures 是挂起函数，手势回调里读写局部变量会随重组丢失。
     var dragDown by remember { mutableFloatStateOf(0f) }
     val bitmap = remember(path) { decodeSampledBitmap(path, 2400) }
 
@@ -1880,49 +1962,86 @@ private fun ZoomablePhoto(
         return value.coerceIn(-bound, bound)
     }
 
-    val zoomed = scale.value > 1.0005f
     Box(
         modifier = Modifier
             .fillMaxSize()
             .onSizeChanged { boxSize = it }
-            // 只有放大之后才接管全部手势；未放大时只处理纵向拖动，横向必须留给
-            // HorizontalPager —— 之前无论是否放大都用 detectTransformGestures，
-            // 它会把横向拖动一并消费，左右滑动翻页因此完全失效。
-            .pointerInput(zoomed) {
-                if (!zoomed) return@pointerInput
-                detectTransformGestures { _, pan, zoom, _ ->
-                    val next = (scale.value * zoom).coerceIn(1f, VIEWER_MAX_SCALE)
-                    scope.launch {
-                        dragDown = 0f
-                        scale.snapTo(next)
-                        offsetX.snapTo(clampX(offsetX.value + pan.x, next))
-                        offsetY.snapTo(clampY(offsetY.value + pan.y, next))
-                    }
-                }
-            }
-            .pointerInput(zoomed) {
-                if (zoomed) return@pointerInput
-                detectVerticalDragGestures(
-                    onVerticalDrag = { _, dy ->
-                        // 只认向下拖（关闭手势）；向上拖不跟手，避免图被拉出屏幕
-                        dragDown = (dragDown + dy).coerceAtLeast(0f)
-                        if (dragDown > VIEWER_DRAG_DISMISS_PX) {
-                            onSwipeDownToClose()
+            // v1.0.23 的回归：当时把手指路径拆成「未放大只挂 detectVerticalDragGestures、
+            // 放大后才挂 detectTransformGestures」，人为造出「缩放死区」——
+            // 未放大时没有任何人处理 zoom，双指捏合因此完全失效。
+            //
+            // 但不能简单地改回 detectTransformGestures：它一旦到达 touch slop 就会
+            // **消费掉所有位移**，HorizontalPager 再也收不到横滑，左右翻页又废了。
+            // 官方 API 也没有「按条件不消费」的开关。
+            //
+            // 所以这里自己写检测循环，按手势意图决定消费谁：
+            // - 双指（捏合）：消费 → 缩放
+            // - 单指且已放大：消费 → 平移
+            // - 单指未放大、以横向为主：**不消费** → 事件下发给 HorizontalPager 翻页
+            // - 单指未放大、以纵向为主：消费 → 下拉关闭
+            .pointerInput(Unit) {
+                awaitEachGesture {
+                    awaitFirstDown(requireUnconsumed = false)
+                    var lastCentroid = Offset.Zero
+                    var totalPanX = 0f
+                    var totalPanY = 0f
+                    while (true) {
+                        val event = awaitPointerEvent()
+                        val pressed = event.changes.filter { it.pressed }
+                        if (pressed.isEmpty()) break
+
+                        val centroid = pressed.fold(Offset.Zero) { acc, c -> acc + c.position } /
+                            pressed.size.toFloat()
+                        val pan = if (lastCentroid == Offset.Zero) Offset.Zero else centroid - lastCentroid
+                        lastCentroid = centroid
+                        val zoom = event.calculateZoom()
+                        val zooming = abs(zoom - 1f) > 0.001f
+                        val multiTouch = pressed.size >= 2
+
+                        totalPanX += pan.x
+                        totalPanY += pan.y
+
+                        // 单指、未放大、且横向占优 → 让给 Pager，什么都不做也不消费
+                        if (!multiTouch && scale.value <= 1.0005f && !zooming &&
+                            abs(totalPanX) > abs(totalPanY)
+                        ) {
+                            continue
+                        }
+
+                        val next = (scale.value * zoom).coerceIn(1f, VIEWER_MAX_SCALE)
+                        if (scale.value <= 1.0005f && !multiTouch && !zooming) {
+                            // 未放大的单指纵向拖动：下拉关闭
+                            dragDown = (dragDown + pan.y).coerceAtLeast(0f)
+                            if (dragDown > VIEWER_DRAG_DISMISS_PX) {
+                                dragDown = 0f
+                                onSwipeDownToClose()
+                            } else {
+                                // 不能在 awaitEachGesture 这个受限挂起作用域里直接调
+                                // Animatable.snapTo/animateTo（它俩是挂起成员函数），
+                                // 必须丢到 scope 里执行；snapTo 会打断上一次动画，天然幂等。
+                                val target = dragDown
+                                scope.launch { offsetY.snapTo(target) }
+                            }
                         } else {
-                            scope.launch { offsetY.snapTo(dragDown) }
-                        }
-                    },
-                    onDragEnd = {
-                        if (dragDown in 0.01f..VIEWER_DRAG_DISMISS_PX) {
+                            // 捏合或已放大：缩放 + 平移，位移夹取在边界内
                             dragDown = 0f
-                            scope.launch { offsetY.animateTo(0f) }
+                            val panX = pan.x
+                            val panY = pan.y
+                            scope.launch {
+                                scale.snapTo(next)
+                                offsetX.snapTo(clampX(offsetX.value + panX, next))
+                                offsetY.snapTo(clampY(offsetY.value + panY, next))
+                            }
                         }
-                    },
-                    onDragCancel = {
+                        // 到这里说明这一支手势归我们管，消费掉避免上层/父级再处理
+                        event.changes.forEach { it.consume() }
+                    }
+                    // 松手：下拉没到阈值就回弹
+                    if (dragDown > 0f) {
                         dragDown = 0f
                         scope.launch { offsetY.animateTo(0f) }
-                    },
-                )
+                    }
+                }
             }
             .pointerInput(Unit) {
                 detectTapGestures(
