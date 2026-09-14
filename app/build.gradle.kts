@@ -25,8 +25,8 @@ android {
         applicationIdSuffix = ".debug"
         minSdk = 26
         targetSdk = 35
-        versionCode = 27
-        versionName = "1.0.26"
+        versionCode = 28
+        versionName = "1.0.27"
 
         // 只包含公开的 OAuth 中转地址；百度 SecretKey 始终只保存在 Worker 中。
         buildConfigField(
@@ -234,6 +234,8 @@ dependencies {
     testImplementation(libs.mockk)
     testImplementation(libs.androidx.room.testing)
     testImplementation(libs.androidx.work.testing)
+    // Robolectric 上的 Compose 交互测试：验证 AndroidView 互操作的手势行为
+    testImplementation(libs.androidx.compose.ui.test.junit4)
 
     androidTestImplementation(libs.androidx.test.junit)
     androidTestImplementation(libs.androidx.espresso.core)

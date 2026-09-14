@@ -108,6 +108,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
@@ -1262,27 +1263,47 @@ private const val BUBBLE_WIDTH_RATIO = 0.92f
  * 而生成的图表要看清刻度和曲线，必须占满整行才有意义。
  */
 @Composable
-private fun InlineGeneratedImage(path: String, onClick: () -> Unit) {
-    val bitmap = remember(path) {
+internal fun InlineGeneratedImage(path: String, onClick: () -> Unit) {
+    // 解码失败短暂重试：流式回答里「PNG 落盘」与「路径进消息」之间可能有极短时间差，
+    // 恢复历史消息时也可能撞上存储尚未就绪。remember 的 key 带上 attempt，
+    // 重试时才会重新尝试解码。
+    var decodeAttempt by remember(path) { mutableIntStateOf(0) }
+    val bitmap = remember(path, decodeAttempt) {
         val file = java.io.File(path)
         // 文件不存在就直接返回 null，不必走一遍解码
         if (!file.exists() || file.length() <= 0L) null else decodeSampledBitmap(path, 1600)
+    }
+    LaunchedEffect(path, bitmap) {
+        if (bitmap == null && decodeAttempt < DECODE_RETRY_MAX) {
+            delay(DECODE_RETRY_DELAY_MS)
+            decodeAttempt++
+        }
     }
     if (bitmap == null) {
         // 图还没生成好、读取失败，或缓存 PNG 已被系统回收：
         // 给一个占位，避免整条回答的排版错位。区分「加载中」与「已失效」，
         // 后者不该一直显示「加载中…」让用户干等。
+        //
+        // 占位框也必须可点击（v1.0.26 用户反馈「只有第一张图能点，其余点了没反应」）：
+        // 以前占位框上没有任何 clickable，一旦走到这里这张图就永久「点了没反应」。
+        // 现在点占位同样打开查看器——文件还在就正常显示，不在也给出明确文案，
+        // 绝不出现「无响应」。
         val expired = remember(path) { !java.io.File(path).exists() }
         Box(
             modifier = Modifier
                 .fillMaxWidth()
                 .height(110.dp)
                 .clip(RoundedCornerShape(10.dp))
-                .background(MaterialTheme.colorScheme.surfaceVariant),
+                .background(MaterialTheme.colorScheme.surfaceVariant)
+                .clickable { onClick() },
             contentAlignment = Alignment.Center,
         ) {
             Text(
-                if (expired) "图表已过期（可重新生成一次）" else "图表加载中…",
+                when {
+                    decodeAttempt < DECODE_RETRY_MAX -> "图表加载中…"
+                    expired -> "图表已过期（可重新生成一次）"
+                    else -> "图表暂时无法显示"
+                },
                 style = MaterialTheme.typography.labelMedium,
             )
         }
@@ -1298,6 +1319,9 @@ private fun InlineGeneratedImage(path: String, onClick: () -> Unit) {
             .clickable { onClick() },
     )
 }
+
+private const val DECODE_RETRY_MAX = 3
+private const val DECODE_RETRY_DELAY_MS = 600L
 
 @Composable
 private fun MessageBubble(
@@ -1627,7 +1651,7 @@ internal fun splitFigureSegments(content: String, figureCount: Int): List<Figure
  * 含表格的回答按块拆开渲染，表格单独走「更宽画布 + 横向滚动」。
  */
 @Composable
-private fun MarkdownAnswer(content: String) {
+internal fun MarkdownAnswer(content: String) {
     val chunks = remember(content) { splitMarkdownTableBlocks(content) }
     // 绝大多数回答不含表格：沿用原来的单块路径，零回归
     if (chunks.none { it.isTable }) {
@@ -1663,12 +1687,19 @@ private fun MarkdownAnswer(content: String) {
                     //    「内容宽度 > 容器宽度」时才产生可滚动区间；若外层被 fillMaxWidth 撑满，
                     //    可滚动距离就是 0，横滑毫无反应；
                     // ② 内层 TextView 给足固定宽度 tableWidthPx（1.8 倍气泡宽），它才是那个「更宽的内容」。
+                    //
+                    // clipToBounds：内容是 1.8 倍宽的真实 Android 视图，若不显式裁剪，
+                    // 溢出视口的部分会横向画到气泡外面，盖住旁边的文字（用户反馈的
+                    // 「表格遮挡了部分文字内容」）。滚动容器本身不保证裁剪主轴。
                     Box(
                         modifier = Modifier
                             .wrapContentWidth()
-                            .horizontalScroll(scroll, reverseScrolling = false),
+                            .horizontalScroll(scroll, reverseScrolling = false)
+                            .clipToBounds(),
                     ) {
-                        MarkdownChunk(chunk.text, fixedWidthPx = tableWidthPx)
+                        // selectable=false：见 createMarkdownTextView 内注释。
+                        // 表格块交给外层滚动处理手势，TextView 自己不参与触摸消费。
+                        MarkdownChunk(chunk.text, fixedWidthPx = tableWidthPx, selectable = false)
                     }
                 }
             }
@@ -1687,7 +1718,7 @@ private fun MarkdownAnswer(content: String) {
  * 所以这里在内容变化后主动把 `view.height` 报给 Compose（wrap_content 量出的真实高度）。
  */
 @Composable
-private fun MarkdownChunk(content: String, fixedWidthPx: Int?) {
+internal fun MarkdownChunk(content: String, fixedWidthPx: Int?, selectable: Boolean = true) {
     val textColor = MaterialTheme.colorScheme.onSurface.toArgb()
     val linkColor = MaterialTheme.colorScheme.primary.toArgb()
     // 实测宽度。公式是按「当前可用宽度」拆分的，宽度一变（旋转、平板横屏、分屏）
@@ -1723,7 +1754,9 @@ private fun MarkdownChunk(content: String, fixedWidthPx: Int?) {
 
     AndroidView(
         modifier = widthModifier.then(heightModifier).onSizeChanged { widthPx = it.width },
-        factory = { context -> createMarkdownTextView(context, textColor, linkColor) },
+        factory = { context ->
+            createMarkdownTextView(context, textColor, linkColor, selectable = selectable)
+        },
         update = { view ->
             host = view
             renderMarkdown(view, content, renderWidthPx, textColor, linkColor)
@@ -1747,11 +1780,20 @@ private fun TextView.measuredHeightCompat(widthPx: Int): Int {
     return measuredHeight
 }
 
-private fun createMarkdownTextView(context: Context, textColor: Int, linkColor: Int): TextView =
+internal fun createMarkdownTextView(
+    context: Context,
+    textColor: Int,
+    linkColor: Int,
+    selectable: Boolean = true,
+): TextView =
     TextView(context).apply {
         setTextColor(textColor)
         setLinkTextColor(linkColor)
-        setTextIsSelectable(true)
+        // selectable=false 用于表格块：setTextIsSelectable(true) 会顺带 setClickable(true)
+        // + setLongClickable(true)，把 TextView 变成一个「点击可聚焦」的 View。在真机的
+        // 触摸管线上，这类 View 有可能先于父级手势吃掉触摸事件，让外层的横向滚动拖不动。
+        // 表格以「读 + 横向拖动」为主，牺牲单元格内的长按选中是划算的。
+        if (selectable) setTextIsSelectable(true)
         movementMethod = LinkMovementMethod.getInstance()
         textSize = 17f
         val fallbackSizePx = 14f * resources.displayMetrics.scaledDensity
