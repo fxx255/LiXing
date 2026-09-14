@@ -26,16 +26,24 @@ App 端 `BuildConfig.UPDATE_CHECK_URL` 已写死指向本服务：
 
 CloudBase **免费版**的 `update-check` 函数执行超时最多只能选 **3 秒**（同环境的老函数可能是 30 秒，那是历史配置），而 GitHub 直链从云函数网络经常连不通（本机实测 github.com 21 秒超时失败；gh-proxy.com ≈ 1.4s、ghfast.top ≈ 3.5s），回源一慢整个函数就被判定超时，App 端表现为「检查更新没反应」。
 
-**对策（必须做第 2 条）**：
+**对策（二选一）**：
 
+**A. 只需重新部署本函数代码（推荐，已内置镜像优先，不需要改任何环境变量）**
+代码里的 `expandSources()` 会把 `UPDATE_MANIFEST_URL` 配置的地址自动展开成
+「`ghfast.top` → `ghproxy.net` → 原始地址」的候选列表，并用 `TOTAL_BUDGET_MS`（2.5 秒）
+控制总预算，绝不会把 3 秒函数预算烧光。所以：把本目录 `index.js` 整段粘进控制台 → 部署即可。
+
+**B. 或者改环境变量**（老代码也适用）：
 1. `UPDATE_MANIFEST_URL` 只填**一个最快**的镜像（多源会叠加耗时，反而更容易顶破 3 秒）：
    ```
-   https://gh-proxy.com/https://github.com/fxx255/LiXing/releases/latest/download/update.json
+   https://ghfast.top/https://github.com/fxx255/LiXing/releases/latest/download/update.json
    ```
+   ⚠️ 不要再写 `gh-proxy.com`——实测已 403 失效（2026-09-14）。
 2. `UPDATE_MANIFEST_JSON` 填当前版本的完整清单（**兜底**）。回源超时/失败时函数在几十毫秒内返回它，  
    **永远不会触发 3 秒超时**。滞后不更新只会「检测不到更新的版本」，不会误报  
    （App 只在 `versionCode > 当前版本` 时才提示）。建议每次发版顺手更新一次。
-3. 可选：`MANIFEST_FETCH_TIMEOUT_MS` 调整单源回源超时（默认 1200ms；3 秒上限下最多设 2000）。
+3. 可选：`MANIFEST_FETCH_TIMEOUT_MS`（单源超时，默认 2000ms，上限 2500ms）、
+   `MANIFEST_MIRROR_PREFIXES`（镜像前缀列表）、`MANIFEST_TOTAL_BUDGET_MS`（回源总预算）。
 
 每次发版后，把 `build/update.json` 的内容整段粘进 `UPDATE_MANIFEST_JSON` 即可（就是一行压缩过的 JSON）。
 

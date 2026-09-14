@@ -1,19 +1,29 @@
 package com.example.lixing.data.update
 
 /**
- * APK 下载源策略：直连 GitHub 在国内经常不通，失败时依次尝试加速镜像。
+ * 下载源策略：直连 GitHub 在国内经常不通，优先走加速镜像，最后才退回直连。
  *
  * 镜像只是「字节搬运工」，安全性由清单里的 SHA-256 校验兜底——
  * 无论哪个源返回的内容被篡改，校验失败都会拒绝安装。
+ *
+ * 实测记录（2026-09-14）：`ghfast.top` 与 `ghproxy.net` 可用；
+ * `gh-proxy.com` 已返回 403（失效），不要再加回来。
  */
 object DownloadMirrors {
 
-    /** 第 1 个是清单原始地址（直连），后面是加速镜像（把完整 URL 拼在前缀后）。 */
-    private val PREFIXES = listOf(
-        "",
+    /** 加速镜像前缀（把完整 URL 拼在前缀后）。 */
+    internal val MIRROR_PREFIXES = listOf(
         "https://ghfast.top/",
-        "https://gh-proxy.com/",
+        "https://ghproxy.net/",
     )
+
+    /**
+     * 直连 GitHub。国内手机常连不通，所以排在**最后**：
+     * 先试镜像能少一次无谓的超时等待。
+     */
+    private const val DIRECT = ""
+
+    private val PREFIXES = MIRROR_PREFIXES + DIRECT
 
     /**
      * 第 [attempt] 次尝试（从 1 开始）应使用的下载地址。

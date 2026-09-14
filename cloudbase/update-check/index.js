@@ -34,14 +34,46 @@ const CACHE_TTL_MS = 10 * 60 * 1000;
  * 跳转到 CDN 再下载，常态就是 2~10 秒 ⇒ 超时必然发生，函数整体报
  * 「暂时无法获取更新信息」（2026-09-14 实测：同一清单在本机直连 200，云函数连续全失败）。
  *
- * 正确解法是**换更快的源**而不是拉长超时：把 `UPDATE_MANIFEST_URL` 指向
- * gh-proxy.com / ghfast.top 这类国内可达的加速镜像（实测 gh-proxy.com ≈ 1.4s），
- * 再把本值设在 2000ms 左右。这里同时做上限保护：不超过 2500ms，避免把 3 秒函数预算吃光。
+/**
+ * 正确解法是**换更快的源**而不是拉长超时：优先走国内可达的加速镜像
+ * （见 MIRROR_PREFIXES，代码里已内置「镜像优先」），本值只作为单源超时上限，
+ * 不超过 2500ms，避免把 3 秒函数预算吃光。
  */
 const FETCH_TIMEOUT_MS = Math.min(
   Number(process.env.MANIFEST_FETCH_TIMEOUT_MS || 2000) || 2000,
   2500,
 );
+
+/**
+ * 加速镜像前缀（逗号分隔，可用 MANIFEST_MIRROR_PREFIXES 覆盖）。
+ *
+ * ⚠️ gh-proxy.com 实测已 403 失效（2026-09-14），不要再加回来；
+ * ghfast.top / ghproxy.net 实测可用。
+ */
+const MIRROR_PREFIXES = (process.env.MANIFEST_MIRROR_PREFIXES || "https://ghfast.top/,https://ghproxy.net/")
+  .split(",")
+  .map((item) => item.trim())
+  .filter(Boolean);
+
+/**
+ * 整个回源阶段的**总预算**（毫秒）。免费版函数执行上限 3 秒，
+ * 预算必须留在 2.5 秒以内，否则函数被平台杀掉、连错误 JSON 都返回不了。
+ */
+const TOTAL_BUDGET_MS = Math.min(Number(process.env.MANIFEST_TOTAL_BUDGET_MS || 2500) || 2500, 2500);
+
+/**
+ * 把配置的清单地址展开成候选列表：**镜像优先，原始地址兜底**。
+ *
+ * 镜像只是「把完整 URL 拼在前缀后」的搬运工，对任意 GitHub 直链都适用。
+ * 之所以镜像优先：从 CloudBase（上海）直连 GitHub 常态 2~10 秒，而免费版函数只有
+ * 3 秒预算 —— 先试直连会把预算烧光，这正是「检查更新提示 HTTP 502」的由来。
+ */
+function expandSources(url) {
+  if (!/^https?:\/\//i.test(url)) return [];
+  const candidates = MIRROR_PREFIXES.map((prefix) => prefix + url);
+  candidates.push(url);
+  return candidates;
+}
 
 /** 带超时的 JSON 拉取：慢源直接放弃换下一个，不让整个函数被拖到超时。 */
 async function fetchJsonWithTimeout(url, timeoutMs, extraHeaders) {
@@ -101,14 +133,22 @@ exports.main = async (event) => {
  */
 async function fetchManifest() {
   const errors = [];
+  const deadline = Date.now() + TOTAL_BUDGET_MS;
 
-  // 1) 外部直链：支持逗号分隔多个源（主源 + 加速镜像），逐个试，每个源独立超时
+  // 1) 外部直链：每个配置地址展开成「镜像优先 + 原始地址」的候选列表，
+  //    逐个试；单源超时不得超过剩余总预算（超了就整个函数被杀掉）。
   const directUrl = process.env.UPDATE_MANIFEST_URL;
   if (directUrl) {
-    const urls = directUrl.split(",").map((item) => item.trim()).filter(Boolean);
-    for (const url of urls) {
+    const configured = directUrl.split(",").map((item) => item.trim()).filter(Boolean);
+    const candidates = configured.flatMap(expandSources);
+    for (const url of candidates) {
+      const remaining = deadline - Date.now();
+      if (remaining <= 300) {
+        errors.push("回源总预算用尽");
+        break;
+      }
       try {
-        return normalizeManifest(await fetchJsonWithTimeout(url, FETCH_TIMEOUT_MS));
+        return normalizeManifest(await fetchJsonWithTimeout(url, Math.min(FETCH_TIMEOUT_MS, remaining)));
       } catch (error) {
         errors.push(`${url} → ${error.message}`);
       }
