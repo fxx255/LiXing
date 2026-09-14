@@ -8,6 +8,7 @@ import com.example.lixing.data.assistant.AssistantContextBuilder
 import com.example.lixing.data.assistant.AssistantImagePrep
 import com.example.lixing.data.assistant.AssistantModelClient
 import com.example.lixing.data.assistant.AssistantModelException
+import com.example.lixing.data.assistant.AssistantResponseParser
 import com.example.lixing.data.assistant.ParsedAssistantReply
 import com.example.lixing.data.assistant.AssistantStreamEvent
 import com.example.lixing.data.assistant.LocalTextRecognizer
@@ -183,6 +184,41 @@ internal fun appendReasoningForDisplay(
     require(maxChars > 0)
     val body = current.removePrefix(REASONING_OMITTED_PREFIX) + delta
     return if (body.length <= maxChars) body else REASONING_OMITTED_PREFIX + body.takeLast(maxChars)
+}
+
+/**
+ * 从 reasoning 通道文本里取回「其实属于正文」的内容。
+ *
+ * 触发场景：部分兼容服务商在**续写轮**会把答案正文流进 `reasoning_content`，
+ * 导致 `reply.reply` 为空——正文区不再增长，那些内容只出现在思考面板里。
+ * 用户看到的就是「生成一张图之后，后续回复都输出到思考链里了」。
+ *
+ * 策略保守，宁可返回空也不把真正的思考当正文贴出去：
+ * 1. reasoning 整体能被解析出 reply（说明它本就是一份完整的结构化回答）→ 取 reply；
+ * 2. 否则从**最后一个** `"reply"` 往前找到最近的 `{`，把这段交给解析器（含截断抢救）→ 取 reply；
+ * 3. 都不成立返回空串。
+ *
+ * 注意返回值必须**不等于**输入本身，否则「思考原文」会被当成正文重复展示一遍。
+ */
+internal fun salvageReplyFromReasoningText(rawReasoning: String): String {
+    val reasoning = rawReasoning.trim()
+    if (reasoning.isEmpty()) return ""
+    // ① reasoning 本身就是（或包含）完整的 JSON 正文结构
+    runCatching { AssistantResponseParser.parse(reasoning) }
+        .getOrNull()
+        ?.reply
+        ?.takeIf { it.isNotBlank() && it.trim() != reasoning }
+        ?.let { return it }
+    // ② 从最后一个 `"reply"` 起截取，交给解析器做截断抢救
+    val anchor = reasoning.lastIndexOf("\"reply\"")
+    if (anchor < 0) return ""
+    val start = reasoning.lastIndexOf('{', anchor).takeIf { it in 0..anchor } ?: return ""
+    val candidate = reasoning.substring(start)
+    return runCatching { AssistantResponseParser.parse(candidate) }
+        .getOrNull()
+        ?.reply
+        ?.takeIf { it.isNotBlank() && it.trim() != candidate.trim() }
+        .orEmpty()
 }
 
 /**
@@ -640,6 +676,11 @@ class AssistantViewModel @Inject constructor(
                     AssistantMessage("assistant", generated.takeLast(CONTINUATION_ECHO_CHARS)) +
                     AssistantMessage("user", CONTINUE_INSTRUCTION)
             }
+            // 每轮开始清空思考面板：否则第 2 轮的 reasoning 会追加到第 1 轮残留内容后面，
+            // 面板里堆着两轮拼接的思考；更糟的是当某轮把答案写进了 reasoning 通道时，
+            // 用户会看到「思考面板一直在涨、正文区纹丝不动」，误以为后续回复都进了思考链。
+            // 清空后每轮的面板内容与「这一段正在思考什么」一一对应。
+            _state.update { it.copy(activeReasoning = "", activeAnswerStarted = false) }
             // 联网只在首轮做：续写再搜一次既拖时间，又可能引入与上文冲突的材料
             val reply = modelClient.chatStreaming(
                 history,
@@ -657,8 +698,16 @@ class AssistantViewModel @Inject constructor(
             }
             lastReply = reply
             images = emptyList() // 续写轮不再带图：首轮图片内容已在对话历史里
-            generated += reply.reply
-            totalChars += reply.reply.length
+            // 续写轮里模型有时把本该输出的正文写进了 reasoning 通道（正文为空），
+            // 这时若只认 reply.reply，正文区会一直不增长，而那些内容只出现在思考面板里。
+            // 把 reasoning 里可用的正文片段接回 generated，保证后续内容出现在正确的位置。
+            val salvaged = if (!firstRound && reply.reply.isBlank()) {
+                salvageReplyFromReasoning(reply)
+            } else {
+                ""
+            }
+            generated += reply.reply.ifBlank { salvaged }
+            totalChars = generated.length
 
             val hitLimit = reply.truncated
             val producedSomething = reply.reply.length >= minMeaningfulChars
@@ -722,6 +771,17 @@ class AssistantViewModel @Inject constructor(
             state.copy(messages = list)
         }
     }
+
+    /**
+     * 从解析结果里捞回「其实属于正文、却被写进 reasoning 通道」的内容。
+     *
+     * 背景：部分兼容服务商在续写场景下会把答案正文流进 `reasoning_content` 字段
+     * （协议上那是思考通道）。表现是**正文区不再增长，内容只出现在思考面板里**，
+     * 用户反馈「生成一张图之后，后续回复都输出到思考链里了」。
+     * 具体策略见 [salvageReplyFromReasoningText]。
+     */
+    private fun salvageReplyFromReasoning(reply: ParsedAssistantReply): String =
+        salvageReplyFromReasoningText(reply.rawReasoning)
 
     /** 收尾：把整篇回答与生成的图表落库，并把本轮产生的待确认项挂到这条消息上。 */
     private suspend fun appendAssistantTurn(

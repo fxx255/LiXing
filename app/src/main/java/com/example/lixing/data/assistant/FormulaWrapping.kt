@@ -15,7 +15,10 @@ internal fun wrapLongFormulas(
     var fence: String? = null
     var inDisplay = false
     val block = StringBuilder()
-    for (line in markdown.split('\n')) {
+    val lines = markdown.split('\n')
+    var index = 0
+    while (index < lines.size) {
+        val line = lines[index]
         val trimmed = line.trimStart()
         val lineFence = when {
             trimmed.startsWith("```") -> "```"
@@ -23,6 +26,18 @@ internal fun wrapLongFormulas(
             else -> null
         }
         val t = line.trim()
+        // 表格整块原样放行。
+        //
+        // 表格行以 `|` 分隔单元格，而 wrapInlineLine 是按「整行宽度」决定是否把公式
+        // 拆成独立块的：一行 `| 频率点 | $$P_{Y_c}$$ |` 只要公式量出来超过可用宽度，
+        // 就会被拆成「| 频率点 |」+「$$」+「公式」+「$$」四行 —— 表格结构当场断裂，
+        // Markwon 再也认不出这是表格，整块退化成普通文字（用户看到「表格显示不出来」）。
+        // 单元格里的公式本来就该由表格自己横向滚动来容纳，不该按行宽拆。
+        if (fence == null && isMarkdownTableRowLine(lines, index)) {
+            out += line
+            index++
+            continue
+        }
         when {
             lineFence != null -> {
                 fence = if (fence == null) lineFence else if (fence == lineFence) null else fence
@@ -65,11 +80,48 @@ internal fun wrapLongFormulas(
             }
             else -> out += wrapInlineLine(line, maxWidthPx, measure)
         }
+        index++
     }
     if (inDisplay && block.toString().isNotBlank()) {
         out += splitFormulaBlocks(block.toString().trim(), maxWidthPx, measure)
     }
     return out.joinToString("\n")
+}
+
+/**
+ * 判断 [index] 行是否属于 Markdown 表格（表头、分隔行或数据行）。
+ *
+ * 与渲染层 `splitMarkdownTableBlocks` 的判定保持一致：表头行含 `|` 且下一行是分隔行；
+ * 分隔行之后的连续含 `|` 行都算表格行。
+ */
+private fun isMarkdownTableRowLine(lines: List<String>, index: Int): Boolean {
+    val line = lines[index]
+    if ('|' !in line) return false
+    // 表头 + 分隔行
+    if (isTableSeparatorRow(line)) return true
+    val next = lines.getOrNull(index + 1)
+    if (next != null && isTableSeparatorRow(next)) return true
+    // 数据行：往上找到最近的表头/分隔行，中间不能隔着空行或非表格行
+    var cursor = index - 1
+    while (cursor >= 0) {
+        val prev = lines[cursor]
+        if (prev.isBlank()) return false
+        if ('|' !in prev) return false
+        if (isTableSeparatorRow(prev)) return true
+        cursor--
+    }
+    return false
+}
+
+/** Markdown 表格的分隔行：`| --- | :--: |`。 */
+private fun isTableSeparatorRow(line: String): Boolean {
+    val trimmed = line.trim()
+    if ('-' !in trimmed) return false
+    val cells = trimmed.trim('|').split('|')
+    return cells.isNotEmpty() && cells.all { cell ->
+        val token = cell.trim()
+        token.isNotEmpty() && token.all { it == '-' || it == ':' } && '-' in token
+    }
 }
 
 private const val DISPLAY_DELIMITER = "$$"

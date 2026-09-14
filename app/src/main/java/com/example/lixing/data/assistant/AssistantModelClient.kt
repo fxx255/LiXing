@@ -180,6 +180,8 @@ class AssistantModelClient @Inject constructor(
                 },
                 actions = emptyList(),
                 warnings = listOf("服务商两次只返回思考内容，已展示可恢复的推理尾部") + listOfNotNull(searchNote),
+                // 思考内容一并带出：调用方可能据此判断「这一轮其实产出在 reasoning 通道里」
+                rawReasoning = output.reasoning,
             )
         }
         if (answer.isEmpty()) {
@@ -193,7 +195,10 @@ class AssistantModelClient @Inject constructor(
             val base = guardMissingEnglishActions(
                 guardMissingPlanActions(AssistantResponseParser.parse(answer), userPrompt),
                 userPrompt,
-            ).copy(truncated = output.finishReason == "length")
+            ).copy(
+                truncated = output.finishReason == "length",
+                rawReasoning = output.reasoning,
+            )
             val parsed = if (searchNote == null) base else base.copy(warnings = base.warnings + searchNote)
             val distinctCitations = output.citations.distinctBy(Citation::url)
             if (distinctCitations.isEmpty()) {

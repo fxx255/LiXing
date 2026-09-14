@@ -49,6 +49,16 @@ data class ParsedAssistantReply(
     val truncated: Boolean = false,
     /** 模型要求绘制的图表：结构化参数，由客户端本地渲染成图后挂到这条消息上。 */
     val plots: List<PlotSpec> = emptyList(),
+    /**
+     * 本轮服务商返回的原始思考内容（reasoning 通道）。
+     *
+     * 正常回答用不到它，只用于一个补救场景：部分兼容服务商在续写时会把本该输出的
+     * 正文写进 reasoning 通道，导致正文区不增长、内容只出现在思考面板里。调用方
+     * 据此把误入思考的内容取回正文。
+     *
+     * 注意：**不参与持久化**。思考内容从不写库、不备份（见 [AssistantViewModel] 的约定）。
+     */
+    val rawReasoning: String = "",
 )
 
 /**
@@ -339,6 +349,11 @@ object AssistantResponseParser {
     /**
      * 截断恢复：整包 JSON 没闭合时（典型原因是长回答撞上输出上限），
      * 尽力把已完整的 reply 与动作条目抢救出来，而不是只留正文丢掉按钮。
+     *
+     * plots 必须一起抢救：长回答被截断时模型往往**已经把 plots 写在前面**，
+     * 只恢复正文会导致 `imagePaths` 为空，而正文里的 `[[FIGURE:n]]` 锚点仍在，
+     * 渲染层拿不到图就把锚点当成普通文字显示出来（用户看到正文里裸着
+     * `[[FIGURE:1]]`）。这是「图片不显示 + 锚点露出」的根因之一。
      */
     private fun salvageTruncated(normalized: String, trimmed: String): ParsedAssistantReply? {
         val reply = partialReply(normalized) ?: return null
@@ -351,12 +366,44 @@ object AssistantResponseParser {
         val englishActions = salvageActionArray(normalized, "english_actions") { element, index, warns ->
             parseEnglishAction(element, index, warns)
         }
+        val plots = salvagePlots(normalized, warnings)
         return ParsedAssistantReply(
             reply = reply,
             actions = actions,
             warnings = warnings,
             englishActions = englishActions,
+            plots = plots,
         )
+    }
+
+    /**
+     * 从截断文本里抢救已完整闭合的 plot 对象。
+     *
+     * `plots` 是数组，被截断时通常只有最后一项不完整；前面的项照样能用。
+     * 复用 [salvageActionArray] 的逐字符扫描（跳过字符串字面量）拿到已闭合的 `{...}`，
+     * 再走与正常路径相同的 [parsePlot] 校验，坏的那张丢掉并记警告。
+     */
+    private fun salvagePlots(raw: String, warnings: MutableList<String>): List<PlotSpec> {
+        val arrayStart = raw.indexOf("\"plots\"")
+        if (arrayStart < 0) {
+            // 也支持单个 `"plot": {...}` 的写法
+            val single = salvageActionArray(raw, "plot") { element, _, _ ->
+                (element as? JsonObject)?.let { runCatching { parsePlot(it) }.getOrNull() }
+            }
+            return single.take(MAX_PLOTS)
+        }
+        val objects = salvageActionArray(raw, "plots") { element, _, _ ->
+            (element as? JsonObject)?.let { obj ->
+                runCatching { parsePlot(obj) }
+                    .onFailure { warnings += "有一张图表没能生成：${it.message ?: "参数不合法"}" }
+                    .getOrNull()
+            }
+        }
+        // 数组本身已闭合时优先走正常路径，避免多一次扫描带来的偏差
+        parseJsonObject(raw)?.let { root ->
+            parsePlots(root, warnings).takeIf { it.isNotEmpty() }?.let { return it }
+        }
+        return objects.take(MAX_PLOTS)
     }
 
     /**
@@ -688,7 +735,109 @@ internal fun normalizeAssistantMarkdown(raw: String): String {
         // Chinese prose is also a safe paragraph/list continuation; LaTeX commands are not.
         normalized = normalized.replace(Regex("""\\n(?=[\u3400-\u9fff])"""), "\n")
     }
-    return normalizeMathDelimiters(normalized)
+    return normalizeTables(normalizeMathDelimiters(normalized))
+}
+
+/**
+ * 修复 Markdown 表格在 CommonMark 下「渲染不出来」的两种常见形态。
+ *
+ * 1. **缺少空行**：CommonMark 要求表格与上一段落之间必须有空行，否则整块表格
+ *    会被当成普通段落，渲染成一行带竖线的文字。实测（Robolectric + 真实 Markwon）
+ *    下表前无空行时 `TableSpan` 数量为 0，即表格完全没被识别——这正是用户截图里
+ *    「表格只剩一行、竖线都没了」的成因。模型在「先写一句话、紧接着贴表格」时
+ *    极高频地漏掉这个空行。
+ * 2. **单元格里的竖线**：行内公式含绝对值/范数（`$$|f| \le B/2$$`）时，裸 `|`
+ *    会被 TablePlugin 当成单元格分隔符，导致该行列数与其它行不一致，表格解析错乱
+ *    甚至数据行被整行丢弃。这里把「已经处于公式内」的裸 `|` 转义成 `\|`。
+ *
+ * 只在识别为表格的行上动手，代码围栏内一律跳过。
+ */
+private fun normalizeTables(markdown: String): String {
+    if ('|' !in markdown) return markdown
+    val lines = markdown.split('\n')
+    val out = ArrayList<String>(lines.size + 8)
+    var fence: String? = null
+    var index = 0
+    while (index < lines.size) {
+        val line = lines[index]
+        val trimmedStart = line.trimStart()
+        val lineFence = when {
+            trimmedStart.startsWith("```") -> "```"
+            trimmedStart.startsWith("~~~") -> "~~~"
+            else -> null
+        }
+        if (lineFence != null) {
+            fence = if (fence == null) lineFence else if (fence == lineFence) null else fence
+            out += line
+            index++
+            continue
+        }
+        if (fence != null) {
+            out += line
+            index++
+            continue
+        }
+        // 表格首行 = 含 | 且下一行是分隔行
+        val next = lines.getOrNull(index + 1)
+        if ('|' in line && next != null && isTableSeparatorLine(next)) {
+            // ① 表格上方补空行（它前面若是非空、非表格内容）
+            if (out.isNotEmpty() && out.last().isNotBlank()) out += ""
+            out += escapeTableRowPipes(line)
+            out += escapeTableRowPipes(next)
+            index += 2
+            // ② 数据行：一路吃到不再是表格行
+            while (index < lines.size && '|' in lines[index] && lines[index].isNotBlank()) {
+                out += escapeTableRowPipes(lines[index])
+                index++
+            }
+            // ③ 表格下方补空行（后面若还有内容）
+            if (index < lines.size && lines[index].isNotBlank()) out += ""
+            continue
+        }
+        out += line
+        index++
+    }
+    return out.joinToString("\n")
+}
+
+/** Markdown 表格的分隔行（`| --- | :--: |`）。与渲染层的判定保持一致。 */
+private fun isTableSeparatorLine(line: String): Boolean {
+    val trimmed = line.trim()
+    if ('-' !in trimmed) return false
+    val cells = trimmed.trim('|').split('|')
+    return cells.isNotEmpty() && cells.all { cell ->
+        val token = cell.trim()
+        token.isNotEmpty() && token.all { it == '-' || it == ':' } && '-' in token
+    }
+}
+
+/**
+ * 把表格行中**位于公式内部**的裸 `|` 转义为 `\|`。
+ *
+ * 只处理 `$$...$$` 区间内的竖线：公式外的 `|` 是单元格分隔符，必须保留。
+ * 表格引线（行首/行尾的 `|`）一定在公式外，天然不受影响。
+ */
+private fun escapeTableRowPipes(row: String): String {
+    if (!row.contains("$$")) return row
+    val out = StringBuilder(row.length + 8)
+    var index = 0
+    var inMath = false
+    while (index < row.length) {
+        if (row.startsWith("$$", index)) {
+            inMath = !inMath
+            out.append("$$")
+            index += 2
+            continue
+        }
+        val c = row[index]
+        if (c == '|' && inMath && !row.isEscaped(index)) {
+            out.append("\\|")
+        } else {
+            out.append(c)
+        }
+        index++
+    }
+    return out.toString()
 }
 
 /** Converts common model LaTeX delimiters to the double-dollar syntax used by Markwon. */

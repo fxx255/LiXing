@@ -2,6 +2,7 @@ package com.example.lixing.data.plot
 
 import android.content.Context
 import android.graphics.Bitmap
+import android.util.Log
 import com.example.lixing.domain.plot.PlotSpec
 import com.example.lixing.ui.plot.PlotBitmapRenderer
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -28,25 +29,49 @@ class PlotImageStore @Inject constructor(
     /**
      * 渲染并返回 PNG 的绝对路径；任何异常都吞掉返回 null ——
      * 图表失败绝不能影响文字回答。
+     *
+     * 失败与降级都要留日志：以前这里彻底静默，线上出现「图片不显示」时
+     * 既看不到异常也看不到参数，只能靠猜。现在把失败原因与 spec 摘要写进日志。
      */
-    fun render(spec: PlotSpec): String? = runCatching {
+    fun render(spec: PlotSpec): String? {
         val metrics = context.resources.displayMetrics
         val widthPx = (metrics.widthPixels * 0.92f).toInt().coerceIn(600, 1600)
         val heightPx = (widthPx * 0.58f).toInt()
         val file = File(plotsDir, "${cacheKey(spec, widthPx, heightPx)}.png")
-        if (file.exists() && file.length() > 0) return@runCatching file.absolutePath
+        // 缓存命中：文件还在且非空
+        if (file.exists() && file.length() > 0) return file.absolutePath
 
-        val bitmap = PlotBitmapRenderer(metrics.density).render(spec, widthPx, heightPx)
-        try {
-            FileOutputStream(file).use { out ->
-                bitmap.compress(Bitmap.CompressFormat.PNG, 100, out)
+        return runCatching {
+            val bitmap = PlotBitmapRenderer(metrics.density).render(spec, widthPx, heightPx)
+            try {
+                FileOutputStream(file).use { out ->
+                    bitmap.compress(Bitmap.CompressFormat.PNG, 100, out)
+                }
+            } finally {
+                bitmap.recycle()
             }
-        } finally {
-            bitmap.recycle()
-        }
-        file.absolutePath
-    }.getOrNull()
+            if (file.length() <= 0) {
+                Log.w(TAG, "plot png written but empty: ${spec.title} -> ${file.name}")
+                return@runCatching null
+            }
+            file.absolutePath
+        }.onFailure { error ->
+            // 带上关键参数，便于按日志复现（模型给的 spec 五花八门）
+            Log.w(
+                TAG,
+                "plot render failed: title=${spec.title} series=${spec.series.size} " +
+                    "size=${widthPx}x$heightPx",
+                error,
+            )
+            // 写坏的文件立即删掉，避免下次命中一个 0 字节/半截的缓存
+            runCatching { if (file.exists()) file.delete() }
+        }.getOrNull()
+    }
 
     private fun cacheKey(spec: PlotSpec, widthPx: Int, heightPx: Int): String =
         "%08x_%d_%d".format(spec.hashCode(), widthPx, heightPx)
+
+    private companion object {
+        const val TAG = "PlotImageStore"
+    }
 }

@@ -20,11 +20,25 @@ class FigureAnchorSplitTest {
     }
 
     @Test
-    fun `没有图时即使写了锚点也不切分`() {
+    fun `没有图时锚点也要剥掉不留字面量`() {
+        // 图没渲染出来（plots 被截断丢掉 / 渲染失败）时，锚点绝不能原样显示给用户。
+        // 以前 figureCount<=0 直接返回原文，正文里就裸着 [[FIGURE:1]]。
         val content = "正文\n[[FIGURE:1]]\n后面"
         val result = splitFigureSegments(content, figureCount = 0)
+        assertTrue(
+            "锚点必须从文字里剥掉，实际: $result",
+            result.none { it.text.contains("[[FIGURE:") },
+        )
+        assertEquals(2, result.size)
+        assertEquals("正文", result[0].text)
+        assertEquals("后面", result[1].text)
+    }
+
+    @Test
+    fun `只有锚点没有别的文字时返回空段`() {
+        val result = splitFigureSegments("[[FIGURE:1]]", figureCount = 0)
         assertEquals(1, result.size)
-        assertTrue(result[0].text.contains("[[FIGURE:1]]"))
+        assertEquals("", result[0].text)
     }
 
     @Test

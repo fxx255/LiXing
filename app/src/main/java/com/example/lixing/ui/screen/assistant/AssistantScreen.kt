@@ -1263,9 +1263,16 @@ private const val BUBBLE_WIDTH_RATIO = 0.92f
  */
 @Composable
 private fun InlineGeneratedImage(path: String, onClick: () -> Unit) {
-    val bitmap = remember(path) { decodeSampledBitmap(path, 1600) }
+    val bitmap = remember(path) {
+        val file = java.io.File(path)
+        // 文件不存在就直接返回 null，不必走一遍解码
+        if (!file.exists() || file.length() <= 0L) null else decodeSampledBitmap(path, 1600)
+    }
     if (bitmap == null) {
-        // 图还没生成好或读取失败：给一个占位，避免整条回答的排版错位
+        // 图还没生成好、读取失败，或缓存 PNG 已被系统回收：
+        // 给一个占位，避免整条回答的排版错位。区分「加载中」与「已失效」，
+        // 后者不该一直显示「加载中…」让用户干等。
+        val expired = remember(path) { !java.io.File(path).exists() }
         Box(
             modifier = Modifier
                 .fillMaxWidth()
@@ -1274,7 +1281,10 @@ private fun InlineGeneratedImage(path: String, onClick: () -> Unit) {
                 .background(MaterialTheme.colorScheme.surfaceVariant),
             contentAlignment = Alignment.Center,
         ) {
-            Text("图表加载中…", style = MaterialTheme.typography.labelMedium)
+            Text(
+                if (expired) "图表已过期（可重新生成一次）" else "图表加载中…",
+                style = MaterialTheme.typography.labelMedium,
+            )
         }
         return
     }
@@ -1534,9 +1544,15 @@ private fun AssistantMarkdownBody(
     val segments = remember(content, imagePaths.size) { splitFigureSegments(content, imagePaths.size) }
     val hasInlineFigure = segments.any { it.figureIndex != null }
     if (!hasInlineFigure) {
-        // 没写锚点：正文 + 末尾图（保持旧排版，模型偶尔不守约定时也不会丢图）
+        // 没写锚点（或图没生成出来）：正文 + 末尾图（保持旧排版，模型偶尔不守约定时也不会丢图）。
+        //
+        // 注意这里的正文用 segments 拼回来而不是直接用 content：splitFigureSegments
+        // 会把锚点行剥掉，图没渲染出来时锚点才不会以 `[[FIGURE:1]]` 的字面量露给用户。
+        val plainText = remember(segments) {
+            segments.joinToString("\n\n") { it.text }.trim()
+        }
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            if (content.isNotBlank()) key("text") { MarkdownAnswer(content) }
+            if (plainText.isNotBlank()) key("text") { MarkdownAnswer(plainText) }
             imagePaths.forEachIndexed { index, path ->
                 key("figure-$index") {
                     InlineGeneratedImage(path = path) { onImageClick(imagePaths, index) }
@@ -1574,9 +1590,12 @@ private val FIGURE_ANCHOR = Regex("""(?im)^[ \t]*\[\[\s*FIGURE\s*:\s*(\d+)\s*\]\
  * 按 `[[FIGURE:n]]` 锚点把正文切成文字段与图段交替的列表。
  *
  * `figureCount` 用于拦掉越界锚点（越界时该锚点退化成空文字段，不产生占位）。
+ *
+ * **无论能否取到图，锚点行都必须从文字里剥掉**。以前在 `figureCount <= 0` 时直接
+ * 返回原文，于是图没渲染出来（plots 解析失败 / 被截断丢掉）时，正文里就裸着
+ * `[[FIGURE:1]]` 这样的内部标记显示给用户。现在统一走剥离逻辑，只是不产生图段。
  */
 internal fun splitFigureSegments(content: String, figureCount: Int): List<FigureSegment> {
-    if (figureCount <= 0) return listOf(FigureSegment(content, null))
     val matches = FIGURE_ANCHOR.findAll(content).toList()
     if (matches.isEmpty()) return listOf(FigureSegment(content, null))
 
@@ -1587,14 +1606,15 @@ internal fun splitFigureSegments(content: String, figureCount: Int): List<Figure
         if (before.isNotBlank()) segments += FigureSegment(before, null)
         val oneBased = match.groupValues[1].toIntOrNull()
         val index = oneBased?.minus(1)
-        if (index != null && index in 0 until figureCount) {
+        // 只有确实存在对应图片时才产生图段；否则该锚点被静默丢弃（不露字面量）
+        if (figureCount > 0 && index != null && index in 0 until figureCount) {
             segments += FigureSegment("", index)
         }
         cursor = match.range.last + 1
     }
     val tail = content.substring(cursor).trim('\n')
     if (tail.isNotBlank()) segments += FigureSegment(tail, null)
-    return segments
+    return segments.ifEmpty { listOf(FigureSegment("", null)) }
 }
 
 /**
