@@ -248,9 +248,14 @@ class PlotLabelLayoutTest {
     private class RecordingCanvas(width: Int, height: Int) :
         android.graphics.Canvas(android.graphics.Bitmap.createBitmap(width, height, android.graphics.Bitmap.Config.ARGB_8888)) {
         val translations = mutableListOf<Pair<Float, Float>>()
+        val texts = mutableListOf<Pair<String, Float>>()
         override fun translate(dx: Float, dy: Float) {
             translations += dx to dy
             super.translate(dx, dy)
+        }
+        override fun drawText(text: String, x: Float, y: Float, paint: android.graphics.Paint) {
+            texts += text to x
+            super.drawText(text, x, y, paint)
         }
     }
 
@@ -285,5 +290,142 @@ class PlotLabelLayoutTest {
             "公式标签必须被平移到自己的位置（实际平移 x 值：$horizontalOffsets）",
             horizontalOffsets.any { it > 100f },
         )
+    }
+
+    // ---------- 标签落位/夹取（纯函数，见 planLabelLayout） ----------
+    //
+    // 为什么是纯函数测试而不是「画出来看」：Robolectric 的 legacy graphics 里
+    // `Paint.measureText` **每个字符恒返回 1px**（实测：`a`=1、300 个 a=300、
+    // `汉字测试`=4），根本量不出真实字宽 ⇒ 任何「文字是否越界」的像素断言都是假绿。
+    // 把落位决策抽成 planLabelLayout 后，可以用受控的宽度列表精确验证几何规则。
+
+    private val bounds = 100f to 400f // leftLimit..rightLimit，可用 300
+
+    @Test
+    fun `装得下时居中原样画`() {
+        val plan = planLabelLayout(
+            widths = listOf(100f, 100f),
+            gap = 10f,
+            ellipsisWidth = 10f,
+            anchorX = 250f,
+            alignCenter = true,
+            leftLimit = bounds.first,
+            rightLimit = bounds.second,
+        )
+        assertEquals(2, plan.keepCount)
+        assertTrue(!plan.truncated)
+        // 总宽 100+10+100 = 210，居中于 250 ⇒ 起点 145
+        assertEquals(145f, plan.startX, 0.01f)
+    }
+
+    @Test
+    fun `左对齐时起点等于锚点`() {
+        val plan = planLabelLayout(
+            widths = listOf(50f),
+            gap = 0f,
+            ellipsisWidth = 10f,
+            anchorX = 150f,
+            alignCenter = false,
+            leftLimit = bounds.first,
+            rightLimit = bounds.second,
+        )
+        assertEquals(150f, plan.startX, 0.01f)
+        assertTrue(!plan.truncated)
+    }
+
+    /** 关键回归：贴着右边界的内容必须被左移收进来（用户反馈「注释右侧溢出图片」）。 */
+    @Test
+    fun `靠右放置时整体被左移收进边界`() {
+        val plan = planLabelLayout(
+            widths = listOf(120f),
+            gap = 0f,
+            ellipsisWidth = 10f,
+            anchorX = 390f, // 起点 390 + 120 = 510 > 400 ⇒ 必须左移
+            alignCenter = false,
+            leftLimit = bounds.first,
+            rightLimit = bounds.second,
+        )
+        assertEquals(400f - 120f, plan.startX, 0.01f)
+        assertTrue("左移后右缘不得越界", plan.startX + 120f <= bounds.second + 0.01f)
+    }
+
+    /** 靠左放置时被右移到左边界。 */
+    @Test
+    fun `靠左放置时整体被右移收进边界`() {
+        val plan = planLabelLayout(
+            widths = listOf(80f),
+            gap = 0f,
+            ellipsisWidth = 10f,
+            anchorX = 10f,
+            alignCenter = false,
+            leftLimit = bounds.first,
+            rightLimit = bounds.second,
+        )
+        assertEquals(bounds.first, plan.startX, 0.01f)
+    }
+
+    /** 装不下时必须截断，并给省略号留出宽度。 */
+    @Test
+    fun `装不下时截断并留出省略号`() {
+        // 可用 300；4 段各 100（+gap 10×3）= 430 > 300
+        val plan = planLabelLayout(
+            widths = listOf(100f, 100f, 100f, 100f),
+            gap = 10f,
+            ellipsisWidth = 12f,
+            anchorX = 100f,
+            alignCenter = false,
+            leftLimit = bounds.first,
+            rightLimit = bounds.second,
+        )
+        assertTrue("必须截断", plan.truncated)
+        // 第 1 段 100 + 省略号 12 = 112 ≤ 300 ✓；再加第 2 段 110 ⇒ 222+12=234 ≤ 300 ✓；
+        // 再加第 3 段 110 ⇒ 332+12=344 > 300 ✗ ⇒ 保留 2 段
+        assertEquals(2, plan.keepCount)
+    }
+
+    /** 连一段都放不下时只画省略号（不能画出任何越界内容）。 */
+    @Test
+    fun `一段都放不下时只画省略号`() {
+        val plan = planLabelLayout(
+            widths = listOf(500f),
+            gap = 0f,
+            ellipsisWidth = 12f,
+            anchorX = 100f,
+            alignCenter = false,
+            leftLimit = bounds.first,
+            rightLimit = bounds.second,
+        )
+        assertEquals(0, plan.keepCount)
+        assertTrue("必须标记为截断（只余省略号）", plan.truncated)
+        assertTrue("省略号也要落在边界内", plan.startX >= bounds.first - 0.01f)
+    }
+
+    /** 边界无效（右 ≤ 左）时直接判为不可见，避免画到奇怪的位置。 */
+    @Test
+    fun `边界无效时不可见`() {
+        val plan = planLabelLayout(
+            widths = listOf(10f),
+            gap = 0f,
+            ellipsisWidth = 10f,
+            anchorX = 50f,
+            alignCenter = false,
+            leftLimit = 100f,
+            rightLimit = 100f,
+        )
+        assertTrue(!plan.visible)
+    }
+
+    @Test
+    fun `没有片段时不可见`() {
+        val plan = planLabelLayout(
+            widths = emptyList(),
+            gap = 0f,
+            ellipsisWidth = 10f,
+            anchorX = 50f,
+            alignCenter = true,
+            leftLimit = 0f,
+            rightLimit = 100f,
+        )
+        assertTrue(!plan.visible)
     }
 }

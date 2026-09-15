@@ -7,6 +7,7 @@ import android.graphics.DashPathEffect
 import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.PorterDuff
+import android.graphics.RectF
 import android.graphics.Typeface
 import com.example.lixing.domain.plot.MarkArea
 import com.example.lixing.domain.plot.MarkLine
@@ -62,6 +63,12 @@ class PlotBitmapRenderer(
      */
     private val texCache = HashMap<String, JLatexMathDrawable>()
 
+    /**
+     * 标签夹取边界（画布坐标）。绘制过程中会被临时收紧到**绘图区**，
+     * 保证图内的注释/标记标签不会画到图片外面。
+     */
+    private var labelBounds: RectF = RectF()
+
     private fun dp(v: Float) = v * density
 
     /**
@@ -78,6 +85,11 @@ class PlotBitmapRenderer(
      *
      * 公式排不出来（写法不合法）时**回落到纯文本**，绝不让绘图整体失败。
      * [alignCenter] 为 true 时 [x] 表示整段的中心，否则表示左边界；[baselineY] 是文字基线。
+     *
+     * **夹取**：标签会按 [labelBounds] 收进可视区——图内注释传 **绘图区** 边界，
+     * 于是贴着右边缘的注释不会画到图片外面去（用户反馈的「注释文字右侧溢出图片」）。
+     * 装不下时先**左移贴左边界**；连左对齐都装不下（标签比可视区还宽）才**截断加省略号**，
+     * 保证任何情况下都不会有文字画到边界之外。
      */
     private fun drawSmartText(
         canvas: Canvas,
@@ -90,19 +102,27 @@ class PlotBitmapRenderer(
     ) {
         val pieces = splitLabelPieces(raw)
         if (pieces.isEmpty()) return
-        val widths = pieces.map { pieceWidth(it, textSizePx) }
+        val bounds = labelBounds
         val gap = if (pieces.size > 1) dp(3f) else 0f
-        val total = widths.sum() + gap * (pieces.size - 1)
-        var cursorX = if (alignCenter) x - total / 2f else x
-        // 标签不许画到画布外：公式过长或度量异常时宁可贴边、右边被裁，
-        // 也不能整块跑到画布外面（历史上出现过「文字全挤在左上角」的观感）。
-        val leftLimit = dp(2f)
-        val rightLimit = canvas.width - dp(2f)
-        if (cursorX < leftLimit) cursorX = leftLimit
-        if (total <= rightLimit - leftLimit && cursorX + total > rightLimit) {
-            cursorX = rightLimit - total
-        }
-        pieces.forEachIndexed { index, piece ->
+
+        // 先按原始请求安排起点，再按可视宽度裁掉装不下的尾部片段。
+        // 决策部分抽成纯函数 [planLabelLayout]，便于在单测里精确验证
+        // （Robolectric 的 Paint.measureText 每字符恒返回 1px，无法用真实排版验证）。
+        val widths = pieces.map { pieceWidth(it, textSizePx) }
+        val plan = planLabelLayout(
+            widths = widths,
+            gap = gap,
+            ellipsisWidth = ellipsisWidth(textSizePx),
+            anchorX = x,
+            alignCenter = alignCenter,
+            leftLimit = bounds.left,
+            rightLimit = bounds.right,
+        )
+        if (!plan.visible) return
+        var cursorX = plan.startX
+
+        for (index in 0 until plan.keepCount) {
+            val piece = pieces[index]
             val w = widths[index]
             val latex = piece.latex
             val texWidth = if (latex != null) texWidthOrNull(latex, textSizePx) else null
@@ -126,9 +146,23 @@ class PlotBitmapRenderer(
             }
             cursorX += w + gap
         }
+        if (plan.truncated) {
+            drawPlainText(canvas, ELLIPSIS, cursorX, baselineY, textSizePx, color)
+        }
     }
 
-    /** 画一段纯文本（含 LaTeX 命令的 Unicode 降级）。 */
+    /** 省略号在给定字号下的宽度。 */
+    private fun ellipsisWidth(textSizePx: Float): Float {
+        textPaint.textSize = textSizePx
+        return textPaint.measureText(ELLIPSIS)
+    }
+
+    /**
+     * 画一段纯文本（含 LaTeX 命令的 Unicode 降级）。
+     *
+     * 这里也做一次夹取：单个片段本身很长时（一个不带 `$` 的超长中文串）
+     * 不会走上面的分段裁剪路径，画到边界外就再也裁不回来了。
+     */
     private fun drawPlainText(
         canvas: Canvas,
         raw: String,
@@ -139,7 +173,25 @@ class PlotBitmapRenderer(
     ) {
         textPaint.textSize = textSizePx
         textPaint.color = color
-        canvas.drawText(prettifyPlotLabel(raw), x, baselineY, textPaint)
+        val text = prettifyPlotLabel(raw)
+        if (text.isEmpty()) return
+        val bounds = labelBounds
+        val available = bounds.right - bounds.left
+        var draw = text
+        if (available > 0f) {
+            if (x + textPaint.measureText(draw) > bounds.right) {
+                // 二分出能放下的最长前缀（按字符切，末尾补省略号）
+                var lo = 0
+                var hi = draw.length
+                while (lo < hi) {
+                    val mid = (lo + hi + 1) / 2
+                    val candidate = draw.substring(0, mid) + ELLIPSIS
+                    if (x + textPaint.measureText(candidate) <= bounds.right) lo = mid else hi = mid - 1
+                }
+                draw = if (lo <= 0) ELLIPSIS else draw.substring(0, lo) + ELLIPSIS
+            }
+        }
+        canvas.drawText(draw, x, baselineY, textPaint)
     }
 
     /**
@@ -203,9 +255,8 @@ class PlotBitmapRenderer(
 
     /** 绘制入口（internal 便于测试注入记录型 Canvas 校验定位）。 */
     internal fun drawAll(canvas: Canvas, spec: PlotSpec, width: Float, height: Float) {
-        val titleSize = dp(15f)
-        val labelSize = dp(12.5f)
-        val tickSize = dp(11.5f)
+        // 整个画面的绘图范围：所有标签的默认夹取边界。
+        labelBounds = RectF(0f, 0f, width, height)
 
         // ---- 1. 采样：表达式与点集在这里汇合，之后只认点集 ----
         val sampled: List<List<Pair<Double, Double?>>> = spec.series.map { s ->
@@ -228,13 +279,27 @@ class PlotBitmapRenderer(
         val spanY = if (yHi - yLo == 0.0) 1.0 else yHi - yLo
 
         // ---- 3. 布局与坐标变换 ----
-        val padLeft = dp(62f)
-        val padRight = dp(18f)
+        // 边距的比例（相对画布宽/高），而不是固定 dp。
+        //
+        // 为什么不能用固定 dp：画布尺寸是**物理像素**（PlotImageStore 按屏宽的 92% 取，
+        // 典型 993×575），而 dp 会随 density 放大——2.75~3.0 的机器上光是左右内边距
+        // 就要吃掉 220~240px、上下再吃掉 300+px，绘图区只剩 ~750×250（约 3:1 的扁条）。
+        // 曲线被压成一条线，抛物线之类「要先看清形状」的图完全失真（用户反馈
+        // 「画图拉伸的度还是极端，高度和宽度都超出图片」）。改成按画布尺寸取比例后，
+        // 绘图区宽高比只由画布比例决定，与 density 无关。
+        val padLeft = width * LEFT_PAD_RATIO
+        val padRight = width * RIGHT_PAD_RATIO
         val hasLegend = spec.legend || spec.series.size > 1
         // 图例改到绘图区上方（标题下面），所以上边距要把它一并算进去
-        val padTop = (if (spec.title.isNotEmpty()) dp(42f) else dp(18f)) +
-            (if (hasLegend) dp(22f) else 0f)
-        val padBottom = dp(46f)
+        val padTop = height *
+            ((if (spec.title.isNotEmpty()) TITLE_BAND_RATIO else TOP_PAD_RATIO) +
+                (if (hasLegend) LEGEND_BAND_RATIO else 0f))
+        val padBottom = height * BOTTOM_PAD_RATIO
+        // 字号同样按画布缩放：画布是固定像素尺寸，用 dp 会在高 density 机器上
+        // 把标签顶到挤出画面。
+        val titleSize = width * 0.031f
+        val labelSize = width * 0.026f
+        val tickSize = width * 0.024f
         val plotX = padLeft
         val plotY = padTop
         val plotW = width - padLeft - padRight
@@ -247,6 +312,10 @@ class PlotBitmapRenderer(
         val yTicks = spec.y.ticks ?: niceTicks(yLo, yHi, 4)
 
         // ---- 4. markArea（垫在网格下面）----
+        // 图内注释统一夹在**绘图区**里：贴着右边缘的注释不会再横穿到图片外面
+        // （用户反馈「注释文字右侧溢出图片」）。
+        val plotSave = canvas.save()
+        labelBounds = RectF(plotX, plotY, plotX + plotW, plotY + plotH)
         for (area in spec.markAreas) {
             val a0 = sx(area.x0)
             val a1 = sx(area.x1)
@@ -256,9 +325,11 @@ class PlotBitmapRenderer(
             area.label?.let {
                 // 图内文字可能是 LaTeX（模型常写 $B$、\Delta f），交给 drawSmartText 自动排版
                 // 画在区域内部靠上，并与 markLine 标签错开高度，避免叠字
-                drawSmartText(canvas, it, (a0 + a1) / 2, plotY + dp(30f), tickSize, theme.subText, alignCenter = true)
+                drawSmartText(canvas, it, (a0 + a1) / 2, plotY + height * 0.058f, tickSize, theme.subText, alignCenter = true)
             }
         }
+        canvas.restoreToCount(plotSave)
+        labelBounds = RectF(0f, 0f, width, height)
 
         // ---- 5. 网格 ----
         linePaint.color = theme.grid
@@ -313,34 +384,57 @@ class PlotBitmapRenderer(
         if (yRange.foldedLow) drawAxisBreak(canvas, plotX, plotY + plotH - dp(9f))
 
         // ---- 8. 刻度与标签 ----
+        // 刻度文字夹在**画布**内（它们本来就在绘图区外、贴着轴排布），
+        // 但要留出底部/左侧的固定余量，避免被裁掉半个字。
+        val tickBottomLimit = height - height * 0.012f
         for (t in xTicks) {
             val raw = spec.x.tickLabels[t] ?: formatTick(t)
-            drawSmartText(canvas, raw, sx(t), plotY + plotH + dp(17f), tickSize, theme.subText, alignCenter = true)
+            drawSmartText(canvas, raw, sx(t), min(plotY + plotH + height * 0.038f, tickBottomLimit), tickSize, theme.subText, alignCenter = true)
         }
         for (t in yTicks) {
             val raw = spec.y.tickLabels[t] ?: formatTick(t)
             // 右对齐：以 (plotX - 8dp) 为右边界
             val w = smartTextWidth(raw, tickSize)
-            drawSmartText(canvas, raw, plotX - dp(8f) - w, sy(t) + dp(4f), tickSize, theme.subText)
+            drawSmartText(canvas, raw, plotX - width * 0.012f - w, sy(t) + tickSize * 0.36f, tickSize, theme.subText)
         }
 
         // ---- 9. 轴标题 ----
         val xLabel = spec.x.label
         if (xLabel.isNotEmpty()) {
-            drawSmartText(canvas, xLabel, plotX + plotW / 2, height - dp(10f), labelSize, theme.text, alignCenter = true)
+            drawSmartText(canvas, xLabel, plotX + plotW / 2, height - height * 0.022f, labelSize, theme.text, alignCenter = true)
         }
         if (spec.y.label.isNotEmpty()) {
             val withUnit = if (spec.y.unit.isNotEmpty()) "${spec.y.label} (${spec.y.unit})" else spec.y.label
-            val w = smartTextWidth(withUnit, labelSize)
-            canvas.save()
-            canvas.rotate(-90f, dp(14f), plotY + plotH / 2)
-            drawSmartText(canvas, withUnit, dp(14f) - w / 2, plotY + plotH / 2 + labelSize / 3, labelSize, theme.text)
-            canvas.restore()
+            val axisX = width * 0.018f
+            val axisCenterY = plotY + plotH / 2
+            // 竖排轴标题：先把文字沿 y 轴的**可用长度**（绘图区高度）当作横向限额，
+            // 在未旋转的坐标系里截断，再整体旋转 -90°。
+            // 这样不必去推「旋转后坐标 → 原坐标」的映射，逻辑与横排标签完全一致：
+            // 用 planLabelLayout 拿到「保留几段、起点在哪」，然后照常绘制即可。
+            val save = canvas.save()
+            canvas.rotate(-90f, axisX, axisCenterY)
+            labelBounds = RectF(
+                axisCenterY - plotH / 2,
+                axisX,
+                axisCenterY + plotH / 2,
+                axisX + plotH,
+            )
+            drawSmartText(
+                canvas,
+                withUnit,
+                axisCenterY,
+                axisX + labelSize * 0.34f,
+                labelSize,
+                theme.text,
+                alignCenter = true,
+            )
+            labelBounds = RectF(0f, 0f, width, height)
+            canvas.restoreToCount(save)
         }
 
         // ---- 10. 标题 ----
         if (spec.title.isNotEmpty()) {
-            drawSmartText(canvas, spec.title, width / 2, dp(26f), titleSize, theme.text, alignCenter = true)
+            drawSmartText(canvas, spec.title, width / 2, height * 0.052f, titleSize, theme.text, alignCenter = true)
         }
 
         // ---- 11. markLine ----
@@ -352,28 +446,39 @@ class PlotBitmapRenderer(
             canvas.drawLine(sx(x), plotY, sx(x), plotY + plotH, linePaint)
             linePaint.pathEffect = null
             line.label?.let {
-                // 放进绘图区顶部：绘图区上方已经让给图例了，放外面会叠在一起
-                drawSmartText(canvas, it, sx(x), plotY + dp(13f), tickSize, theme.subText, alignCenter = true)
+                // 放进绘图区顶部：绘图区上方已经让给图例了，放外面会叠在一起。
+                // 夹在绘图区内，贴边的标记标签不会横穿到图片外面。
+                val save = canvas.save()
+                labelBounds = RectF(plotX, plotY, plotX + plotW, plotY + plotH)
+                drawSmartText(canvas, it, sx(x), plotY + height * 0.025f, tickSize, theme.subText, alignCenter = true)
+                canvas.restoreToCount(save)
+                labelBounds = RectF(0f, 0f, width, height)
             }
         }
 
         // ---- 12. 图例：横排在标题下方、绘图区之外 ----
         // 早先画在绘图区内部左上角，会被曲线压住（左右对称的谱线尤其明显）。
         if (hasLegend) {
-            val legendY = plotY - dp(8f)
+            val legendY = plotY - height * 0.015f
             var xx = plotX
             spec.series.forEach { s ->
                 val label = s.label
                 if (prettifyPlotLabel(label).isEmpty()) return@forEach
-                val itemWidth = dp(26f) + smartTextWidth(label, tickSize) + dp(14f)
+                val swatchW = width * 0.021f
+                val itemWidth = swatchW + smartTextWidth(label, tickSize) + width * 0.013f
                 // 排不下就不再画，绝不让图例伸出画布被裁成半截
-                if (xx + itemWidth > plotX + plotW + dp(16f)) return@forEach
+                if (xx + itemWidth > plotX + plotW + width * 0.014f) return@forEach
                 val color = theme.seriesColors[s.colorIndex % theme.seriesColors.size]
                 linePaint.color = color
                 linePaint.strokeWidth = dp(2f)
                 linePaint.pathEffect = null
-                canvas.drawLine(xx, legendY - dp(4f), xx + dp(20f), legendY - dp(4f), linePaint)
-                drawSmartText(canvas, label, xx + dp(24f), legendY, tickSize, theme.subText)
+                canvas.drawLine(xx, legendY - height * 0.008f, xx + swatchW * 0.78f, legendY - height * 0.008f, linePaint)
+                // 图例项也要夹取：最后一个图例项贴着右边界时不能画出去
+                val save = canvas.save()
+                labelBounds = RectF(plotX, plotY - height * 0.06f, plotX + plotW + width * 0.014f, plotY)
+                drawSmartText(canvas, label, xx + swatchW * 0.95f, legendY, tickSize, theme.subText)
+                canvas.restoreToCount(save)
+                labelBounds = RectF(0f, 0f, width, height)
                 xx += itemWidth
             }
         }
@@ -485,6 +590,94 @@ internal data class LabelPiece(val text: String = "", val latex: String? = null)
 
 /** 公式宽度的可信上限（按字号计）：超过这么多 em 说明度量不可信，回落纯文本。 */
 private const val MAX_TEX_WIDTH_EM = 40f
+
+/**
+ * 布局比例（相对**画布**宽/高）。
+ *
+ * 这些值取代了原先的固定 dp——画布尺寸来自物理像素，dp 会随 density 放大，
+ * 在高密度屏上会把绘图区压成扁条（详见 `drawAll` 里的注释）。
+ * 取值参照常见出版物的图表比例：左右总计约 10% 宽、底部约 12% 高，
+ * 让绘图区稳定落在 1.5~1.8 : 1，既能看清抛物线的弯曲、也不至于把横向刻度挤掉。
+ */
+private const val LEFT_PAD_RATIO = 0.082f
+private const val RIGHT_PAD_RATIO = 0.028f
+private const val TOP_PAD_RATIO = 0.055f
+private const val TITLE_BAND_RATIO = 0.085f
+private const val LEGEND_BAND_RATIO = 0.048f
+private const val BOTTOM_PAD_RATIO = 0.125f
+
+/** 标签被夹取到装不下时的省略号。 */
+private const val ELLIPSIS = "…"
+
+/**
+ * 一段标签的落位方案（由 [planLabelLayout] 纯函数算出）。
+ *
+ * @param keepCount 实际画出的前几个片段（0 表示一个片段都放不下）
+ * @param startX    第一个片段的起点（已夹在 [leftLimit]..[rightLimit] 内）
+ * @param truncated 是否被截断（调用方据此在末尾补省略号）
+ * @param visible    是否有任何内容可画（false 时调用方直接跳过）
+ */
+internal data class LabelPlan(
+    val keepCount: Int,
+    val startX: Float,
+    val truncated: Boolean,
+    val visible: Boolean,
+)
+
+/**
+ * 规划一段标签的落位：**把内容收进 `[leftLimit, rightLimit]`**，装不下就截断。
+ *
+ * 抽成纯函数的原因：这里全是几何决策，与绘图 API 无关，可以精确单测；
+ * 而真机之外的环境（Robolectric）`Paint.measureText` 每字符恒返回 1px，
+ * 根本量不出真实宽度 ⇒ 任何基于像素的断言都是假绿。
+ *
+ * 规则（按优先级）：
+ * 1. 全部片段都装得下 → 原样画，起点按 [alignCenter] 居中或取 [anchorX]，
+ *    随后把整体夹进边界（先贴左，再贴右）；
+ * 2. 装不下 → 从左往右保留能装下的片段，**给省略号留出宽度**；
+ * 3. 连一个片段 + 省略号都放不下 → 只画省略号；
+ * 4. 边界无效（right ≤ left）→ 视为不可见，调用方跳过（防止画到奇怪的位置）。
+ */
+internal fun planLabelLayout(
+    widths: List<Float>,
+    gap: Float,
+    ellipsisWidth: Float,
+    anchorX: Float,
+    alignCenter: Boolean,
+    leftLimit: Float,
+    rightLimit: Float,
+): LabelPlan {
+    if (widths.isEmpty()) return LabelPlan(0, anchorX, truncated = false, visible = false)
+    val available = rightLimit - leftLimit
+    if (available <= 0f) return LabelPlan(0, anchorX, truncated = false, visible = false)
+
+    val fullWidth = widths.sum() + gap * (widths.size - 1)
+    var keepCount = widths.size
+    var total = fullWidth
+    var truncated = false
+    if (fullWidth > available) {
+        truncated = true
+        var acc = 0f
+        var keep = 0
+        for (i in widths.indices) {
+            val add = widths[i] + if (i == 0) 0f else gap
+            if (acc + add + ellipsisWidth <= available) {
+                acc += add
+                keep = i + 1
+            } else {
+                break
+            }
+        }
+        keepCount = keep
+        total = if (keep == 0) ellipsisWidth else acc + ellipsisWidth
+    }
+
+    var startX = if (alignCenter) anchorX - total / 2f else anchorX
+    if (startX < leftLimit) startX = leftLimit
+    if (startX + total > rightLimit) startX = rightLimit - total
+    if (startX < leftLimit) startX = leftLimit
+    return LabelPlan(keepCount, startX, truncated, visible = true)
+}
 
 /**
  * 坐标范围（可带折叠标记）。

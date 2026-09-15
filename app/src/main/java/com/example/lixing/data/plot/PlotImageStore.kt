@@ -36,7 +36,10 @@ class PlotImageStore @Inject constructor(
     fun render(spec: PlotSpec): String? {
         val metrics = context.resources.displayMetrics
         val widthPx = (metrics.widthPixels * 0.92f).toInt().coerceIn(600, 1600)
-        val heightPx = (widthPx * 0.58f).toInt()
+        // 高度比：0.58 会让绘图区更扁（适合看趋势），但对「抛物线/谐波谱」这类
+        // 需要同时看清弯曲与幅度的图偏紧。0.66 时绘图区稳定落在约 1.5:1，
+        // 曲线形状与刻度密度都有余量（用户反馈「高度和宽度都超出图片」）。
+        val heightPx = (widthPx * PLOT_HEIGHT_RATIO).toInt()
         val file = File(plotsDir, "${cacheKey(spec, widthPx, heightPx)}.png")
         // 缓存命中：文件还在且非空
         if (file.exists() && file.length() > 0) return file.absolutePath
@@ -73,5 +76,8 @@ class PlotImageStore @Inject constructor(
 
     private companion object {
         const val TAG = "PlotImageStore"
+
+        /** 画布高宽比：绘图区纵横比由此与渲染器的内边距比例共同决定。 */
+        const val PLOT_HEIGHT_RATIO = 0.66f
     }
 }

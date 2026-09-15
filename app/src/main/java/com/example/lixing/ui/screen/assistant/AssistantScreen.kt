@@ -1775,25 +1775,34 @@ internal fun MarkdownChunk(content: String, fixedWidthPx: Int?, selectable: Bool
         Modifier
     }
 
-    AndroidView(
-        modifier = widthModifier.then(heightModifier).onSizeChanged { widthPx = it.width },
-        factory = { context ->
-            createMarkdownTextView(context, textColor, linkColor, selectable = selectable)
-        },
-        update = { view ->
-            host = view
-            // 内容/宽度/配色没变就不重复 setMarkdown：LazyColumn 的重组（滚动、状态变化）
-            // 会反复调用 update，而每次 setMarkdown 都会把公式 span 重置成待加载状态、
-            // 重新排队异步渲染——白费算力，还会让公式短暂缩回 0 高。
-            val renderKey = "$content|$renderWidthPx|$textColor|$linkColor"
-            if (view.getTag(R.id.markdown_render_key) != renderKey) {
-                view.setTag(R.id.markdown_render_key, renderKey)
-                renderMarkdown(view, content, renderWidthPx, textColor, linkColor)
-            }
-            val measured = view.measuredHeightCompat(renderWidthPx)
-            if (measured > 0) measuredHeight = measured
-        },
-    )
+    // clipToBounds 是**交互正确性**的一部分，不只是观感：
+    // 这里装的是一个真实 Android 视图（interop holder），它并不保证裁剪子视图。
+    // 一旦这个 TextView 的实际内容比 Compose 给它的格位高（公式异步加载后变高、
+    // 或高度上报值陈旧），多出来的部分就会画到格位之外，压在**下一个兄弟节点
+    // （通常是生成的图片）**上面，而那是一个 clickable + selectable 的真实视图 ⇒
+    // 它会把本该落在图片上的触摸先吃掉，表现为「只有第一张图能点开」。
+    // 显式裁剪后，溢出部分既不显示也不参与命中测试。
+    Box(modifier = Modifier.clipToBounds()) {
+        AndroidView(
+            modifier = widthModifier.then(heightModifier).onSizeChanged { widthPx = it.width },
+            factory = { context ->
+                createMarkdownTextView(context, textColor, linkColor, selectable = selectable)
+            },
+            update = { view ->
+                host = view
+                // 内容/宽度/配色没变就不重复 setMarkdown：LazyColumn 的重组（滚动、状态变化）
+                // 会反复调用 update，而每次 setMarkdown 都会把公式 span 重置成待加载状态、
+                // 重新排队异步渲染——白费算力，还会让公式短暂缩回 0 高。
+                val renderKey = "$content|$renderWidthPx|$textColor|$linkColor"
+                if (view.getTag(R.id.markdown_render_key) != renderKey) {
+                    view.setTag(R.id.markdown_render_key, renderKey)
+                    renderMarkdown(view, content, renderWidthPx, textColor, linkColor)
+                }
+                val measured = view.measuredHeightCompat(renderWidthPx)
+                if (measured > 0) measuredHeight = measured
+            },
+        )
+    }
 }
 
 /** 内容里可能出现异步渲染的 LaTeX（`$…$` / `$$…$$`）时为 true。 */
@@ -1831,7 +1840,16 @@ internal fun createMarkdownTextView(
         // + setLongClickable(true)，把 TextView 变成一个「点击可聚焦」的 View。在真机的
         // 触摸管线上，这类 View 有可能先于父级手势吃掉触摸事件，让外层的横向滚动拖不动。
         // 表格以「读 + 横向拖动」为主，牺牲单元格内的长按选中是划算的。
-        if (selectable) setTextIsSelectable(true)
+        if (selectable) {
+            setTextIsSelectable(true)
+            // setTextIsSelectable(true) 顺带打开的 clickable 是**纯粹的副作用**：
+            // 我们并不需要「点文字」这件事，但它的存在会让整块文字区域成为一个
+            // 抢占触摸的落点——一旦这块文字的真实高度溢出 Compose 给的格位，
+            // 溢出的那条带子会把本该落到下方图片上的触摸先吃掉（用户反复反馈的
+            // 「只有回答气泡第一张图能点开」）。这里把它关掉，长按选中/复制不受影响。
+            isClickable = false
+            isFocusable = false
+        }
         movementMethod = LinkMovementMethod.getInstance()
         textSize = 17f
         val fallbackSizePx = 14f * resources.displayMetrics.scaledDensity
