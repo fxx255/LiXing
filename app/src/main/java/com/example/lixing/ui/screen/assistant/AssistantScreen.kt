@@ -152,6 +152,7 @@ import io.noties.markwon.Markwon
 import ru.noties.jlatexmath.JLatexMathDrawable
 import io.noties.markwon.ext.latex.JLatexMathPlugin
 import io.noties.markwon.ext.tables.TablePlugin
+import io.noties.markwon.ext.tables.TableTheme
 import io.noties.markwon.inlineparser.MarkwonInlineParserPlugin
 import android.graphics.Canvas
 import android.graphics.ColorFilter
@@ -1700,7 +1701,14 @@ internal fun MarkdownAnswer(content: String) {
                     ) {
                         // selectable=false：见 createMarkdownTextView 内注释。
                         // 表格块交给外层滚动处理手势，TextView 自己不参与触摸消费。
-                        MarkdownChunk(chunk.text, fixedWidthPx = tableWidthPx, selectable = false)
+                        // isTableBlock=true：表格行高必须等「首帧绘制 + 强制重排」后才算得出来，
+                        // 需要走专门的高度复测流程（见 MarkdownChunk）。
+                        MarkdownChunk(
+                            chunk.text,
+                            fixedWidthPx = tableWidthPx,
+                            selectable = false,
+                            isTableBlock = true,
+                        )
                     }
                 }
             }
@@ -1719,7 +1727,12 @@ internal fun MarkdownAnswer(content: String) {
  * 所以这里在内容变化后主动把 `view.height` 报给 Compose（wrap_content 量出的真实高度）。
  */
 @Composable
-internal fun MarkdownChunk(content: String, fixedWidthPx: Int?, selectable: Boolean = true) {
+internal fun MarkdownChunk(
+    content: String,
+    fixedWidthPx: Int?,
+    selectable: Boolean = true,
+    isTableBlock: Boolean = false,
+) {
     val textColor = MaterialTheme.colorScheme.onSurface.toArgb()
     val linkColor = MaterialTheme.colorScheme.primary.toArgb()
     // 实测宽度。公式是按「当前可用宽度」拆分的，宽度一变（旋转、平板横屏、分屏）
@@ -1738,27 +1751,49 @@ internal fun MarkdownChunk(content: String, fixedWidthPx: Int?, selectable: Bool
         // wrap_content 的真实高度：宽度已被 widthModifier 约束好，直接量即可
         var measured = view.measuredHeightCompat(renderWidthPx)
         if (measured > 0) measuredHeight = measured
-        // 公式是**异步**渲染的（JLatexMathPlugin 的 placeholder() 返回 null，
-        // 后台线程算完才通过 Handler 回主线程 setResult）。setMarkdown 返回时量到的高度
-        // 缺了所有公式的高度；等公式就绪，插件会用 setText(同文本) 强制重排、内容变高。
-        // 若不跟着更新，框高就一直停在当初那个偏小的值 ⇒ 内容比框高 ⇒
-        // LinkMovementMethod（继承 ScrollingMovementMethod）允许在框内**拖动文字**，
-        // 表现为「上下滑动时文字在气泡内上下位移，头尾交替被挡」。
-        // 这里持续复测到高度稳定为止，把最终真实高度报给 Compose。
-        if (!mayRenderLatex(content)) return@LaunchedEffect
+        // 表格块：行高必须「等绘制完 + 强制重排」之后才算得出来。
+        //
+        // 根因（反编译 TableRowSpan 确认）：每行高度 = max(各单元格 Layout 高度) + 2×padding，
+        // 而这个高度只在 getSize() 里被写回。若此时内部的 `layouts` 列表还是空的
+        // （layouts 只在首次 **绘制** 时才按可用宽度填充），getSize() 就**不写 FontMetricsInt**
+        // ⇒ 整行被当成 0 高 ⇒ 表格高度被量成接近 0，我们就把这个偏小的值报给了 Compose。
+        // 更麻烦的是：Android 会复用已建好的 Layout，宽度和文本都没变时**不会重算** ——
+        // 探针实测「首次绘制后再 measure」高度依旧是偏小值（111），只有显式
+        // setText(getText()) 触发重建后才变成真实高度（143，每行 35）。
+        // 这正是「表格高度不足 → 内容溢出 → 能在表格里上下拖动」的完整链条。
+        //
+        // 重排放在轮询循环里**按需补发**，而不是入口处写死几帧：首帧绘制的确切时刻无法预知，
+        // 固定延时可能整段跑在绘制之前、白排一场。这里只要发现「高度连续几轮没变」就再逼一次
+        // 重排，直到高度变化、用尽 [TABLE_REPOLL_MAX] 次、或最终稳定。
+        //
+        // 公式则是**异步**渲染的（JLatexMathPlugin 的 placeholder() 返回 null，后台线程算完
+        // 才通过 Handler 回主线程 setResult）。setMarkdown 返回时量到的高度缺了所有公式的高度；
+        // 等公式就绪，插件会用 setText(同文本) 强制重排、内容变高。两类内容都要复测到稳定为止。
+        if (!isTableBlock && !mayRenderLatex(content)) return@LaunchedEffect
         var stablePolls = 0
+        var tableRepolls = 0
         repeat(HEIGHT_POLL_MAX_POLLS) {
             delay(HEIGHT_POLL_INTERVAL_MS)
             val latest = view.measuredHeightCompat(renderWidthPx)
             if (latest > 0 && latest != measured) {
                 measured = latest
                 measuredHeight = latest
-                // 高度一变就复位内部滚动，清掉公式加载窗口里可能被拖出来的偏移
+                // 高度一变就复位内部滚动，清掉加载窗口里可能被拖出来的偏移
                 view.scrollTo(0, 0)
                 stablePolls = 0
-            } else if (++stablePolls >= HEIGHT_STABLE_POLLS) {
-                return@LaunchedEffect
+                return@repeat
             }
+            stablePolls++
+            if (isTableBlock &&
+                stablePolls >= TABLE_REPOLL_AFTER_STABLE_POLLS &&
+                tableRepolls < TABLE_REPOLL_MAX
+            ) {
+                tableRepolls++
+                stablePolls = 0
+                runCatching { view.setText(view.text) }
+                return@repeat
+            }
+            if (stablePolls >= HEIGHT_STABLE_POLLS) return@LaunchedEffect
         }
     }
 
@@ -1808,10 +1843,19 @@ internal fun MarkdownChunk(content: String, fixedWidthPx: Int?, selectable: Bool
 /** 内容里可能出现异步渲染的 LaTeX（`$…$` / `$$…$$`）时为 true。 */
 internal fun mayRenderLatex(content: String): Boolean = content.contains('$')
 
-/** 公式异步渲染的复测节奏：每 100ms 量一次，连续 5 次不变即认定稳定，最多 30 次（约 3 秒）。 */
+/**
+ * 高度复测节奏：每 100ms 量一次，连续 5 次不变即认定稳定，最多 30 次（约 3 秒）。
+ * 公式（异步渲染）与表格（行高依赖「绘制后才填充」的内部 layouts）的高度都是「后到」的。
+ */
 private const val HEIGHT_POLL_INTERVAL_MS = 100L
 private const val HEIGHT_STABLE_POLLS = 5
 private const val HEIGHT_POLL_MAX_POLLS = 30
+
+/** 表格块：高度连续这么多轮没变，就再补一次强制重排（见 [MarkdownChunk] 里的根因注释）。 */
+private const val TABLE_REPOLL_AFTER_STABLE_POLLS = 2
+
+/** 表格块强制重排的次数上限，避免与 Markwon 自身的调度互相拉扯。 */
+private const val TABLE_REPOLL_MAX = 8
 
 /**
  * 量出 TextView 在给定宽度下 wrap_content 的真实高度（像素）。
@@ -1825,6 +1869,30 @@ private fun TextView.measuredHeightCompat(widthPx: Int): Int {
     val heightSpec = View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED)
     measure(widthSpec, heightSpec)
     return measuredHeight
+}
+
+/** 表格单元格内边距（dp）。Markwon 默认 4dp，这里收紧一档让单元格更紧凑。 */
+private const val TABLE_CELL_PADDING_DP = 2
+
+/**
+ * 表格主题：在 Markwon 默认值之上**只改单元格内边距**。
+ *
+ * 默认内边距来自 `TableTheme.buildWithDefaults` 的 `Dip.toPx(4)` = 4dp，
+ * 而行高公式是「单元格内容高 + 2 × padding」（反编译 `TableRowSpan.getSize` 确认）。
+ * 于是 density 3 的真机上，每行光上下内边距就吃掉 24px —— 文字很少的表格也会显得很空，
+ * 还会把内容顶得显示不下。收紧到 [TABLE_CELL_PADDING_DP]。
+ *
+ * 注意必须从 [TableTheme.create] 的默认值出发（`asBuilder()`），
+ * **不能**改用 `TablePlugin.create { }`：那个入口内部走的是 `emptyBuilder()`，
+ * 会把边框宽度/颜色、奇偶行底色一起丢成 0。
+ */
+internal fun tableThemeFor(context: Context): TableTheme {
+    val paddingPx = (TABLE_CELL_PADDING_DP * context.resources.displayMetrics.density)
+        .toInt()
+        .coerceAtLeast(1)
+    return TableTheme.create(context).asBuilder()
+        .tableCellPadding(paddingPx)
+        .build()
 }
 
 internal fun createMarkdownTextView(
@@ -1849,13 +1917,21 @@ internal fun createMarkdownTextView(
             // 「只有回答气泡第一张图能点开」）。这里把它关掉，长按选中/复制不受影响。
             isClickable = false
             isFocusable = false
+            movementMethod = LinkMovementMethod.getInstance()
+        } else {
+            // 表格块：**不给任何 MovementMethod**。
+            // LinkMovementMethod 继承 ScrollingMovementMethod，只要表格内容比格位高，
+            // 用户就能在表格里上下拖动文字，和页面的纵向滚动直接打架（用户反馈
+            // 「表格上下拖动与整个页面上下滚动冲突」）。表格的横向滚动由外层 Compose 的
+            // horizontalScroll 负责，纵向完全交给页面；单元格内既不需要滚动也不需要选中，
+            // 所以这里留空最干净，也从根上杜绝「表格自己滚」这件事。
+            movementMethod = null
         }
-        movementMethod = LinkMovementMethod.getInstance()
         textSize = 17f
         val fallbackSizePx = 14f * resources.displayMetrics.scaledDensity
         val renderer = Markwon.builder(context)
             .usePlugin(MarkwonInlineParserPlugin.create())
-            .usePlugin(TablePlugin.create(context))
+            .usePlugin(TablePlugin.create(tableThemeFor(context)))
             .usePlugin(
                 JLatexMathPlugin.create(this.textSize) { builder ->
                     builder.inlinesEnabled(true)
