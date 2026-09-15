@@ -341,7 +341,9 @@ object AssistantResponseParser {
             tickLabels = (obj["tickLabels"] as? JsonObject)?.mapNotNull { (key, value) ->
                 val tick = key.toDoubleOrNull() ?: return@mapNotNull null
                 val text = (value as? JsonPrimitive)?.contentOrNull ?: return@mapNotNull null
-                tick to text.take(16)
+                // 上限 24：刻度文案本来就该短，但也要容得下 `$N_0(2\pi f_c)^2$` 这类
+                // 带 LaTeX 定界符的写法（16 字符会把公式从中间截断，渲染出来是残缺的）
+                tick to text.take(24)
             }?.toMap().orEmpty(),
         )
     }

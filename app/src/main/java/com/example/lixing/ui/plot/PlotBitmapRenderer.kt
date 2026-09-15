@@ -758,17 +758,35 @@ private fun quantile(sorted: List<Double>, p: Double): Double {
 }
 
 /**
- * 保守的坐标范围：**保证覆盖 [dataLo]..[dataHi]，模型给的范围只在更宽时生效**。
+ * x 轴（定义域）的坐标范围：以模型声明的区间为准，点集不得越出视野，**且两端要留少量边距**。
  *
- * 专用于 x 轴（定义域）：以模型声明的区间为准，但点集不得越出视野被画到框外。
- * y 轴请用 [balancedRange]（带离群点折叠与边距）。
+ * 为什么必须留边距：这里返回的范围就是绘图区的横轴跨度。如果只取「数据范围 ∪ 模型范围」，
+ * 曲线的首末点必然正好落在绘图区左右边框上 —— 视觉上就像整张图被从中间切断
+ * （用户反馈「左右看上去还是截断的，没有画出完整的图像」，实际是端点贴框而非数据缺失）。
+ * 留一点边距后曲线两端都落在框内，形状才完整可读。
+ *
+ * 只在「数据确实贴到该侧边界」时才外扩：这样模型本来就给了宽松窗口时不会被再撑大一圈。
  */
 internal fun conservativeRange(
     dataLo: Double,
     dataHi: Double,
     specLo: Double?,
     specHi: Double?,
-): Pair<Double, Double> = minOf(specLo ?: dataLo, dataLo) to maxOf(specHi ?: dataHi, dataHi)
+    marginRatio: Double = X_MARGIN_RATIO,
+): Pair<Double, Double> {
+    var lo = minOf(specLo ?: dataLo, dataLo)
+    var hi = maxOf(specHi ?: dataHi, dataHi)
+    val span = hi - lo
+    if (span <= 0.0 || !span.isFinite()) return lo to hi
+    val pad = span * marginRatio
+    val eps = span * 1e-6
+    if (dataLo <= lo + eps) lo -= pad
+    if (dataHi >= hi - eps) hi += pad
+    return lo to hi
+}
+
+/** x 轴两端的最小留白比例（相对横轴跨度）。 */
+internal const val X_MARGIN_RATIO = 0.04
 
 /** `$...$` / `$$...$$` 分组（非贪婪，取第一对定界符之间的内容）。 */
 private val DOLLAR_LATEX_GROUP = Regex("""\$\$?(.+?)\$\$?""")

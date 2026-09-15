@@ -112,35 +112,46 @@ class PlotLabelLayoutTest {
         assertTrue(!containsCjk("S_c(f) = 2B"))
     }
 
-    // ---------- 保守坐标范围 ----------
+    // ---------- x 轴坐标范围（覆盖数据 + 两端留白） ----------
 
     @Test
-    fun `模型范围恰好等于数据时被边距撑开`() {
-        // 数据实际是 0..1，autoRange 已给出 -0.08..1.08；模型给 0..1 不能裁剪它
+    fun `数据贴到边界时两端都留出边距`() {
+        // 数据是 -0.08..1.08，模型给的 0..1 更窄 ⇒ 视野由数据决定；
+        // 此时曲线首末点正好等于视野边界，必须外扩留白，否则看起来就像图被切断
         val (lo, hi) = conservativeRange(-0.08, 1.08, 0.0, 1.0)
-        assertEquals(-0.08, lo, 1e-9)
-        assertEquals(1.08, hi, 1e-9)
+        assertTrue("左端要外扩到数据之外：$lo", lo < -0.08)
+        assertTrue("右端要外扩到数据之外：$hi", hi > 1.08)
+        val pad = (1.08 - (-0.08)) * X_MARGIN_RATIO
+        assertEquals(-0.08 - pad, lo, 1e-9)
+        assertEquals(1.08 + pad, hi, 1e-9)
     }
 
     @Test
-    fun `模型范围更宽时保留模型视野`() {
+    fun `模型范围更宽且数据不贴边时原样保留`() {
         val (lo, hi) = conservativeRange(-0.08, 1.08, -5.0, 5.0)
-        assertEquals(-5.0, lo, 1e-9)
-        assertEquals(5.0, hi, 1e-9)
+        assertEquals("模型视野本来就宽松，不该再撑大", -5.0, lo, 1e-9)
+        assertEquals("模型视野本来就宽松，不该再撑大", 5.0, hi, 1e-9)
     }
 
     @Test
-    fun `模型范围比数据更窄时扩展到覆盖数据`() {
+    fun `模型范围比数据更窄时扩展到覆盖数据并留白`() {
         val (lo, hi) = conservativeRange(-0.08, 1.08, 0.5, 0.6)
-        assertEquals(-0.08, lo, 1e-9)
-        assertEquals(1.08, hi, 1e-9)
+        assertTrue("必须覆盖数据本身：$lo", lo < -0.08)
+        assertTrue("必须覆盖数据本身：$hi", hi > 1.08)
     }
 
     @Test
-    fun `没有模型范围时用数据范围`() {
+    fun `没有模型范围时用数据范围并留白`() {
         val (lo, hi) = conservativeRange(-0.08, 1.08, null, null)
-        assertEquals(-0.08, lo, 1e-9)
-        assertEquals(1.08, hi, 1e-9)
+        assertTrue(lo < -0.08)
+        assertTrue(hi > 1.08)
+    }
+
+    @Test
+    fun `跨度为零时不产生 NaN 或负边距`() {
+        val (lo, hi) = conservativeRange(2.0, 2.0, null, null)
+        assertEquals(2.0, lo, 1e-9)
+        assertEquals(2.0, hi, 1e-9)
     }
 
     // ---------- 平衡坐标范围（主体完整 + 边距 + 极端点折叠） ----------

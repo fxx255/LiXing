@@ -1768,20 +1768,32 @@ internal fun MarkdownChunk(
         //
         // 公式则是**异步**渲染的（JLatexMathPlugin 的 placeholder() 返回 null，后台线程算完
         // 才通过 Handler 回主线程 setResult）。setMarkdown 返回时量到的高度缺了所有公式的高度；
-        // 等公式就绪，插件会用 setText(同文本) 强制重排、内容变高。两类内容都要复测到稳定为止。
+        // 等公式就绪，插件会用 setText(同文本) 强制重排、内容变高。两类内容都要盯着。
         if (!isTableBlock && !mayRenderLatex(content)) return@LaunchedEffect
+        val deadline = System.currentTimeMillis() + HEIGHT_WATCH_WINDOW_MS
         var stablePolls = 0
         var tableRepolls = 0
-        repeat(HEIGHT_POLL_MAX_POLLS) {
-            delay(HEIGHT_POLL_INTERVAL_MS)
+        while (System.currentTimeMillis() < deadline) {
+            // 高度稳定后不退出，只把频率降到「心跳」档：大矩阵这类公式算得慢
+            // （JLatexMath 单条就要几百 ms，几个矩阵叠一起可能超过 3 秒），
+            // 早退会让它在退出后才变高，于是内容溢出格位。
+            delay(if (stablePolls >= HEIGHT_STABLE_POLLS) HEIGHT_HEARTBEAT_MS else HEIGHT_POLL_INTERVAL_MS)
             val latest = view.measuredHeightCompat(renderWidthPx)
-            if (latest > 0 && latest != measured) {
+            // ★ 只增不减：单次渲染内，高度只允许往上走。
+            //
+            // 这是因为「宁可有几像素空白，也绝不能让内容溢出格位」——
+            // 这里装的是真实 Android 视图，而 Compose 的 clipToBounds 只能裁剪
+            // Compose 自己的绘制与命中测试，**管不住真实 View 的触摸命中**：
+            // 一旦这个 TextView 实际比 Compose 给的格位高，溢出的那条带子会盖在
+            // 下一张生成的图片上，把本该落到图片上的触摸先吃掉
+            // （用户反馈的「前两张图能点开、第三张点不开」就是这个机制）。
+            if (latest > measured) {
                 measured = latest
                 measuredHeight = latest
                 // 高度一变就复位内部滚动，清掉加载窗口里可能被拖出来的偏移
                 view.scrollTo(0, 0)
                 stablePolls = 0
-                return@repeat
+                continue
             }
             stablePolls++
             if (isTableBlock &&
@@ -1791,9 +1803,7 @@ internal fun MarkdownChunk(
                 tableRepolls++
                 stablePolls = 0
                 runCatching { view.setText(view.text) }
-                return@repeat
             }
-            if (stablePolls >= HEIGHT_STABLE_POLLS) return@LaunchedEffect
         }
     }
 
@@ -1844,12 +1854,24 @@ internal fun MarkdownChunk(
 internal fun mayRenderLatex(content: String): Boolean = content.contains('$')
 
 /**
- * 高度复测节奏：每 100ms 量一次，连续 5 次不变即认定稳定，最多 30 次（约 3 秒）。
+ * 高度复测节奏：每 100ms 量一次，连续 5 次不变就转入「心跳档」。
  * 公式（异步渲染）与表格（行高依赖「绘制后才填充」的内部 layouts）的高度都是「后到」的。
  */
 private const val HEIGHT_POLL_INTERVAL_MS = 100L
 private const val HEIGHT_STABLE_POLLS = 5
-private const val HEIGHT_POLL_MAX_POLLS = 30
+
+/** 高度稳定后转入心跳档的间隔（只降频、不停止观察）。 */
+private const val HEIGHT_HEARTBEAT_MS = 400L
+
+/**
+ * 高度观察窗口总时长。
+ *
+ * 不能只在「高度稳定」后就永久退出：大矩阵这类公式算得慢（JLatexMath 单条几百 ms，
+ * 几个 `\begin{bmatrix}` 叠在一起可能超过 3 秒），若在它变高之前就退出，这个偏小的高度
+ * 会被一直用下去 —— 而溢出的真实 TextView 会吃掉下方图片的触摸（见 [MarkdownChunk] 注释）。
+ * 12 秒足够覆盖慢渲染，又不会让协程长期挂着。
+ */
+private const val HEIGHT_WATCH_WINDOW_MS = 12_000L
 
 /** 表格块：高度连续这么多轮没变，就再补一次强制重排（见 [MarkdownChunk] 里的根因注释）。 */
 private const val TABLE_REPOLL_AFTER_STABLE_POLLS = 2
