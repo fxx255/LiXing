@@ -387,16 +387,48 @@ class PlotBitmapRenderer(
         // 刻度文字夹在**画布**内（它们本来就在绘图区外、贴着轴排布），
         // 但要留出底部/左侧的固定余量，避免被裁掉半个字。
         val tickBottomLimit = height - height * 0.012f
+        // x 轴：参数化刻度（如 `-f_c-B/2`、`O`、`f_c+B/2`）比纯数字宽得多，
+        // 挨着画会糊成一片（用户截图里 `-f_c-B/2-f_cf_c-B/2` 挤在一起就是这个）。
+        // 这里按「与上一个标签是否重叠」做一次过滤：放不下就跳过这一个刻度，
+        // 宁可少标几个，也不要叠成一团看不清。
+        var lastLabelRight = -Float.MAX_VALUE
+        val minGap = tickSize * 0.8f
         for (t in xTicks) {
             val raw = spec.x.tickLabels[t] ?: formatTick(t)
-            drawSmartText(canvas, raw, sx(t), min(plotY + plotH + height * 0.038f, tickBottomLimit), tickSize, theme.subText, alignCenter = true)
+            val w = smartTextWidth(raw, tickSize)
+            val centerX = sx(t)
+            val left = centerX - w / 2f
+            if (left < lastLabelRight + minGap) continue
+            drawSmartText(
+                canvas,
+                raw,
+                centerX,
+                min(plotY + plotH + height * 0.038f, tickBottomLimit),
+                tickSize,
+                theme.subText,
+                alignCenter = true,
+            )
+            lastLabelRight = centerX + w / 2f
         }
+        // y 轴：右对齐到绘图区左侧，并且**把夹取范围收进绘图区左侧的留白**。
+        // 参数化的刻度文案可能很长（如 $2\pi^2N_0(f_c+B/2)^2$），
+        // 不收紧的话它会横向伸进绘图区、压住曲线（用户反馈「左边的字挡住图像」）。
+        // 收进留白后放不下的部分按 planLabelLayout 的规则截断加省略号。
+        val savedBounds = labelBounds
+        labelBounds = RectF(0f, plotY, (plotX - width * 0.008f).coerceAtLeast(0f), plotY + plotH)
         for (t in yTicks) {
             val raw = spec.y.tickLabels[t] ?: formatTick(t)
-            // 右对齐：以 (plotX - 8dp) 为右边界
             val w = smartTextWidth(raw, tickSize)
-            drawSmartText(canvas, raw, plotX - width * 0.012f - w, sy(t) + tickSize * 0.36f, tickSize, theme.subText)
+            drawSmartText(
+                canvas,
+                raw,
+                plotX - width * 0.012f - w,
+                sy(t) + tickSize * 0.36f,
+                tickSize,
+                theme.subText,
+            )
         }
+        labelBounds = savedBounds
 
         // ---- 9. 轴标题 ----
         val xLabel = spec.x.label
@@ -792,7 +824,37 @@ internal const val X_MARGIN_RATIO = 0.04
 private val DOLLAR_LATEX_GROUP = Regex("""\$\$?(.+?)\$\$?""")
 
 /** 反斜杠命令（`\frac`、`\sum`…）：没有美元符号时用它判断整串是不是公式。 */
-private val LATEX_COMMAND = Regex("""\\[a-zA-Z]{2,}""")
+/**
+ * 数学式特征：下标/上标、LaTeX 命令，或数学运算符。
+ *
+ * 出现任一就认为这串是**数学式**而不是普通文字，交给公式引擎排版。
+ * 刻度与轴标签里 `f_c`、`f_c-B/2`、`-B/2` 这种写法极常见：以前只认反斜杠命令，
+ * 于是这类标签被当成纯文本、原样画成 `-f_c-B/2`（下划线还在），
+ * 用户看到的就是「坐标轴上的注释没有公式渲染」（v1.0.35 反馈）。
+ *
+ * 运算符里**故意不含 `-`**：连字符在普通文字里太常见（`state-of-the-art`），
+ * 但 `-B/2` 这种带 `/` 的仍会被命中原子的 `/`。
+ */
+private val LATEX_HINT = Regex("""[_^\\]|[<>=+*/]""")
+
+/**
+ * 给 `\frac` 的裸参数补上花括号：`\frac B2` → `\frac{B}{2}`。
+ *
+ * 标准 LaTeX 允许 `\frac B2`（两个单 token），但 **JLatexMath 不接受**，
+ * 会抛 ParseException，图上就只剩一块「公式无法渲染」的灰色占位
+ * （用户反馈的那条 `\frac B2<|f|<f_c+\frac B2` 整条渲染失败即是此因）。
+ * 这里只补花括号、不动其它结构；本来就是 `\frac{}{}` 的写法是幂等的。
+ */
+private val FRAC_BRACELESS =
+    Regex("""\\frac\s*(\{[^{}]*\}|[A-Za-z0-9])\s*(\{[^{}]*\}|[A-Za-z0-9])""")
+
+/** 规范化图内公式：见 [FRAC_BRACELESS]。 */
+internal fun normalizeLatexFractions(latex: String): String =
+    FRAC_BRACELESS.replace(latex) { m ->
+        val num = m.groupValues[1].removeSurrounding("{", "}")
+        val den = m.groupValues[2].removeSurrounding("{", "}")
+        """\frac{$num}{$den}"""
+    }
 
 /**
  * CJK 及全角标点区间。这类字符**不能**交给 JLatexMath：
@@ -811,8 +873,14 @@ internal fun containsCjk(text: String): Boolean = CJK_RANGE.containsMatchIn(text
  * 规则：
  * 1. `$...$` 分组 → 公式片段；**公式体内含中文时退回普通文字**（否则会叠成一团）；
  * 2. 分组之外的内容 → 普通文字片段（含 LaTeX 命令时由 `prettifyPlotLabel` 降级成 Unicode）；
- * 3. 整串没有美元分组、也不含中文、但含反斜杠命令（如 `\frac{N_0}{2}`）→ 整串当公式；
+ * 3. 整串没有美元分组、也不含中文、但含数学式特征（`_` / `^` / 反斜杠命令）→ 整串当公式；
  * 4. 其余情况 → 一个普通文字片段（保持旧行为）。
+ *
+ * 第 3 条是 v1.0.35 补的：以前只认反斜杠命令，于是 `f_c-B/2` 这类**纯符号刻度**
+ * 被当纯文本原样画出（下划线还在），用户看到「坐标轴上的注释没有公式渲染」。
+ *
+ * 所有进公式引擎的串都会先过 [normalizeLatexFractions]，
+ * 避免 `\frac B2` 这种写法直接抛 ParseException。
  *
  * 这样「功率谱密度 $S_c(f)$」会拆成两段依次排布，中文与公式各自清晰可读。
  */
@@ -829,7 +897,7 @@ internal fun splitLabelPieces(raw: String): List<LabelPiece> {
         when {
             body.isEmpty() -> Unit
             containsCjk(body) -> pieces += LabelPiece(text = body)
-            else -> pieces += LabelPiece(latex = body)
+            else -> pieces += LabelPiece(latex = normalizeLatexFractions(body))
         }
         cursor = match.range.last + 1
     }
@@ -838,9 +906,9 @@ internal fun splitLabelPieces(raw: String): List<LabelPiece> {
 
     if (pieces.isEmpty()) return listOf(LabelPiece(text = trimmed))
     if (pieces.size == 1 && pieces[0].latex == null &&
-        !containsCjk(trimmed) && LATEX_COMMAND.containsMatchIn(trimmed)
+        !containsCjk(trimmed) && LATEX_HINT.containsMatchIn(trimmed)
     ) {
-        return listOf(LabelPiece(latex = trimmed))
+        return listOf(LabelPiece(latex = normalizeLatexFractions(trimmed)))
     }
     return pieces
 }

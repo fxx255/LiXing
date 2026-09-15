@@ -126,6 +126,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.zIndex
 import androidx.core.content.ContextCompat
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -1294,6 +1295,9 @@ internal fun InlineGeneratedImage(path: String, onClick: () -> Unit) {
         Box(
             modifier = Modifier
                 .fillMaxWidth()
+                // zIndex：命中测试按 zIndex 从高到低进行，所以图片要排在文本块之后
+                // （见下方 Image 的说明）。占位框同样需要，否则「加载中」时也会被吃掉触摸。
+                .zIndex(FIGURE_Z_INDEX)
                 .height(110.dp)
                 .clip(RoundedCornerShape(10.dp))
                 .background(MaterialTheme.colorScheme.surfaceVariant)
@@ -1317,10 +1321,25 @@ internal fun InlineGeneratedImage(path: String, onClick: () -> Unit) {
         contentScale = ContentScale.FillWidth,
         modifier = Modifier
             .fillMaxWidth()
+            // 为什么图片要抬高 zIndex：同一个 Column 里的文本块是真实 Android 视图
+            // （interop），它的实际高度一旦比 Compose 给它的格位高，多出来的部分就
+            // 盖在这张图片上、把本该落到图片上的触摸先吃掉。Compose 的 zIndex 会把
+            // 命中测试顺序改成「先测图片」，于是即便文本块略有溢出，点击也能落在图上。
+            // 这个是**结构性兜底**：不依赖「高度一定准」这个前提。
+            .zIndex(FIGURE_Z_INDEX)
             .clip(RoundedCornerShape(10.dp))
             .clickable { onClick() },
     )
 }
+
+/**
+ * 图片/表格在气泡内的层级。
+ *
+ * 文本块与图片是同一 Column 里的兄弟。命中测试按 zIndex 从高到低进行，
+ * 给交互元素抬到 1f 就能让它们先于文本块被命中 —— 文本块的高度只要有一点偏差，
+ * 就会盖住靠后的图片与表格并吃掉它们的触摸（用户反馈的「越靠后越点不动」）。
+ */
+private const val FIGURE_Z_INDEX = 1f
 
 private const val DECODE_RETRY_MAX = 3
 private const val DECODE_RETRY_DELAY_MS = 600L
@@ -1696,6 +1715,9 @@ internal fun MarkdownAnswer(content: String) {
                     Box(
                         modifier = Modifier
                             .wrapContentWidth()
+                            // 与图片同理：抬高 zIndex，保证表格的横向拖动不会因为
+                            // 上方文本块的高度偏差而被吃掉（用户反馈「末尾的表格拖不动」）。
+                            .zIndex(FIGURE_Z_INDEX)
                             .horizontalScroll(scroll, reverseScrolling = false)
                             .clipToBounds(),
                     ) {
@@ -1779,15 +1801,16 @@ internal fun MarkdownChunk(
             // 早退会让它在退出后才变高，于是内容溢出格位。
             delay(if (stablePolls >= HEIGHT_STABLE_POLLS) HEIGHT_HEARTBEAT_MS else HEIGHT_POLL_INTERVAL_MS)
             val latest = view.measuredHeightCompat(renderWidthPx)
-            // ★ 只增不减：单次渲染内，高度只允许往上走。
+            // 高度变化就采纳（**允许变小**）。
             //
-            // 这是因为「宁可有几像素空白，也绝不能让内容溢出格位」——
-            // 这里装的是真实 Android 视图，而 Compose 的 clipToBounds 只能裁剪
-            // Compose 自己的绘制与命中测试，**管不住真实 View 的触摸命中**：
-            // 一旦这个 TextView 实际比 Compose 给的格位高，溢出的那条带子会盖在
-            // 下一张生成的图片上，把本该落到图片上的触摸先吃掉
-            // （用户反馈的「前两张图能点开、第三张点不开」就是这个机制）。
-            if (latest > measured) {
+            // 上一版这里写成了「只增不减」，本意是「宁可多留空白也不让内容溢出」，
+            // 但那会留下一个更糟的隐患：宽度变化时换行数会变、高度本该随之变小
+            // （气泡在流式过程中宽度会从窄变宽），一旦拒绝更新，这块就会永久占着那个
+            // 偏大的高度 —— 它多吃掉的空白同样属于这个真实 View 的 bounds，
+            // 于是把**下面所有兄弟**（图片、表格）的触摸一并吃掉，
+            // 表现为「越靠后的元素越点不动」（用户反馈：第二张图点不开、末尾表格拖不动）。
+            // 所以这里恢复成「跟随最新测量」，靠长心跳窗口保证观测足够久。
+            if (latest > 0 && latest != measured) {
                 measured = latest
                 measuredHeight = latest
                 // 高度一变就复位内部滚动，清掉加载窗口里可能被拖出来的偏移

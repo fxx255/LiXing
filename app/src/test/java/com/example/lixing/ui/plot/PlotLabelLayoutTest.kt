@@ -5,6 +5,8 @@ import com.example.lixing.domain.plot.Axis
 import com.example.lixing.domain.plot.PlotSpec
 import com.example.lixing.domain.plot.Series
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -253,6 +255,62 @@ class PlotLabelLayoutTest {
         val latex = pieces.mapNotNull { it.latex }
         assertTrue("中文部分不能丢（实际「$text」）", text.contains("功率谱密度") && text.contains("的对比"))
         assertEquals(listOf("S_c(f)"), latex)
+    }
+
+    // ---------- 图内公式：判定与规范化（v1.0.35） ----------
+
+    /**
+     * 纯符号刻度必须走公式路径。
+     *
+     * 用户反馈「坐标轴上的注释没有公式显示」：旧逻辑只把「含反斜杠命令」的串当公式，
+     * 于是 `f_c-B/2` 这种**既没有 `$`、也没有 `\`** 的参数刻度被判为纯文本原样画出
+     * （下划线原样可见、排版也不像数学式）。
+     */
+    @Test
+    fun `含下标上标的纯符号刻度按公式排版`() {
+        listOf("f_c-B/2", "f_c", "f_c+B/2", "N_0", "x^2", "-B/2").forEach { label ->
+            val pieces = splitLabelPieces(label)
+            assertEquals("「$label」应判为一个公式片段：$pieces", 1, pieces.size)
+            assertNotNull("「$label」应走公式路径", pieces[0].latex)
+        }
+    }
+
+    /** 真·纯文字不能被误判成公式（中文进公式引擎会叠成一团）。 */
+    @Test
+    fun `不含数学特征的纯文字仍按文字排版`() {
+        val pieces = splitLabelPieces("归一化示意")
+        assertEquals(1, pieces.size)
+        assertNull("纯文字不该进公式引擎", pieces[0].latex)
+    }
+
+    /**
+     * `\frac` 的裸参数要补花括号。
+     *
+     * JLatexMath 不接受 `\frac B2`（标准 LaTeX 可以），会抛 ParseException，
+     * 整条公式退化成「公式无法渲染」的占位 —— 用户截图里那条
+     * `\frac B2<|f|<f_c+\frac B2` 就是整条失败的。
+     */
+    @Test
+    fun `frac 的裸参数补上花括号`() {
+        assertEquals("""\frac{B}{2}""", normalizeLatexFractions("""\frac B2"""))
+        assertEquals("本来就带花括号时幂等", """\frac{B}{2}""", normalizeLatexFractions("""\frac{B}{2}"""))
+        assertEquals(
+            "整条区间表达式都要被修好",
+            """f_c-\frac{B}{2}<|f|<f_c+\frac{B}{2}""",
+            normalizeLatexFractions("""f_c-\frac B2<|f|<f_c+\frac B2"""),
+        )
+        assertEquals(
+            "`\\dfrac` 不该被误伤（正则要求反斜杠后紧跟 frac）",
+            """\dfrac{a}{b}""",
+            normalizeLatexFractions("""\dfrac{a}{b}"""),
+        )
+    }
+
+    /** 规范化要真的生效在切片路径里，而不是只作为一个孤立工具函数存在。 */
+    @Test
+    fun `切片时已对公式做过 frac 规范化`() {
+        val pieces = splitLabelPieces("""${'$'}${'$'}f_c-\frac B2${'$'}${'$'}""")
+        assertEquals("""f_c-\frac{B}{2}""", pieces.single().latex)
     }
 
     /** 录制型 Canvas：记下每次平移，用来验证「标签画在哪里」。 */

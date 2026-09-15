@@ -77,4 +77,36 @@ class AssistantTableNormalizeTest {
 
         assertFalse("没有分隔行就不是表格，不该补空行:\n$out", out.contains("\n\n| a | b |"))
     }
+
+    // ---------- 最简数值公式（v1.0.35） ----------
+
+    /**
+     * `$0$` 这类**单独的数值公式**必须和其它公式走同一条路径。
+     *
+     * 旧规则把「纯数字」从行内公式判定里排除掉了，于是 `$0$` 不会被提升成 `$$0$$`、
+     * 独自留在行内 —— 而同一段里 `$f_c$` 之类都会被提升，两条路径不一致，
+     * 用户看到的就是「单独出现的 $0 渲染不出来」。
+     */
+    @Test
+    fun `单独的数值公式也要提升为块级公式`() {
+        val out = normalizeAssistantMarkdown("当 \$0\$ 时，取值 \$1\$。")
+
+        assertTrue("数值公式应提升为 \$\$0\$\$，实际：$out", out.contains("\$\$0\$\$"))
+        assertTrue("多个数值公式都应处理，实际：$out", out.contains("\$\$1\$\$"))
+    }
+
+    @Test
+    fun `表格单元格里的数值公式同样被提升`() {
+        val out = normalizeAssistantMarkdown("| 频率点 | 值 |\n| --- | --- |\n| 0 | \$0\$ |")
+
+        assertTrue("单元格里的数值公式也要渲染，实际：\n$out", out.contains("\$\$0\$\$"))
+    }
+
+    /** 反例：货币写法不能被误判成公式（body 里有空格，仍被挡住）。 */
+    @Test
+    fun `货币写法不会被误判为公式`() {
+        val out = normalizeAssistantMarkdown("价格是 \$5 到 \$10 之间")
+
+        assertFalse("不该把金额当公式：$out", out.contains("\$\$5"))
+    }
 }

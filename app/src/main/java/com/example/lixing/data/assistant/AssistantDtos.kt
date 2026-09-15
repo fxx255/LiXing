@@ -954,9 +954,19 @@ private fun String.runLength(startIndex: Int, char: Char): Int {
 private fun looksLikeInlineMath(raw: String): Boolean {
     val value = raw.trim()
     if (value.isBlank() || value.any { it in '\u3400'..'\u9fff' }) return false
-    if (value.all { it.isDigit() || it == '.' || it == ',' }) return false
+    // 这里**不能**把纯数字排除掉。
+    //
+    // 原来是 `if (value.all { it.isDigit() || it == '.' || it == ',' }) return false`，
+    // 于是 `$0$` / `$1$` 这种最简公式不会被提升成块级、独自留在行内 ——
+    // 而同一段文本里其它公式（以及 `\(...\)` 写法）都会走提升路径。
+    // 两条路径不一致，用户看到的就是「单独出现的 $0$ 渲染不出来」（v1.0.35 反馈）。
+    // 纯数字在数学语境里本来就是公式（数值 0），没有理由区别对待。
+    //
+    // 会不会误判货币写法？不会：`$5 ... $10` 这种 body 里必然含空格或字母，
+    // 仍然会被下面「数学符号 / 单变量」两条规则挡掉。
     if ('\\' in value) return true
     if (value.any { it in "=<>^_{}()[]+-*/|!≤≥≠≈∞∈∉⊂⊆⊃⊇∪∩∑∏∫√±×÷→⇒∂" }) return true
+    if (value.all { it.isDigit() || it == '.' }) return true
     if (Regex("""^(?:[A-Za-z]|[A-Za-z]_[A-Za-z0-9]+)$""").matches(value)) return true
     return Regex("""^(?:sin|cos|tan|log|ln|lim|max|min)\s+[A-Za-z]$""").matches(value)
 }
@@ -975,6 +985,26 @@ internal fun sanitizeAssistantLatex(markdown: String): String {
     text = convertAlignedEnvironments(text)
     return text
 }
+
+/**
+ * 给 `\frac` 的裸参数补上花括号：`\frac B2` → `\frac{B}{2}`。
+ *
+ * 标准 LaTeX 允许 `\frac B2`（两个单 token），但 **JLatexMath 不接受**，会抛
+ * ParseException，于是整条公式退化成「⚠ 公式无法渲染」的灰色占位
+ * （用户反馈的 `0,\qquad f_c-\frac B2<|f|<f_c+\frac B2` 整条失败就是此因）。
+ * 只补花括号、不动其它结构；本来就是 `\frac{}{}` 的写法是幂等的。
+ *
+ * 注意正则要求反斜杠后**紧跟** `frac`，所以 `\dfrac` 不会被误伤。
+ */
+private val FRAC_BRACELESS =
+    Regex("""\\frac\s*(\{[^{}]*\}|[A-Za-z0-9])\s*(\{[^{}]*\}|[A-Za-z0-9])""")
+
+internal fun normalizeLatexFractions(latex: String): String =
+    FRAC_BRACELESS.replace(latex) { m ->
+        val num = m.groupValues[1].removeSurrounding("{", "}")
+        val den = m.groupValues[2].removeSurrounding("{", "}")
+        """\frac{$num}{$den}"""
+    }
 
 private fun removeUnsupportedLatexCommands(text: String): String {
     var result = text
@@ -996,6 +1026,8 @@ private fun removeUnsupportedLatexCommands(text: String): String {
     }
     result = result.replace(Regex("""\\begin\{dcases\}"""), "\\begin{cases}") // mathtools
     result = result.replace(Regex("""\\end\{dcases\}"""), "\\end{cases}")
+    // \frac 的裸参数补花括号（JLatexMath 不支持 \frac B2），放最后统一处理
+    result = normalizeLatexFractions(result)
     return result
 }
 
