@@ -2,6 +2,50 @@
 
 > 按时间倒序记录功能变更。
 
+## v1.0.37 (2026-09-16) · `cases` 公式恢复渲染 + 曲线只占横轴约 70% + 靠后的图终于点得开
+
+用户反馈：① 「4. 最终结果」里的分段函数公式**没有渲染**——等号及之前的部分是公式，`\begin{cases}` 及其后内容却**以 LaTeX 源码原样露出**；② 生成的图像**曲线占满整个画出的横坐标范围**，「其实曲线占画出横坐标 70% 左右就最好最美观，而不是将画出的横坐标范围顶满」，并以教材题 3.3(c) 的图为参照；③ **长回答气泡靠后的图仍然点不开**。
+
+- **公式没渲染的真根因：`$$` 显示块定界符被多补了一对，把显示块劈成了两半**。`convertAlignedEnvironments` 负责给「模型写了数学环境却忘了用 `$$` 包起来」的情况补定界符，它的 `alreadyWrapped` 判据过去只看两件局部的事——「上一行是不是以 `$$` 开头」「环境之后是不是紧跟 `$$` 结尾」。于是当模型把公式写成「`=` 收尾换行 + `\begin{cases}` 单独起一行」时，环境**明明已经在一个打开着的显示块内部**，却被判定为「没被包裹」，于是**在已打开的块里又插进一对 `$$`**。一对多余的定界符把原本完整的显示块切成两段：前半段（`S_{Y_c}(f) = … =`）照常渲染成公式，后半段（`\begin{cases}` 起始的部分）掉出了数学上下文，被当成普通文字按源码原样画出来——与用户截图完全一致；
+  - **诊断过程刻意先证伪、再定位**（本轮三次探测，每次都推翻了前一个假设）：
+    1. 先怀疑「JLatexMath 不支持 `cases`」——写了能力探测测试，把 15 条 `cases` 变体（含截图里那种畸形写法）逐条喂给真实 `TeXFormula`，**15/15 全部通过**，假设被推翻；
+    2. 再怀疑「清洗管线把环境拆散了」——逐步 dump 发现 `cases` 在标准 `$$` 块内始终完整，假设再次被推翻；
+    3. 最后逐行 dump + 统计 `$$` 收支，才发现 **`sanitizeAssistantLatex` 把 2 个 `$$` 变成了 4 个**，元凶正是 `alreadyWrapped` 的局部判据；
+  - **修复**：新增 `countDisplayDelimiters()`，从文档开头到环境起始处逐行统计 `$$` 的出现次数（**跳过代码围栏**，围栏内的 `$$` 不算），**奇数即表示「正处在一个已打开的显示块内部」**。`alreadyWrapped = insideOpenDisplay || legacyWrapped`，两种写法都能正确识别，且**只影响原本就会走到补定界符分支的场景**，标准写法零回归；
+  - **测试**：新增 `CasesDelimiterTest`（4 例）——① 等号后换行的 `cases` 不会被补出多余的 `$$`（断言定界符数量守恒、且 `=` 与 `\begin{cases}` 之间不出现 `$$`）；② 裸 `cases` 环境（模型漏写定界符）仍会被正确包裹；③ `aligned` 环境在已打开的显示块内也不会被重复包裹；④ 代码块里的 `$$` 不参与配对统计。
+
+- **曲线占满横轴的修正：横向内缩由 5% 提到 15%，曲线占绘图区约 70%**。v1.0.36 已经把「坐标轴范围（语义量）」与「绘图区物理边界（视觉量）」解耦，并引入 `PLOT_INSET_X_RATIO = 0.05f`。但那只是让曲线不再顶死在框线角上，曲线仍占 90% 宽，用户依然觉得「占满了」。本轮以**教材题 3.3(c) 的观感**为基准收敛：
+  - `PLOT_INSET_X_RATIO` 改为 **`0.15f`**（`PLOT_INSET_Y_RATIO` 保持 `0.07f`）——纵向本来就有轴标题与刻度占位，不需要再加；
+  - 选型时用 Java2D 复刻渲染常量出了 **0% / 5% / 15% / 20% 四档对比图**，实测 15% 时曲线正好占绘图区 70%，两侧各留 15%，与教材图一致；
+  - 复核：`drawW=872.2`，`B/2` 竖线落在 `x=1173.9`，左右对称误差 `0.00px`，曲线外缘到画布右边距 `186.9px`（画布宽的 13.35%）；
+  - 这是本项目第三次调这个比例（0% → 5% → 15%），注释里已把三档的取舍与用户原话一并记下，避免以后再来回摇摆。
+
+- **「靠后的图点不开」的真根因：`setMovementMethod()` 会把 clickable/longClickable 重新打开，我们关属性的时机在它之前，等于白关**。v1.0.36 认定根因是「漏关了 `isLongClickable`」，于是补上 `isLongClickable = false`。但那三行属性的关闭**写在了 `setMovementMethod()` 之前**，而 AOSP 的 `TextView` 是这么写的：
+
+  ```java
+  public final void setMovementMethod(MovementMethod movement) {
+      if (mMovement != movement) {
+          mMovement = movement;
+          ...
+          fixFocusableAndClickableSettings();   // ← 就是这里
+      }
+  }
+  private void fixFocusableAndClickableSettings() {
+      if (mMovement != null) {
+          setFocusable(FOCUSABLE);
+          setClickable(true);        // ← 又把 clickable 打开
+          setLongClickable(true);    // ← 又把 longClickable 打开
+      } else { ... }
+  }
+  ```
+
+  也就是说：**只要挂了 MovementMethod，框架就会立刻把这三个属性重新打开**。我们「先关属性、后挂 MovementMethod」，前脚关掉后脚就被框架翻回来 ⇒ **v1.0.36 那条修复实际上从未生效**，这正是用户「靠后的图还是点不开」迟迟不愈的原因。（此前测试在 `!view.isClickable` 上稳定变红，不是测试环境失真，而是如实反映了这个真实缺陷。诊断方式：用 `javap` 反编译 Markwon 各插件确认没人动这些属性，再反编译 Robolectric 的 android-all jar 拿到 AOSP 真实实现 —— SDK 里的 `android.jar` 只是抛 `Stub!` 的桩，查不出行为。）
+
+  **修复从两道一起下手**：
+  1. **顺序反转**——先 `movementMethod = LinkMovementMethod.getInstance()`，**再**把框架顺手打开的三个属性关掉；
+  2. **真正不依赖属性的兜底——重写 `onTouchEvent`**，只在**触摸点确实落在 `ClickableSpan` 上**时才消费，其余一律返回 `false` 放行。判定沿用 AOSP `LinkMovementMethod` 的同一套坐标换算（减去 `totalPaddingLeft/Top`、加上 `scrollX/Y`，再 `getLineForVertical` / `getOffsetForHorizontal` 反查字符偏移），**任何越界或异常都返回 `false`**——判不出来时宁可让链接偶尔点不到，也绝不吃掉下方图片的点击。这一层由 View 自身裁决，任何插件之后重新 `setMovementMethod` 都翻不动它；
+  - **测试**：`MarkdownChunkInteractionTest` 扩到 3 例——① 创建后不抢占触摸；② **跑一遍真实的 `setMarkdown` 渲染之后**仍不抢占（新增，专治本条——只在创建后检查会漏掉框架翻盘的整条路径）；③ 表格块（`selectable = false`）不抢占触摸且刻意不给 MovementMethod。
+
 ## v1.0.36 (2026-09-16) · 曲线不再溢出定义域 + 纵轴刻度文案不再变成「…」+ 四周留出视觉余量
 
 用户反馈：① 上次修完「左侧文字挡住图像」之后，**新出现生成该图时曲线稳定溢出它应有的 −B/2 到 B/2 之间**（参考教材原图，曲线应正好终止在 ±B/2 的虚线上）；② **左边稳定显示三个点**（纵轴刻度只剩一个「…」），「略减小字体或者加宽左边空间都可以」；③ 修完之后**曲线边界恰好就是整个 plot 的边界**，「既不直观、无法看出曲线特征，也不美观」，**既要修好边界，又要给曲线边留出较合适的余量**。

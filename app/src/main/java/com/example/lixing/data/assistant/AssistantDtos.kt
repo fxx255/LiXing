@@ -1103,10 +1103,29 @@ private fun convertAlignedEnvironments(markdown: String): String {
             }
             if (j < lines.size && depth == 0) {
                 val endIdx = j
-                // 上一行以 $$ 开头（含「$$ 内容」的带内容开头）即视为已在显示块内，
-                // 不再补 $$，否则会出现两对 $$ 互相错配。
-                val alreadyWrapped = startIdx > 0 && lines[startIdx - 1].trimStart().startsWith("$$") &&
+                // 这个环境是否**已经处在某个未闭合的 $$ 显示块内部**？
+                //
+                // 只判断「上一行是不是以 $$ 开头」是不够的 —— 模型很常把公式写成
+                //     $$
+                //     S_{Y_c}(f) = S_{Y_s}(f) =      ← 等号收尾，environment 在下一行
+                //     \begin{cases}
+                //     ...
+                //     \end{cases}
+                //     $$
+                // 此时上一行既不以 $$ 开头、也不以 $$ 结尾，于是被判为「未包裹」，
+                // 我们再补一对 $$ 塞进去 ⇒ **块内凭空多出一对定界符**，
+                // 显示块被从中间劈开：`=` 之前的内容渲染成公式，`\begin{cases}` 起始的
+                // 后半段掉出数学上下文、以 LaTeX 源码原样显示
+                // （用户截图正是「`S_{Y_c}(f) = S_{Y_s}(f) =` 是公式，下面 cases 是源码」）。
+                //
+                // 正确判据是**数 $$ 的收支**：从文档开头累计到环境起始行之前，
+                // 若已出现**奇数**个 $$，说明显示块已经打开、环境本就在其中，绝不能补。
+                val insideOpenDisplay =
+                    countDisplayDelimiters(lines, 0, startIdx) % 2 == 1
+                // 兼容旧判据：上一行以 $$ 开头（含「$$ 内容」）且环境之后紧跟收尾 $$ 的写法
+                val legacyWrapped = startIdx > 0 && lines[startIdx - 1].trimStart().startsWith("$$") &&
                     endIdx + 1 < lines.size && lines[endIdx + 1].trimEnd().endsWith("$$")
+                val alreadyWrapped = insideOpenDisplay || legacyWrapped
                 val block = (startIdx..endIdx).joinToString("\n") { lines[it] }
                 val transformed = transformEnvironment(block, envName)
                 if (!alreadyWrapped) {
@@ -1124,6 +1143,42 @@ private fun convertAlignedEnvironments(markdown: String): String {
         i++
     }
     return out.joinToString("\n")
+}
+
+/**
+ * 统计 [from, until) 行范围内出现的 `$$` 定界符个数。
+ *
+ * 用于判断某个位置是否已经处在未闭合的显示块内部（奇数 = 已打开）。
+ * 只数成对出现的 `$$`；行内的 `$...$`（单美元）不计入，因为它不改变显示块状态。
+ * 代码块内部的 `$$` 同样不计入 —— 那里的内容是字面量，不参与数学块配对。
+ */
+private fun countDisplayDelimiters(lines: List<String>, from: Int, until: Int): Int {
+    var count = 0
+    var fence: String? = null
+    for (index in from until minOf(until, lines.size)) {
+        val line = lines[index]
+        val trimmedStart = line.trimStart()
+        val lineFence = when {
+            trimmedStart.startsWith("```") -> "```"
+            trimmedStart.startsWith("~~~") -> "~~~"
+            else -> null
+        }
+        if (lineFence != null) {
+            fence = if (fence == null) lineFence else if (fence == lineFence) null else fence
+            continue
+        }
+        if (fence != null) continue
+        var i = 0
+        while (i < line.length - 1) {
+            if (line[i] == '$' && line[i + 1] == '$') {
+                count++
+                i += 2
+            } else {
+                i++
+            }
+        }
+    }
+    return count
 }
 
 /**

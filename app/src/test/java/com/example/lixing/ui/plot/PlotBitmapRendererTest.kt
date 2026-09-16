@@ -204,7 +204,10 @@ class PlotBitmapRendererTest {
         val outerLeft = w * 0.082f
         val outerRight = w - w * 0.028f
         val outerW = outerRight - outerLeft
-        val insetX = outerW * 0.05f
+        // ⚠️ 必须与 `PlotBitmapRenderer.PLOT_INSET_X_RATIO` 保持一致。
+        // 该比例历经三轮收敛：0%（曲线顶死框线角）→ 5%（仍占 90% 宽、用户仍嫌「占满」）
+        // → 15%（曲线占绘图区 70%，与教材题 3.3(c) 观感一致）。
+        val insetX = outerW * 0.15f
 
         // ① 定义域上界的竖线位置 = 内缩后的右边界（= 范围未变，仅绘图区缩进）
         assertEquals(
@@ -216,13 +219,22 @@ class PlotBitmapRendererTest {
         // ② 余量必须真实存在且大小合理：既不能贴死框线，也不能大到浪费面积
         val margin = outerRight - rightMost
         assertTrue("曲线右侧必须有可见余量（margin=$margin）", margin > w * 0.02f)
-        assertTrue("右侧余量不应过大（margin=$margin）", margin < w * 0.12f)
+        assertTrue("右侧余量不应过大（margin=$margin）", margin < w * 0.20f)
         // ③ 左右两侧余量应对称（同一次内缩的结果）
         assertEquals(
             "左右余量应对称",
             outerRight - rightMost,
             leftMost - outerLeft,
             1.5f,
+        )
+        // ④ 用户明确的观感要求：**曲线应占绘图区宽度约 70%**，而不是顶满。
+        // 这条把「70% 左右最好最美观」这个主观诉求固化成可回归的数字，
+        // 避免以后有人把内缩调回 0/5% 又觉得「没差别」。
+        val drawnWidth = rightMost - leftMost
+        val occupancy = drawnWidth / outerW
+        assertTrue(
+            "曲线应占绘图区宽约 70%（实测 ${(occupancy * 100).toInt()}%）",
+            occupancy in 0.65f..0.75f,
         )
     }
 }

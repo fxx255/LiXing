@@ -21,7 +21,7 @@ public class PlotFinalZoom {
 
     /** 复刻 PlotBitmapRenderer 的最终布局，返回 {图, drawX, drawY, drawW, drawH, outerRight, outerLeft}。 */
     static Object[] renderInset(int w, int h) {
-        float PLOT_INSET_X_RATIO = 0.05f, PLOT_INSET_Y_RATIO = 0.07f;
+        float PLOT_INSET_X_RATIO = 0.15f, PLOT_INSET_Y_RATIO = 0.07f;
         float LEFT_PAD = 0.082f, RIGHT_PAD = 0.028f, TOP_PAD = 0.055f;
         float BOTTOM_PAD = 0.125f, TITLE_BAND = 0.085f;
 

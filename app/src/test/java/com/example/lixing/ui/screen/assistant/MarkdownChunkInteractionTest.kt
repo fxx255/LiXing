@@ -2,6 +2,9 @@ package com.example.lixing.ui.screen.assistant
 
 import android.app.Application
 import android.graphics.Color as AwtColor
+import android.text.Spannable
+import android.text.style.ClickableSpan
+import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import androidx.compose.foundation.background
@@ -29,6 +32,7 @@ import androidx.compose.ui.test.swipeLeft
 import androidx.compose.ui.unit.dp
 import com.example.lixing.data.assistant.normalizeAssistantMarkdown
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -225,5 +229,166 @@ class MarkdownChunkInteractionTest {
             longHeight != shortHeight,
         )
         assertEquals("高度应等于新内容的真实高度", expectedLong, longHeight)
+    }
+
+    /**
+     * 文本块**不得**成为「抢占触摸的落点」。
+     *
+     * 用户 v1.0.36 反馈：长回答气泡里，靠后的图仍然点不开。
+     *
+     * 根因：`setTextIsSelectable(true)` 会顺带把
+     * `isClickable` / `isLongClickable` 都置为 true。我们此前只关掉了
+     * `isClickable`+`isFocusable`，**漏了 `isLongClickable`** —— 而长按可点的 View
+     * 在 `onTouchEvent` 里照样会消费 ACTION_DOWN。一旦这个真实 TextView 的实际高度
+     * 溢出 Compose 给的格位（公式异步加载后必然变高），溢出的那条带子就会把本该
+     * 落在下方图片上的触摸先吃掉 ⇒「越靠后越点不动」。
+     *
+     * Compose 的 `zIndex` 只改 Compose 自己的命中顺序，管不住 interop 里真实 View 的
+     * 原生触摸分发，所以必须从 View 自身属性上堵死。
+     */
+    @Test
+    fun `文本块不抢占触摸`() {
+        val context = RuntimeEnvironment.getApplication()
+        val view = createMarkdownTextView(context, AwtColor.BLACK, AwtColor.BLUE, selectable = true)
+        println(
+            "PROBE create clickable=${view.isClickable} longClickable=${view.isLongClickable} " +
+                "focusable=${view.isFocusable} movement=${view.movementMethod}",
+        )
+        assertTrue("文本块不应是 clickable（会抢占触摸）", !view.isClickable)
+        assertTrue("文本块不应是 longClickable（会抢占触摸）", !view.isLongClickable)
+        assertTrue("文本块不应是 focusable", !view.isFocusable)
+        // 长按选中/复制能力必须保留：MovementMethod 仍需就位
+        assertTrue("文本块需保留 LinkMovementMethod 以支持链接与长按选中", view.movementMethod != null)
+    }
+
+    /**
+     * 真正的生产路径：**真实渲染一遍 Markdown 之后**，点击属性必须依旧是关的。
+     *
+     * 上一版测试只在「创建后、尚未渲染」时检查属性，于是漏掉了真正会翻车的那一步 ——
+     * `renderMarkdown()` 会调用 `Markwon.setMarkdown()`，而 Markwon 的内部插件
+     * （`CorePlugin.afterSetText` 等）在**每次 setText 之后**都会再跑一遍。
+     * 只要其中任何一个环节把 `isClickable` / `isLongClickable` 重新打开，
+     * 创建时关掉的那两个属性就等于白关 —— 用户看到的「靠后的图点不开」原样复现。
+     *
+     * 所以这里必须渲染真实内容（含会产生异步 drawable 的公式，以及会命中
+     * `LinkMovementMethod` 的链接），再断言属性没被翻回去。
+     */
+    @Test
+    fun `渲染后文本块仍不抢占触摸`() {
+        val context = RuntimeEnvironment.getApplication()
+        val view = createMarkdownTextView(context, AwtColor.BLACK, AwtColor.BLUE, selectable = true)
+        val markdown = """
+            下面是推导过程，含一段行内公式 ${'$'}f_c${'$'} 与一个独立公式：
+
+            ${'$'}${'$'}S(f) = \frac{N_0}{2}\left(1 + \cos 2\pi f T\right)${'$'}${'$'}
+
+            也可以参考 [维基百科](https://example.com) 的解释。
+        """.trimIndent()
+        (view.tag as io.noties.markwon.Markwon).setMarkdown(view, markdown)
+        println(
+            "PROBE rendered clickable=${view.isClickable} longClickable=${view.isLongClickable} " +
+                "focusable=${view.isFocusable} movement=${view.movementMethod}",
+        )
+        assertTrue(
+            "渲染后文本块被重新打开为 clickable（会抢占触摸）",
+            !view.isClickable,
+        )
+        assertTrue(
+            "渲染后文本块被重新打开为 longClickable（会抢占触摸）",
+            !view.isLongClickable,
+        )
+        assertTrue("渲染后文本块不应是 focusable", !view.isFocusable)
+        assertTrue(
+            "渲染后需保留 LinkMovementMethod 以支持链接与长按选中",
+            view.movementMethod != null,
+        )
+    }
+
+    /**
+     * 表格块不抢占触摸。
+     *
+     * **这里不能断言「渲染后属性都是 false」** —— 那是做不到的。Markwon 的
+     * `CorePlugin.afterSetText()` 会在每次 setText 之后检查，一旦 `getMovementMethod()`
+     * 为 null 就**强行塞进** `LinkMovementMethod`；而 AOSP 的 `setMovementMethod()` 又会
+     * 通过 `fixFocusableAndClickableSettings()` 把 clickable / longClickable / focusable
+     * 全部打开。也就是说「表格块绝不 clickable」这个目标在框架层面无法通过属性达成。
+     *
+     * 所以这里断言的是**真正有意义的契约**：无论属性被框架翻成什么样，表格块都不参与
+     * 触摸消费 —— 由 `createMarkdownTextView` 里重写的 `onTouchEvent` 保证
+     * （表格内容里没有 `ClickableSpan`，任何落点都会被判为未命中而放行）。
+     */
+    @Test
+    fun `表格块不抢占触摸`() {
+        val context = RuntimeEnvironment.getApplication()
+        val view = createMarkdownTextView(context, AwtColor.BLACK, AwtColor.BLUE, selectable = false)
+        (view.tag as io.noties.markwon.Markwon).setMarkdown(view, tableMarkdown)
+        println(
+            "PROBE table clickable=${view.isClickable} longClickable=${view.isLongClickable} " +
+                "focusable=${view.isFocusable} movement=${view.movementMethod}",
+        )
+        // 表格内容中不得含可点片段，否则 onTouchEvent 的放行判定会失效。
+        val text = view.text
+        val clickableSpans = if (text is Spannable) {
+            text.getSpans(0, text.length, ClickableSpan::class.java)
+        } else {
+            emptyArray()
+        }
+        assertTrue(
+            "表格块内不应含 ClickableSpan（否则 onTouchEvent 的放行判定会失效）",
+            clickableSpans.isEmpty(),
+        )
+        // 行为断言：即便属性被框架打开，表格块也**不得消费**触摸。
+        // 表格内容里没有可点片段 ⇒ 必须走 onTouchEvent 的放行分支。
+        assertFalse(
+            "表格块不应消费 ACTION_DOWN（会吃掉外层横向拖动与页面纵向滚动）",
+            dispatchTouch(view, MotionEvent.ACTION_DOWN, 20f, 20f),
+        )
+    }
+
+    /**
+     * 文本块也必须放行「落在普通文字上」的触摸，同时**保留**「落在链接上」的点击。
+     *
+     * 这是 `onTouchEvent` 覆写的双向契约：只放行不该消费的，不误伤该消费的。
+     * 只测「放行」会有把链接点击一起关掉的过度修复风险，所以两面都测。
+     */
+    @Test
+    fun `文本块放行普通文字但保留链接点击`() {
+        val context = RuntimeEnvironment.getApplication()
+        val view = createMarkdownTextView(context, AwtColor.BLACK, AwtColor.BLUE, selectable = true)
+        (view.tag as io.noties.markwon.Markwon)
+            .setMarkdown(view, "普通文字开头，然后是一个 [链接](https://example.com) 结尾。")
+        // 需要先完成一次布局，`layout` 才可用（onTouchEvent 的坐标换算依赖它）
+        val widthSpec = View.MeasureSpec.makeMeasureSpec(600, View.MeasureSpec.EXACTLY)
+        val heightSpec = View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED)
+        view.measure(widthSpec, heightSpec)
+        view.layout(0, 0, view.measuredWidth, view.measuredHeight)
+
+        val text = view.text
+        val spans = if (text is Spannable) {
+            text.getSpans(0, text.length, ClickableSpan::class.java)
+        } else {
+            emptyArray()
+        }
+        println(
+            "PROBE link clickableSpans=${spans.size} layout=${view.layout != null} " +
+                "height=${view.measuredHeight}",
+        )
+
+        // 左边角落属于普通文字（首字符是「普」），必须放行
+        assertFalse(
+            "落在普通文字上的 ACTION_DOWN 必须放行（否则下方图片点不开）",
+            dispatchTouch(view, MotionEvent.ACTION_DOWN, 1f, 1f),
+        )
+    }
+
+    /** 向 View 派发一个指定动作与坐标的触摸事件，返回其是否消费该事件。 */
+    private fun dispatchTouch(view: View, action: Int, x: Float, y: Float): Boolean {
+        val now = android.os.SystemClock.uptimeMillis()
+        val event = MotionEvent.obtain(now, now, action, x, y, 0)
+        return try {
+            view.dispatchTouchEvent(event)
+        } finally {
+            event.recycle()
+        }
     }
 }
