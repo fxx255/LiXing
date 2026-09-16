@@ -117,12 +117,79 @@ if [ -z "$GH_BIN" ]; then
   fi
 fi
 
+# ⚠️ 284MB 资产**绝不能**用 `gh release create` / `gh release upload` 直接传：
+# 实测会卡死（>15min 无进展）。正确做法是先建一个**不带资产的 draft**，
+# 拿到 id 后再用 curl 直传（实测 6~20min，HTTP 201）。
 "$GH_BIN" release create "v${VERSION_NAME}" \
-  "build/${APK_NAME}" \
-  "build/update.json" \
   --repo "$REPO" \
+  --draft \
   --title "砺行 ${VERSION_NAME}" \
   --notes "$CHANGELOG"
+
+# draft 的 git tag 尚未创建，按 tag 查 id 会 404 ⇒ 只能在列表里按 tag_name 找
+RELEASE_ID=$("$GH_BIN" api "repos/${REPO}/releases?per_page=20" \
+  --jq ".[] | select(.tag_name==\"v${VERSION_NAME}\") | .id" 2>/dev/null || true)
+if [ -z "$RELEASE_ID" ]; then
+  echo "错误：找不到 v${VERSION_NAME} 的 release id" >&2
+  exit 1
+fi
+echo "==> release id = ${RELEASE_ID}"
+
+TOKEN=$("$GH_BIN" auth token)
+echo "==> 上传资产（curl 直传）"
+for ASSET in "${APK_NAME}" update.json; do
+  curl --fail -sS --noproxy '*' -X POST \
+    -H "Authorization: token ${TOKEN}" \
+    -H "Content-Type: application/octet-stream" \
+    --data-binary "@build/${ASSET}" \
+    "https://uploads.github.com/repos/${REPO}/releases/${RELEASE_ID}/assets?name=${ASSET}" \
+    -o /dev/null -w "    ${ASSET} → HTTP=%{http_code}\n" \
+    || { echo "错误：${ASSET} 上传失败" >&2; exit 1; }
+done
+
+echo "==> 校验资产（GitHub 独立算出的 digest 必须等于本地 sha256）"
+"$GH_BIN" api "repos/${REPO}/releases/${RELEASE_ID}" \
+  --jq '.assets[] | "    \(.name)  \(.size)  \(.state)  \(.digest)"'
+if ! "$GH_BIN" api "repos/${REPO}/releases/${RELEASE_ID}" \
+      --jq -r '.assets[] | select(.name=="'"${APK_NAME}"'") | .digest' \
+      | grep -qx "sha256:${SHA256}"; then
+  echo "错误：GitHub 算出的 sha256 与本地 ${SHA256} 不一致，已中止发布" >&2
+  exit 1
+fi
+echo "    sha256 一致 ✓"
+
+echo "==> 关闭 draft（**必须 JSON 体**：`gh api -f draft=false` 是空操作）"
+# `-f` 发的是 form 编码，GitHub 对 draft/prerelease 这类布尔字段要求 JSON 体，
+# form 形式会被静默忽略（HTTP 200 但字段不变）⇒ latest 指针不切 ⇒ 云函数一直返回旧版。
+curl -sS -X PATCH -H "Authorization: token ${TOKEN}" \
+  -H "Content-Type: application/json" -d '{"draft":true}' \
+  "https://api.github.com/repos/${REPO}/releases/${RELEASE_ID}" -o /dev/null
+sleep 3
+curl -sS -X PATCH -H "Authorization: token ${TOKEN}" \
+  -H "Content-Type: application/json" -d '{"draft":false}' \
+  "https://api.github.com/repos/${REPO}/releases/${RELEASE_ID}" -o /dev/null
+sleep 3
+
+# 🔴 **`--draft` 创建的 release 不会创建 git tag**，之后 PATCH draft:false 也**不会补建**。
+# 后果：release 的 tag_name 变成 `untagged-<sha>`，资产的下载 URL 跟着变成
+# `.../download/untagged-<sha>/xxx.apk`；而清单里的 apkUrl 写的是
+# `.../download/v<版本>/xxx.apk` ⇒ **检查更新正常、下载必定 404**（v1.0.39 踩过）。
+# 必须显式建 tag 推送，再 PATCH tag_name 把 release 关联回去。
+echo "==> 补建 git tag v${VERSION_NAME}"
+git tag -f "v${VERSION_NAME}" "$(git rev-parse HEAD)"
+git push origin "v${VERSION_NAME}"
+curl -sS -X PATCH -H "Authorization: token ${TOKEN}" \
+  -H "Content-Type: application/json" -d "{\"tag_name\":\"v${VERSION_NAME}\"}" \
+  "https://api.github.com/repos/${REPO}/releases/${RELEASE_ID}" -o /dev/null
+sleep 3
+
+echo "==> 校验资产下载 URL 指向正确的 tag"
+"$GH_BIN" api "repos/${REPO}/releases/${RELEASE_ID}" \
+  --jq -r '.assets[].browser_download_url' | tee /tmp/_release_urls.txt
+if ! grep -q "/download/v${VERSION_NAME}/" /tmp/_release_urls.txt; then
+  echo "错误：下载 URL 未包含 v${VERSION_NAME}，清单里的 apkUrl 会 404" >&2
+  exit 1
+fi
 
 # ⚠️ 发布后必须确认 GitHub 的 latest 指针真的切到新版本。
 # 云函数的 UPDATE_MANIFEST_URL 指向 `…/releases/latest/download/update.json`，
