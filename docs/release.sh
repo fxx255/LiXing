@@ -17,9 +17,12 @@ set -euo pipefail
 VERSION_NAME="${1:?用法: release.sh <versionName> [changelog] [user/repo]}"
 CHANGELOG="${2:-更新到 ${VERSION_NAME}}"
 REPO="${3:-${GITHUB_REPO:-fxx255/LiXing}}"
-# 国内手机连不上 GitHub 的 release 附件 CDN，清单里的下载地址必须走加速镜像。
-# App 端 DownloadMirrors 还会再自动回退另外两个源，这里只负责给个可用的首选。
-MIRROR="${UPDATE_MIRROR:-https://ghfast.top/}"
+# ⚠️ 清单里的 apkUrl 必须是**干净的 GitHub 直链**，绝不能带镜像前缀：
+# 客户端 DownloadMirrors 会在自己的镜像列表上逐个拼接重试，清单里若已带一层
+# 前缀，客户端再拼一层就变成 `ghfast.top/https://ghfast.top/https://github.com/...`
+# ⇒ 服务端直接 403。症状是「检查更新正常、但下载必定失败」，很难查。
+# 镜像前缀只由客户端负责，这里恒为空。
+MIRROR=""
 
 cd "$(dirname "$0")/.."
 
@@ -53,6 +56,10 @@ fi
 echo "==> versionCode=$VERSION_CODE versionName=$VERSION_NAME minSdk=$MIN_SDK"
 
 echo "==> 构建 release 包"
+# ⚠️ 必须用 JDK 21：JDK 25 会让 JLatexMath 的 TeXFormula 静态初始化失败
+# （测试侧表现为 8 项假红，且失败是粘性的），构建侧行为也不保证一致。
+export JAVA_HOME="${JAVA_HOME:-D:/tools/jdk-21.0.12+8}"
+echo "    JAVA_HOME=$JAVA_HOME"
 GRADLE_USER_HOME="F:/APP/.gradle-local" ./gradlew :app:assembleRelease
 
 APK="app/build/outputs/apk/release/app-release.apk"
@@ -116,6 +123,42 @@ fi
   --repo "$REPO" \
   --title "砺行 ${VERSION_NAME}" \
   --notes "$CHANGELOG"
+
+# ⚠️ 发布后必须确认 GitHub 的 latest 指针真的切到新版本。
+# 云函数的 UPDATE_MANIFEST_URL 指向 `…/releases/latest/download/update.json`，
+# 而 `latest` 由 GitHub 内部按 published_at 维护 —— 若它没切过来，App 的
+# 检查更新会一直拿到旧清单（症状：release 页明明有新版，App 却说已是最新）。
+#
+# 注意：`gh api -X PATCH -f draft=false` 是**空操作**！`-f` 发的是 form 编码，
+# GitHub 对 draft/prerelease 这类布尔字段要求 JSON 体，form 形式会被静默忽略
+# （HTTP 200 但字段不变），所以必须用 curl + JSON 体。
+LATEST=$("$GH_BIN" api "repos/${REPO}/releases/latest" --jq '.tag_name' 2>/dev/null || echo "unknown")
+if [ "$LATEST" != "v${VERSION_NAME}" ]; then
+  echo "⚠️  latest 指针仍指向 ${LATEST}，用 JSON 体强制重发一次…"
+  RELEASE_ID=$("$GH_BIN" api "repos/${REPO}/releases?per_page=20" \
+    --jq ".[] | select(.tag_name==\"v${VERSION_NAME}\") | .id" 2>/dev/null || true)
+  if [ -z "$RELEASE_ID" ]; then
+    echo "错误：找不到 v${VERSION_NAME} 的 release id" >&2
+    exit 1
+  fi
+  TOKEN=$("$GH_BIN" auth token)
+  for BODY in '{"draft":true}' '{"draft":false}'; do
+    curl -sS -X PATCH \
+      -H "Authorization: token ${TOKEN}" \
+      -H "Content-Type: application/json" \
+      -d "$BODY" \
+      "https://api.github.com/repos/${REPO}/releases/${RELEASE_ID}" >/dev/null || true
+    sleep 5
+  done
+  sleep 5
+  LATEST=$("$GH_BIN" api "repos/${REPO}/releases/latest" --jq '.tag_name' 2>/dev/null || echo "unknown")
+fi
+if [ "$LATEST" = "v${VERSION_NAME}" ]; then
+  echo "==> latest 指针已切到 v${VERSION_NAME}"
+else
+  echo "错误：latest 指针仍为 ${LATEST}，云函数会返回旧版本，请到 GitHub 网页端手动 Republish" >&2
+  exit 1
+fi
 
 echo "==> 完成。别忘了把 update.json 的直链配置到 Cloudbase 云函数的 UPDATE_MANIFEST_URL："
 echo "    https://github.com/${REPO}/releases/download/v${VERSION_NAME}/update.json"
