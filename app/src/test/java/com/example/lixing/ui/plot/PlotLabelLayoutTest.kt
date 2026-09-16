@@ -114,18 +114,37 @@ class PlotLabelLayoutTest {
         assertTrue(!containsCjk("S_c(f) = 2B"))
     }
 
-    // ---------- x 轴坐标范围（覆盖数据 + 两端留白） ----------
+    // ---------- x 轴坐标范围（模型显式定义域优先 + 推断范围留白） ----------
 
     @Test
-    fun `数据贴到边界时两端都留出边距`() {
-        // 数据是 -0.08..1.08，模型给的 0..1 更窄 ⇒ 视野由数据决定；
-        // 此时曲线首末点正好等于视野边界，必须外扩留白，否则看起来就像图被切断
-        val (lo, hi) = conservativeRange(-0.08, 1.08, 0.0, 1.0)
+    fun `模型显式给的定义域原样保留不外扩`() {
+        // 用户反馈「曲线稳定溢出该有的 -B/2 到 B/2 之间」：
+        // 理想低通/带通谱只在 |f| ≤ B/2 上有定义，模型把 min/max 设成 ±2、
+        // 曲线也恰好铺满 ±2。此时若仍外扩 4%，x 轴变成 ±2.08 ⇒
+        // ±B/2 的 markLine 竖线落进绘图区内部、曲线看起来「穿过了定义域边界」。
+        val (lo, hi) = conservativeRange(-2.0, 2.0, -2.0, 2.0)
+        assertEquals("定义域边界必须精确保留：$lo", -2.0, lo, 1e-9)
+        assertEquals("定义域边界必须精确保留：$hi", 2.0, hi, 1e-9)
+    }
+
+    @Test
+    fun `自动推断范围时两端都留出边距`() {
+        // 模型没给定义域（min/max 为空）⇒ 范围由数据推断。
+        // 此时数据首末点正好等于视野边界，必须外扩留白，否则看起来就像图被切断
+        val (lo, hi) = conservativeRange(-0.08, 1.08, null, null)
         assertTrue("左端要外扩到数据之外：$lo", lo < -0.08)
         assertTrue("右端要外扩到数据之外：$hi", hi > 1.08)
         val pad = (1.08 - (-0.08)) * X_MARGIN_RATIO
         assertEquals(-0.08 - pad, lo, 1e-9)
         assertEquals(1.08 + pad, hi, 1e-9)
+    }
+
+    @Test
+    fun `只给单侧定义域时只推断另一侧`() {
+        // 模型只给了 max=1.08：max 那侧必须精确保留，min 那侧靠数据推断并留白
+        val (lo, hi) = conservativeRange(-0.08, 1.08, null, 1.08)
+        assertTrue("缺的一侧要留白：$lo", lo < -0.08)
+        assertEquals("给了的一侧要保持精确：$hi", 1.08, hi, 1e-9)
     }
 
     @Test
@@ -136,17 +155,12 @@ class PlotLabelLayoutTest {
     }
 
     @Test
-    fun `模型范围比数据更窄时扩展到覆盖数据并留白`() {
+    fun `模型范围比数据更窄时扩展到覆盖数据`() {
+        // 模型给了比实际曲线更窄的窗口（0.5..0.6），但数据是 -0.08..1.08：
+        // 定义域不能裁掉数据，必须扩展（并且因为数据贴边而留白）
         val (lo, hi) = conservativeRange(-0.08, 1.08, 0.5, 0.6)
-        assertTrue("必须覆盖数据本身：$lo", lo < -0.08)
-        assertTrue("必须覆盖数据本身：$hi", hi > 1.08)
-    }
-
-    @Test
-    fun `没有模型范围时用数据范围并留白`() {
-        val (lo, hi) = conservativeRange(-0.08, 1.08, null, null)
-        assertTrue(lo < -0.08)
-        assertTrue(hi > 1.08)
+        assertTrue("必须覆盖数据本身：$lo", lo <= -0.08)
+        assertTrue("必须覆盖数据本身：$hi", hi >= 1.08)
     }
 
     @Test
@@ -154,6 +168,54 @@ class PlotLabelLayoutTest {
         val (lo, hi) = conservativeRange(2.0, 2.0, null, null)
         assertEquals(2.0, lo, 1e-9)
         assertEquals(2.0, hi, 1e-9)
+    }
+
+    @Test
+    fun `非法的定义域不采用且不产生 NaN`() {
+        // specLo == specHi（跨度为零）是非法定义域 ⇒ 不采用。此时两侧都算「推断」，
+        // 因此都留白；关键是范围必须覆盖数据本身、且不产生 NaN/Infinity
+        val (lo, hi) = conservativeRange(-1.0, 1.0, 3.0, 3.0)
+        assertTrue("必须覆盖数据：$lo", lo <= -1.0)
+        assertTrue("必须覆盖数据：$hi", hi >= 1.0)
+        assertTrue("不能是 NaN", lo.isFinite() && hi.isFinite())
+    }
+
+    // ---------- y 轴刻度字号（优先缩字号，避免截成省略号） ----------
+
+    @Test
+    fun `y 轴文案装得下时沿用基准字号`() {
+        val plan = planYTickSize(listOf(60f, 40f), available = 100f, baseSize = 24f)
+        assertEquals(24f, plan.textSize, 1e-4f)
+        assertEquals("requiredWidth 应是最宽的那条", 60f, plan.requiredWidth, 1e-4f)
+    }
+
+    @Test
+    fun `y 轴文案装不下时先缩字号而不是截断`() {
+        // 最宽 120px 放进 100px ⇒ 只需缩到 0.833 倍，在 0.62 的下限之上 ⇒ 缩字号
+        val plan = planYTickSize(listOf(120f), available = 100f, baseSize = 24f)
+        val expected = 24f * (100f / 120f)
+        assertEquals("应按宽度比例缩放", expected, plan.textSize, 1e-3f)
+        assertTrue("缩后宽度应放进可用宽度：${plan.requiredWidth}",
+            plan.requiredWidth <= 100f + 1e-3f)
+        assertTrue("确实缩小了字号", plan.textSize < 24f)
+    }
+
+    @Test
+    fun `缩到下限仍不够时锁定下限字号并报告所需宽度`() {
+        // 需要缩到 0.2 倍，低于 0.62 的下限 ⇒ 字号锁定下限，由调用方加宽留白
+        val plan = planYTickSize(listOf(500f), available = 100f, baseSize = 24f)
+        val minSize = 24f * Y_TICK_MIN_SIZE_SCALE
+        assertEquals("字号要停在下限", minSize, plan.textSize, 1e-3f)
+        assertTrue("缩减后的宽度仍超过可用宽度，调用方需加宽留白：${plan.requiredWidth}",
+            plan.requiredWidth > 100f)
+    }
+
+    @Test
+    fun `字号方案对空列表与非有限值安全`() {
+        assertEquals(24f, planYTickSize(emptyList(), 100f, 24f).textSize, 1e-4f)
+        val p = planYTickSize(listOf(Float.NaN, Float.POSITIVE_INFINITY), 100f, 24f)
+        assertEquals("非法宽度应被忽略", 24f, p.textSize, 1e-4f)
+        assertEquals(0f, p.requiredWidth, 1e-4f)
     }
 
     // ---------- 平衡坐标范围（主体完整 + 边距 + 极端点折叠） ----------

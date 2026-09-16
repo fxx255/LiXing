@@ -300,16 +300,38 @@ class PlotBitmapRenderer(
         val titleSize = width * 0.031f
         val labelSize = width * 0.026f
         val tickSize = width * 0.024f
-        val plotX = padLeft
-        val plotY = padTop
-        val plotW = width - padLeft - padRight
-        val plotH = height - padTop - padBottom
-
-        fun sx(x: Double): Float = plotX + ((x - xLo) / spanX * plotW).toFloat()
-        fun sy(y: Double): Float = plotY + plotH - ((y - yLo) / spanY * plotH).toFloat()
 
         val xTicks = spec.x.ticks ?: niceTicks(xLo, xHi, 5)
         val yTicks = spec.y.ticks ?: niceTicks(yLo, yHi, 4)
+
+        // y 轴刻度文案的排版方案：**在确定绘图区位置之前先算**。
+        //
+        // 为什么必须提前算：左侧留白原本是固定的画布宽 8.2%，参数化刻度文案
+        // （如 `$N_0(2\pi f_c)^2$`）排版后远比这宽，收进留白后被截成「…」——
+        // 用户看到的就是「左边稳定显示三个点」。这里改成两段式：
+        // 1. 先按基准字号量一遍最宽的那条刻度文案；
+        // 2. 装得下就沿用基准字号；装不下就**压缩字号**，仍装不下才**加宽左侧留白**。
+        // 两条路都能保住完整文案，绝不会退化成省略号。
+        // 注意：这里只能用「夹取到画布」量，因为此时绘图区还没定位。
+        val yTickRaws = yTicks.map { spec.y.tickLabels[it] ?: formatTick(it) }
+        val yLabelPlan = planYTickSize(
+            widths = yTickRaws.map { smartTextWidth(it, tickSize) },
+            available = padLeft - width * Y_TICK_GAP_RATIO,
+            baseSize = tickSize,
+        )
+        val tickSizeY = yLabelPlan.textSize
+        // 缩字号后仍嫌不够，就把左侧留白放宽到内容需要的宽度（有上限，见其注释）
+        val padLeftExtra = (yLabelPlan.requiredWidth + width * Y_TICK_GAP_RATIO - padLeft)
+            .coerceIn(0f, width * LEFT_PAD_EXTRA_MAX_RATIO)
+        val padLeftFinal = padLeft + padLeftExtra
+        val plotX = padLeftFinal
+        val plotY = padTop
+        val plotW = width - padLeftFinal - padRight
+        val plotH = height - padTop - padBottom
+
+        // 坐标变换：绘图区定位之后才能定义（plotX/plotW 依赖上面的自适应结果）
+        fun sx(x: Double): Float = plotX + ((x - xLo) / spanX * plotW).toFloat()
+        fun sy(y: Double): Float = plotY + plotH - ((y - yLo) / spanY * plotH).toFloat()
 
         // ---- 4. markArea（垫在网格下面）----
         // 图内注释统一夹在**绘图区**里：贴着右边缘的注释不会再横穿到图片外面
@@ -413,18 +435,24 @@ class PlotBitmapRenderer(
         // y 轴：右对齐到绘图区左侧，并且**把夹取范围收进绘图区左侧的留白**。
         // 参数化的刻度文案可能很长（如 $2\pi^2N_0(f_c+B/2)^2$），
         // 不收紧的话它会横向伸进绘图区、压住曲线（用户反馈「左边的字挡住图像」）。
-        // 收进留白后放不下的部分按 planLabelLayout 的规则截断加省略号。
+        //
+        // 但夹取会导致截断加省略号，而 y 轴文案**不能被截**（截出来就是用户看到的
+        // 「左边稳定显示三个点」）。所以这里的设计是：**先量后裁**——
+        // 上面已经按实际文案宽度定好了字号与绘图区位置，正常情况下列文正好填满留白、
+        // 不带省略号；这里的夹取只作为最后兜底（例如留白已放到上限仍装不下）。
         val savedBounds = labelBounds
         labelBounds = RectF(0f, plotY, (plotX - width * 0.008f).coerceAtLeast(0f), plotY + plotH)
-        for (t in yTicks) {
-            val raw = spec.y.tickLabels[t] ?: formatTick(t)
-            val w = smartTextWidth(raw, tickSize)
+        // y 轴刻度文案的字号已由 planYTickSize 定好：装得下就用基准字号，
+        // 装不下先缩字号、必要时绘图区已被右移，**不再出现「只剩三个点」**。
+        for ((index, t) in yTicks.withIndex()) {
+            val raw = yTickRaws[index]
+            val w = smartTextWidth(raw, tickSizeY)
             drawSmartText(
                 canvas,
                 raw,
-                plotX - width * 0.012f - w,
-                sy(t) + tickSize * 0.36f,
-                tickSize,
+                plotX - width * Y_TICK_GAP_RATIO - w,
+                sy(t) + tickSizeY * 0.36f,
+                tickSizeY,
                 theme.subText,
             )
         }
@@ -638,8 +666,59 @@ private const val TITLE_BAND_RATIO = 0.085f
 private const val LEGEND_BAND_RATIO = 0.048f
 private const val BOTTOM_PAD_RATIO = 0.125f
 
+/** 刻度文案与坐标轴之间的横向间隙（相对画布宽）。 */
+private const val Y_TICK_GAP_RATIO = 0.010f
+
+/** y 轴靠缩字号仍不够时，左侧留白最多再额外加宽的画布宽比例。 */
+private const val LEFT_PAD_EXTRA_MAX_RATIO = 0.10f
+
+/** y 轴刻度文案允许缩到的最小字号（相对基准字号）。再小就放弃缩字、改加宽留白。 */
+internal const val Y_TICK_MIN_SIZE_SCALE = 0.62f
+
 /** 标签被夹取到装不下时的省略号。 */
 private const val ELLIPSIS = "…"
+
+/**
+ * y 轴刻度文案的排版方案。
+ *
+ * 背景：y 轴的参数化刻度（`$N_0(2\pi f_c)^2$`）比纯数字宽得多，而左侧留白是按
+ * 画布宽固定取比例的。以前的做法是「留白装不下就截断加省略号」，
+ * 于是那条长文案只剩一个「…」，用户看到的是「左边稳定显示三个点」
+ * （三个点正是中文省略号 … 的视觉形态）。
+ *
+ * 这里改成优先**缩字号**：只要缩到 [Y_TICK_MIN_SIZE_SCALE] 以上能装下，就用缩小的字号
+ * 完整绘制；字号缩到下限仍装不下时，才返回所需的额外留白宽度，由调用方把绘图区右移。
+ * 两条路结果都是**完整文案**，省略号不再是常态。
+ *
+ * @param widths   各刻度文案在 [baseSize] 下的测量宽度（取最大值作为约束）
+ * @param available 当前可供 y 轴文案使用的宽度（左侧留白减去与轴的间隙）
+ * @param baseSize 基准字号
+ * @return 实际可用字号与「完整显示所需的总宽度」
+ */
+internal fun planYTickSize(
+    widths: List<Float>,
+    available: Float,
+    baseSize: Float,
+): YTickSizePlan {
+    val widest = widths.filter { it.isFinite() && it > 0f }.maxOrNull() ?: 0f
+    if (widest <= 0f || baseSize <= 0f) return YTickSizePlan(baseSize, 0f)
+    if (available <= 0f) return YTickSizePlan(baseSize, widest)
+
+    if (widest <= available) return YTickSizePlan(baseSize, widest)
+
+    // 按宽度线性缩字号（字号与文本宽度近似成正比，够用且可预期）
+    val scaled = baseSize * (available / widest)
+    val minSize = baseSize * Y_TICK_MIN_SIZE_SCALE
+    return if (scaled >= minSize) {
+        YTickSizePlan(scaled, widest * (scaled / baseSize))
+    } else {
+        // 缩到下限仍不够 ⇒ 改用加宽留白，字号保持下限（此时缩放已到极限）
+        YTickSizePlan(minSize, widest * (minSize / baseSize))
+    }
+}
+
+/** [planYTickSize] 的结果：实际字号 + 该字号下最宽文案的宽度。 */
+internal data class YTickSizePlan(val textSize: Float, val requiredWidth: Float)
 
 /**
  * 一段标签的落位方案（由 [planLabelLayout] 纯函数算出）。
@@ -790,14 +869,20 @@ private fun quantile(sorted: List<Double>, p: Double): Double {
 }
 
 /**
- * x 轴（定义域）的坐标范围：以模型声明的区间为准，点集不得越出视野，**且两端要留少量边距**。
+ * x 轴（定义域）的坐标范围。
  *
- * 为什么必须留边距：这里返回的范围就是绘图区的横轴跨度。如果只取「数据范围 ∪ 模型范围」，
- * 曲线的首末点必然正好落在绘图区左右边框上 —— 视觉上就像整张图被从中间切断
- * （用户反馈「左右看上去还是截断的，没有画出完整的图像」，实际是端点贴框而非数据缺失）。
- * 留一点边距后曲线两端都落在框内，形状才完整可读。
+ * 优先级（**模型显式声明的区间永远不被外扩**）：
+ * 1. 模型给了 min/max ⇒ **原样采用**。这不是「视野」而是**定义域**：频谱题里
+ *    `±B/2` 就是曲线的存在区间，外扩会让曲线看起来越过了自己的定义域边界
+ *    （用户反馈「曲线稳定溢出该有的 -B/2 到 B/2 之间」）。
+ *    留白在这里是有害的：外扩后 `±B/2` 的 markLine 竖线落进绘图区内部，
+ *    曲线自然「穿过」了本该终止的那条线。
+ * 2. 模型没给 ⇒ 用数据范围，**两端各留 [marginRatio] 边距**。
+ *    这时若不留白，曲线首末点必然压在绘图区左右边框上，看起来像整张图被切断
+ *    （用户反馈「左右看上去还是截断的」）——但那是「自动推断范围」的问题，
+ *    应该在推断侧解决，而不是去改模型显式给的定义域。
  *
- * 只在「数据确实贴到该侧边界」时才外扩：这样模型本来就给了宽松窗口时不会被再撑大一圈。
+ * 单独的 min 或 max 只对缺的那一侧做推断 + 留白。
  */
 internal fun conservativeRange(
     dataLo: Double,
@@ -808,14 +893,29 @@ internal fun conservativeRange(
 ): Pair<Double, Double> {
     var lo = minOf(specLo ?: dataLo, dataLo)
     var hi = maxOf(specHi ?: dataHi, dataHi)
+
+    // 模型显式声明了**合法且能覆盖数据**的区间 ⇒ 这是定义域，原样返回。
+    // 采样本就在该区间内，所以点集不会越出；曲线终止在两端正是我们想要的
+    // （用户反馈「曲线稳定溢出该有的 -B/2 到 B/2 之间」就是被外扩害的）。
+    //
+    // 但定义域**不能裁掉数据**：模型偶尔会给一个比实际曲线更窄的窗口，
+    // 这时必须扩展到覆盖数据（否则曲线被无声截断），也就退回到下面带留白的推断分支。
+    val specCoversData = specLo != null && specHi != null &&
+        specHi > specLo && specLo <= dataLo + CARET_EPS && specHi >= dataHi - CARET_EPS
+    if (specCoversData) return specLo!! to specHi!!
+
     val span = hi - lo
     if (span <= 0.0 || !span.isFinite()) return lo to hi
     val pad = span * marginRatio
     val eps = span * 1e-6
-    if (dataLo <= lo + eps) lo -= pad
-    if (dataHi >= hi - eps) hi += pad
+    // 只给**推断出来的那一侧**留白：模型给了边界、且该边界没被数据推翻的那侧要保持精确
+    if ((specLo == null || specLo > dataLo) && dataLo <= lo + eps) lo -= pad
+    if ((specHi == null || specHi < dataHi) && dataHi >= hi - eps) hi += pad
     return lo to hi
 }
+
+/** 判断「模型给的边界是否已覆盖数据」时的容差（相对跨度），吸收浮点与采样步长的误差。 */
+private const val CARET_EPS = 1e-9
 
 /** x 轴两端的最小留白比例（相对横轴跨度）。 */
 internal const val X_MARGIN_RATIO = 0.04
