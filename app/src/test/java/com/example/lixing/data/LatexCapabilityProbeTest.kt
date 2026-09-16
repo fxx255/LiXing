@@ -18,6 +18,14 @@ import java.io.File
  * 目的不是断言，而是拿到一份**能力边界清单**，用来区分：
  * - 结构性缺陷：JLatexMath 本身不支持（清洗再怎么补也补不出来）；
  * - 兜底覆盖不全：库里其实支持，只是我们的清洗/包裹没把模型输出的畸形写法修好。
+ *
+ * ⚠️ **运行环境要求：必须显式指定 JDK 21**（`JAVA_HOME=D:/tools/jdk-21.0.12+8`）。
+ * 用 JDK 25 跑时，`TeXFormula` 的静态初始化会失败，本文件与
+ * [JLatexMathArraySupportTest]、[JLatexMathLeadingTokensTest] 会**集体**报
+ * `NoClassDefFoundError: Could not initialize class ...TeXFormula`（109/109 全 FAIL），
+ * 看上去像渲染全线崩了，实际与生产代码毫无关系。
+ * 此时 [JLatexMathAvailabilityTest] 会给出真正的根因；单独跑这几个类也会恢复正常。
+ * 详见 build.gradle.kts 里的 JDK 约束说明。
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(application = Application::class)

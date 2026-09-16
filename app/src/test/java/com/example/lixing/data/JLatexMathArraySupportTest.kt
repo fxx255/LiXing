@@ -28,6 +28,10 @@ import ru.noties.jlatexmath.JLatexMathAndroid
  * 这组测试回答两个设计问题：
  * 1. aligned→array 转换策略是否成立（array 环境真实可解析）；
  * 2. 「整块保留」兜底路径在解析失败时确实会走占位符（而不是侥幸渲染）。
+ *
+ * ⚠️ **运行环境要求：必须显式指定 JDK 21**（`JAVA_HOME=D:/tools/jdk-21.0.12+8`）。
+ * JDK 25 下会报 `NoClassDefFoundError: Could not initialize class ...TeXFormula`，
+ * 本类 7 项全红但根因不在被测逻辑里。根因由 [JLatexMathAvailabilityTest] 给出。
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(application = Application::class) // 避免启动 LiXingApplication 的后台协程污染其他测试

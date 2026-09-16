@@ -38,7 +38,10 @@ class PlotBitmapRenderer(
         val background: Int = 0xFF1C1C1E.toInt(),
         val text: Int = 0xFFC9C9CE.toInt(),
         val subText: Int = 0xFF8E8E93.toInt(),
-        val axis: Int = 0xFF4A4A4F.toInt(),
+        // 坐标轴线：明显比网格亮（网格 0x2B2B2F、刻度文案 0x8E8E93）。
+        // 提到接近刻度文案的亮度是为了满足「图中要有更明显的 xy 坐标轴」——
+        // 早先与网格同档，轴在深色背景上几乎看不见（用户反馈）。
+        val axis: Int = 0xFFA8A8B0.toInt(),
         val grid: Int = 0xFF2B2B2F.toInt(),
         val markLine: Int = 0xFF6A6A70.toInt(),
         val markArea: Int = 0x1FFFC857,
@@ -417,16 +420,65 @@ class PlotBitmapRenderer(
         canvas.restoreToCount(seriesSave)
 
         // ---- 7. 坐标轴 ----
-        // 坐标轴画在**内缩后**绘图区的两条边上（曲线不会压到它们）。
+        // 参照教材频谱插图（用户给出的参考图）的轴样式：
+        //   · x 轴是一条**长横线**，向左/右都伸到绘图区之外，右端下方标轴名；
+        //   · x=0 处一条**通高竖线**，从绘图区上方一直落到 x 轴（穿过整条曲线）；
+        //   · 曲线的定义域端点（±B/2 之类）由 markLine 画成实线竖线，只从 x 轴升到曲线。
+        // 这样轴本身就「看得出来是轴」，而不是一段贴着数据的短线。
         linePaint.color = theme.axis
-        linePaint.strokeWidth = dp(1f)
+        linePaint.strokeWidth = dp(AXIS_STROKE_DP)
         linePaint.pathEffect = null
-        canvas.drawLine(drawX, drawY + drawH, drawX + drawW, drawY + drawH, linePaint)
-        canvas.drawLine(drawX, drawY, drawX, drawY + drawH, linePaint)
+
+        // x 轴横线：左右各伸出绘图区，伸出量为画布宽的比例。
+        // 用外层绘图区（plotX..plotX+plotW）为基准而不是内缩矩形，
+        // 这样「轴长度」与内缩比例解耦，调内缩不会连带动到轴长。
+        val axisY = drawY + drawH
+        val axisLeft = plotX - width * AXIS_OVERHANG_L_RATIO
+        val axisRight = plotX + plotW + width * AXIS_OVERHANG_R_RATIO
+        canvas.drawLine(axisLeft, axisY, axisRight, axisY, linePaint)
+
+        // y 轴竖线：画在绘图区左边（含内缩），上下都略伸出。
+        // 注意这里只画 x=0 那一根通高竖线当 y 轴**是错的**：坐标系原点不一定在
+        // x 范围内（如 y=1/x 的窗口、y=2^x 只有正值）。所以分两种：
+        //   · 0 落在 x 范围内 ⇒ 竖线画在 x=0（真正的 y 轴，参考图的情形）；
+        //   · 否则 ⇒ 竖线仍画在绘图区左边，退化成「左边界轴线」。
+        val zeroInsideX = xLo <= 0.0 && 0.0 <= xHi
+        val yAxisX = if (zeroInsideX) sx(0.0) else drawX
+        // 竖线顶端伸到绘图区之上（参考图里竖向轴线明显高过曲线顶端）
+        val yAxisTop = drawY - plotH * AXIS_VERT_OVERHANG_RATIO
+        val yAxisBottom = axisY + height * AXIS_VERT_BELOW_RATIO
+        canvas.drawLine(yAxisX, yAxisTop, yAxisX, yAxisBottom, linePaint)
+
+        // 轴端小刻度（x 轴右端 + y 轴顶端），进一步强化「这是坐标轴」的读感
+        canvas.drawLine(axisRight, axisY, axisRight, axisY - height * 0.014f, linePaint)
+        canvas.drawLine(yAxisX, yAxisTop, yAxisX + width * 0.010f, yAxisTop, linePaint)
+
+        // 轴名贴在**轴的远端**（教材参考图里 `f` 就标在 x 轴右端下方）。
+        // 位置取轴末端而不是绘图区中心——居中那个位置留给「轴标题」的语义已废弃，
+        // 统一改成端点轴名（见第 9 步的说明）。
+        //
+        // 与端刻度错开：若两者都紧贴 `axisRight`，轴名会压在端刻度上。
+        // 这里把轴名**右移半个字宽**并让它以自身左边缘贴住轴端右侧一点点，
+        // 保证「刻度在上、轴名在下且不重叠」。
+        if (spec.x.label.isNotEmpty()) {
+            val axisNameSize = tickSize * 1.02f
+            val w = smartTextWidth(spec.x.label, axisNameSize)
+            val nameX = (axisRight + width * 0.006f)
+                .coerceAtMost(width - w - width * 0.004f)
+            drawSmartText(
+                canvas,
+                spec.x.label,
+                nameX,
+                axisY + height * 0.030f,
+                axisNameSize,
+                theme.text,
+            )
+        }
 
         // ---- 7b. 断轴标记：有数据被折叠到范围外时，在竖直轴上画「断口」 ----
-        if (yRange.foldedHigh) drawAxisBreak(canvas, drawX, drawY + dp(9f))
-        if (yRange.foldedLow) drawAxisBreak(canvas, drawX, drawY + drawH - dp(9f))
+        // 竖轴的位置可能已经挪到 x=0（见上），断口必须跟着走，否则断口会画在空处。
+        if (yRange.foldedHigh) drawAxisBreak(canvas, yAxisX, drawY + dp(9f))
+        if (yRange.foldedLow) drawAxisBreak(canvas, yAxisX, drawY + drawH - dp(9f))
 
         // ---- 8. 刻度与标签 ----
         // 刻度文字夹在**画布**内（它们本来就在绘图区外、贴着轴排布），
@@ -482,10 +534,8 @@ class PlotBitmapRenderer(
         labelBounds = savedBounds
 
         // ---- 9. 轴标题 ----
-        val xLabel = spec.x.label
-        if (xLabel.isNotEmpty()) {
-            drawSmartText(canvas, xLabel, drawX + drawW / 2, height - height * 0.022f, labelSize, theme.text, alignCenter = true)
-        }
+        // x 轴名已在第 7 步贴着**轴末端**画好了（参考图的画法），这里不再重复居中绘制，
+        // 否则同一串文字会在图上出现两次。
         if (spec.y.label.isNotEmpty()) {
             val withUnit = if (spec.y.unit.isNotEmpty()) "${spec.y.label} (${spec.y.unit})" else spec.y.label
             val axisX = width * 0.018f
@@ -521,19 +571,29 @@ class PlotBitmapRenderer(
         }
 
         // ---- 11. markLine ----
+        // 竖直标记线（`±B/2` 这类**定义域边界**）改成**实线**，并且只画到曲线为止。
+        //
+        // 教材参考图里这两条边界是实线、从 x 轴升到曲线端点、不越到曲线之上——
+        // 早先用贯穿整个绘图区高度的虚线，看起来像「辅助网格线」而不像边界
+        // （用户反馈希望更接近参考图）。这里：
+        //   · 有曲线经过 ⇒ 画到该 x 处曲线的最高点（端点正好接住曲线）；
+        //   · 没有曲线经过（纯标记位置）⇒ 退化为整段实线。
+        // 颜色仍用 markLine（比轴线暗），保证边界不抢曲线的视觉重心。
         for (line in spec.markLines) {
             val x = line.x ?: continue
+            val px = sx(x)
+            val curveTop = curveTopAt(sampled, x, ::sx, ::sy)
             linePaint.color = theme.markLine
-            linePaint.strokeWidth = dp(0.9f)
-            linePaint.pathEffect = DashPathEffect(floatArrayOf(dp(5f), dp(4f)), 0f)
-            canvas.drawLine(sx(x), drawY, sx(x), drawY + drawH, linePaint)
+            linePaint.strokeWidth = dp(MARK_LINE_STROKE_DP)
             linePaint.pathEffect = null
+            val top = curveTop ?: drawY
+            canvas.drawLine(px, top, px, drawY + drawH, linePaint)
             line.label?.let {
                 // 放进绘图区顶部：绘图区上方已经让给图例了，放外面会叠在一起。
                 // 夹在绘图区内，贴边的标记标签不会横穿到图片外面。
                 val save = canvas.save()
                 labelBounds = RectF(drawX, drawY, drawX + drawW, drawY + drawH)
-                drawSmartText(canvas, it, sx(x), drawY + height * 0.025f, tickSize, theme.subText, alignCenter = true)
+                drawSmartText(canvas, it, px, drawY + height * 0.025f, tickSize, theme.subText, alignCenter = true)
                 canvas.restoreToCount(save)
                 labelBounds = RectF(0f, 0f, width, height)
             }
@@ -580,6 +640,34 @@ class PlotBitmapRenderer(
         val gap = dp(2.6f)
         canvas.drawLine(axisX - w, y + h, axisX + w, y - h, linePaint)
         canvas.drawLine(axisX - w, y + h + gap, axisX + w, y - h + gap, linePaint)
+    }
+
+    /**
+     * 求某条竖线在 `x` 处应该画到多高——即**该处曲线的最高点**（画布 y）。
+     *
+     * 用途：定义域边界（`±B/2`）的实线要正好接住曲线端点，而不是贯穿整个绘图区
+     * （参考图的画法）。取「所有序列中最高的一条」，多条曲线时不会被靠后的序列遮住。
+     *
+     * 找不到（该 x 处没有任何序列的有效点、或全部超出绘图区）时返回 null，
+     * 由调用方退化为整段绘制。
+     */
+    private fun curveTopAt(
+        sampled: List<List<Pair<Double, Double?>>>,
+        x: Double,
+        sx: (Double) -> Float,
+        sy: (Double) -> Float,
+    ): Float? {
+        var best: Float? = null
+        for (pts in sampled) {
+            for ((px, py) in pts) {
+                if (py == null || !py.isFinite()) continue
+                // 找与该 x 最接近的采样点；采样是等距的，容差取相邻点的判定即可
+                if (abs(px - x) > CURVE_TOP_X_TOLERANCE) continue
+                val y = sy(py)
+                if (best == null || y < best) best = y
+            }
+        }
+        return best
     }
 
     /** 画折线：null 处断开——发散点（1/x 在 0 等）绝不能连成一条竖直长线。 */
@@ -683,7 +771,10 @@ private const val MAX_TEX_WIDTH_EM = 40f
  * 让绘图区稳定落在 1.5~1.8 : 1，既能看清抛物线的弯曲、也不至于把横向刻度挤掉。
  */
 private const val LEFT_PAD_RATIO = 0.082f
-private const val RIGHT_PAD_RATIO = 0.028f
+// 右侧留白取与左侧对称的 8.2%：这样两条轴外侧的空白一致，曲线天然居中。
+// 该值同时要容纳「x 轴伸出绘图区」的部分（AXIS_OVERHANG_R_RATIO=0.030）
+// 与轴名（如 `f`，约 3.5%），8.2% 有富余，不会把轴或轴名挤到画布外。
+private const val RIGHT_PAD_RATIO = 0.082f
 private const val TOP_PAD_RATIO = 0.055f
 private const val TITLE_BAND_RATIO = 0.085f
 private const val LEGEND_BAND_RATIO = 0.048f
@@ -699,17 +790,29 @@ private const val Y_TICK_GAP_RATIO = 0.010f
  * 坐标轴范围仍严格等于定义域（刻度 `±B/2` 位置精确），但曲线的首末点与
  * 上下极值都不会顶到框线上，与轴之间留出一圈空隙。
  *
- * 取值依据（用户多轮反馈收敛而来）：
+ * **横向取值沿革（用户四轮反馈收敛而来）**：
  * 1. 0% —— 曲线顶死在框线角上，「既不直观也看不出曲线特征、也不美观」；
  * 2. 5% —— 曲线仍占 90% 宽，用户仍反馈「曲线占满整个画出的横坐标范围」；
- * 3. **15%** —— 曲线占绘图区 **70%**，两侧各留 15%，与教材题 3.3(c)
- *    的观感一致（用户明确以该图为参照，并给出「70% 左右最好最美观」）。
+ * 3. 15% —— 曲线占绘图区 70%，用户认可但仍嫌「轴不明显」；
+ * 4. **23.68%** —— 用户给出教材参考图（频谱插图）并明确「图像比例向它看齐」。
+ *    对参考图做像素级测量后得到：**数据只占图宽 44.0%**，左右留白各约 28%。
  *
- * 所以横向取 15%。纵向仍取 7%：曲线的极值通常顶在顶部（主瓣峰），
- * 纵向只负责不贴框，不需要像横向那样让出 30%。
+ * ⚠️ **这个值不能凭「内缩 = 1 - 44%」直接取 0.28**——基准不同：
+ * 内缩是相对**绘图区**（已扣掉左右留白），而 44% 是相对**画布**。真正的公式是
+ * ```
+ * drawW = 画布宽 × (1 - LEFT_PAD - RIGHT_PAD) × (1 - 2×本文)
+ * ```
+ * 在左右留白都取 8.2% 的前提下，解 `drawW = 0.44 × 画布宽` 得本文 = **0.2368**。
+ * 两侧留白对称则曲线自然居中（本值 + 对称留白 ⇒ 左右间距各 28%，零偏差）。
+ *
+ * 若改成别的留白，必须用上式重解，否则曲线会偏到一边（实测 8.2%/7.5% 时
+ * 数据只占 37.1%、左右间距差 9.8px）。
+ *
+ * **纵向取 3%**：参考图里曲线两端几乎顶到标题下方，纵向余量远小于横向。
+ * 早先取 7% 时曲线被压得偏扁，与参考图的「高瘦」观感不符。
  */
-private const val PLOT_INSET_X_RATIO = 0.15f
-private const val PLOT_INSET_Y_RATIO = 0.07f
+private const val PLOT_INSET_X_RATIO = 0.2368f
+private const val PLOT_INSET_Y_RATIO = 0.03f
 
 /** y 轴靠缩字号仍不够时，左侧留白最多再额外加宽的画布宽比例。 */
 private const val LEFT_PAD_EXTRA_MAX_RATIO = 0.10f
@@ -719,6 +822,37 @@ internal const val Y_TICK_MIN_SIZE_SCALE = 0.62f
 
 /** 标签被夹取到装不下时的省略号。 */
 private const val ELLIPSIS = "…"
+
+/**
+ * [PlotBitmapRenderer.curveTopAt] 判定「采样点是否落在该竖线上」的 x 容差。
+ *
+ * 采样是等距的（900 个点在定义域上均分），所以该容差只需略大于一个采样步长
+ * 就能稳稳命中边界处的那个端点。定义域跨度为 1 时步长约 0.0011，取 1e-3 量级足够；
+ * 取得过大则会把远处的曲线误当成边界点，竖线会被画得过矮。
+ */
+private const val CURVE_TOP_X_TOLERANCE = 0.02
+
+/** 坐标轴线宽（dp）：比网格（0.8）与曲线（2+）之间取一档，保证「看得见但不喧宾夺主」。 */
+private const val AXIS_STROKE_DP = 1.5f
+
+/** 定义域边界竖线的线宽（dp）。 */
+private const val MARK_LINE_STROKE_DP = 1.2f
+
+/**
+ * x 轴横线左右**伸出绘图区**的量（相对画布宽）。
+ *
+ * 教材参考图的 x 轴是一条明显长于数据范围的长横线，右端还要留出轴名（如 `f`）的位置。
+ * 左 5% / 右 7.5% 是照参考图实测的（轴左端在图宽 5%、右端在 92.5%）反推得来。
+ * 注意右侧伸出量必须 ≤ `RIGHT_PAD_RATIO`，否则轴会画到画布外。
+ */
+private const val AXIS_OVERHANG_L_RATIO = 0.012f
+private const val AXIS_OVERHANG_R_RATIO = 0.030f
+
+/** y 轴竖线顶端**伸出绘图区上方**的量（相对绘图区高）。参考图里竖线明显高过曲线顶端。 */
+private const val AXIS_VERT_OVERHANG_RATIO = 0.10f
+
+/** y 轴竖线底端**穿过 x 轴**往下伸的量（相对画布高）。让两轴相交处有个出头，更像坐标轴。 */
+private const val AXIS_VERT_BELOW_RATIO = 0.012f
 
 /**
  * y 轴刻度文案的排版方案。

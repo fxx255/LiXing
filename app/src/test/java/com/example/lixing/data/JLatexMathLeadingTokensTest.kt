@@ -17,6 +17,11 @@ import ru.noties.jlatexmath.JLatexMathAndroid
  * 平板截图里占位框的源码以 `=` 开头（=\begin{cases}...），
  * 推导长公式在 \\ 处拆分还会产生以 \\ 开头的段。
  * 这组测试回答：到底哪种段首会触发 ParseException。
+ *
+ * ⚠️ **运行环境要求：必须显式指定 JDK 21**（`JAVA_HOME=D:/tools/jdk-21.0.12+8`）。
+ * JDK 25 下 `TeXFormula` 静态初始化失败，本文件会报
+ * `NoClassDefFoundError: Could not initialize class ...TeXFormula`，
+ * 与「段首容忍度」这个被测主题无关。根因由 [JLatexMathAvailabilityTest] 给出。
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(application = Application::class)

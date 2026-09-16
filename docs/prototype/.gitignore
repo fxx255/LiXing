@@ -1,3 +1,9 @@
 # 原型编译产物与示例输出：都能用脚本重新生成，不入库
 kotlin-jvm/classes/
 kotlin-jvm/out/
+
+# Java2D 原型的 .class（源码 .java 入库，字节码不入库）
+*.class
+
+# 参考图像素测量的中间产物：参考图本身不在仓库里，网格图无从复核
+ref_grid.png

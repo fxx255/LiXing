@@ -34,15 +34,36 @@ private class LineRecordingCanvas : android.graphics.Canvas() {
     /** 所有竖线（x 相同、y 不同）的 x 坐标。 */
     val verticalLineXs = mutableListOf<Float>()
 
+    /**
+     * 竖线的完整记录：`[x, 顶端 y, 底端 y]`。
+     *
+     * 需要它是因为 v1.0.38 之后「竖线」有三种来源（坐标轴线、定义域边界、端刻度），
+     * 光看 x 分不清谁是谁——比如 x 轴横线伸出绘图区后，它的**端刻度**会成为
+     * x 最大的一根竖线，把「B/2 落在哪」的断言带偏（实测 expected 691 但 was 910）。
+     * 有了 y 范围就能按「只从轴升到曲线」这个特征把边界线挑出来。
+     */
+    val verticalLines = mutableListOf<FloatArray>()
+
+    /** 所有横线（y 相同、x 不同）的 `[左端, 右端, y]`。用来验证「x 轴是否伸出绘图区」。 */
+    val horizontalLines = mutableListOf<FloatArray>()
+
     override fun drawLine(startX: Float, startY: Float, stopX: Float, stopY: Float, paint: android.graphics.Paint) {
+        // 渲染器只用 translate 做平移，取矩阵的平移分量即坐标偏移
+        val v = FloatArray(9)
+        matrix?.getValues(v)
+        val dx = v[android.graphics.Matrix.MTRANS_X]
+        val dy = v[android.graphics.Matrix.MTRANS_Y]
+
         if (kotlin.math.abs(startX - stopX) < 0.01f) {
-            // 渲染器只用 translate 做平移，取矩阵的平移分量即坐标偏移
-            val dx = matrix?.let {
-                val v = FloatArray(9)
-                it.getValues(v)
-                v[android.graphics.Matrix.MTRANS_X]
-            } ?: 0f
             verticalLineXs += startX + dx
+            verticalLines += floatArrayOf(startX + dx, startY + dy, stopY + dy)
+        }
+        if (kotlin.math.abs(startY - stopY) < 0.01f) {
+            horizontalLines += floatArrayOf(
+                minOf(startX, stopX) + dx,
+                maxOf(startX, stopX) + dx,
+                startY + dy,
+            )
         }
     }
 }
@@ -195,19 +216,32 @@ class PlotBitmapRendererTest {
         val recorder = LineRecordingCanvas()
         renderer.drawAll(recorder, spec, w, h)
 
-        val verticals = recorder.verticalLineXs
-        assertTrue("应有竖线被绘制（markLine/坐标轴）", verticals.size >= 2)
-        val leftMost = verticals.min()
-        val rightMost = verticals.max()
-
-        // 绘图区（未内缩）的左右边界
+        // 绘图区（未内缩）的左右边界。左右留白对称 8.2%（见 PLOT_* 常量注释）。
         val outerLeft = w * 0.082f
-        val outerRight = w - w * 0.028f
+        val outerRight = w - w * 0.082f
         val outerW = outerRight - outerLeft
         // ⚠️ 必须与 `PlotBitmapRenderer.PLOT_INSET_X_RATIO` 保持一致。
-        // 该比例历经三轮收敛：0%（曲线顶死框线角）→ 5%（仍占 90% 宽、用户仍嫌「占满」）
-        // → 15%（曲线占绘图区 70%，与教材题 3.3(c) 观感一致）。
-        val insetX = outerW * 0.15f
+        // 该比例历经四轮收敛：0%（曲线顶死框线角）→ 5%（仍占 90% 宽、用户仍嫌「占满」）
+        // → 15%（占绘图区 70%，用户认可但嫌轴不明显）
+        // → **23.68%**（对齐教材参考图：数据占**画布** 44%、两侧留白各 28%）。
+        val insetX = outerW * 0.2368f
+
+        // ⚠️ 不能直接用「所有竖线的 min/max」定位定义域边界：
+        // v1.0.38 起 x 轴横线伸出绘图区，其**端刻度**是小竖线，必定位居最右
+        // （实测会把 rightMost 从 691 带偏到 910）。
+        // 这里按「精确落在内缩后绘图区左右边界」这个**已知几何位置**取线，
+        // 而不是靠 y 范围猜——位置本身就是被测对象，用位置筛选最直接。
+        val expectedLeft = outerLeft + insetX
+        val expectedRight = outerRight - insetX
+        val boundaryLines = recorder.verticalLineXs.filter {
+            kotlin.math.abs(it - expectedLeft) < 1.5f || kotlin.math.abs(it - expectedRight) < 1.5f
+        }
+        assertTrue(
+            "应能在内缩后绘图区边界处找到定义域竖线；全部竖线=${recorder.verticalLineXs}",
+            boundaryLines.size >= 2,
+        )
+        val leftMost = boundaryLines.min()
+        val rightMost = boundaryLines.max()
 
         // ① 定义域上界的竖线位置 = 内缩后的右边界（= 范围未变，仅绘图区缩进）
         assertEquals(
@@ -219,7 +253,7 @@ class PlotBitmapRendererTest {
         // ② 余量必须真实存在且大小合理：既不能贴死框线，也不能大到浪费面积
         val margin = outerRight - rightMost
         assertTrue("曲线右侧必须有可见余量（margin=$margin）", margin > w * 0.02f)
-        assertTrue("右侧余量不应过大（margin=$margin）", margin < w * 0.20f)
+        assertTrue("右侧余量不应过大（margin=$margin）", margin < w * 0.35f)
         // ③ 左右两侧余量应对称（同一次内缩的结果）
         assertEquals(
             "左右余量应对称",
@@ -227,14 +261,82 @@ class PlotBitmapRendererTest {
             leftMost - outerLeft,
             1.5f,
         )
-        // ④ 用户明确的观感要求：**曲线应占绘图区宽度约 70%**，而不是顶满。
-        // 这条把「70% 左右最好最美观」这个主观诉求固化成可回归的数字，
-        // 避免以后有人把内缩调回 0/5% 又觉得「没差别」。
+        // ④ 用户明确的观感要求：**数据占画布宽约 44%**，与教材参考图一致。
+        // 这是对参考图做像素级测量的结果（参考图数据占图宽 44.0%），
+        // 比早期「占绘图区 70%」窄得多——「美观」的来源其实是两侧的大片留白。
+        // 注意基准是**画布**宽度而不是绘图区宽度：早期那条断言用错了基准。
         val drawnWidth = rightMost - leftMost
-        val occupancy = drawnWidth / outerW
+        val occupancy = drawnWidth / w
         assertTrue(
-            "曲线应占绘图区宽约 70%（实测 ${(occupancy * 100).toInt()}%）",
-            occupancy in 0.65f..0.75f,
+            "数据应占画布宽约 44%（实测 ${(occupancy * 100).toInt()}%）",
+            occupancy in 0.42f..0.46f,
+        )
+    }
+
+    /**
+     * 回归：坐标轴要「明显」且按教材参考图的样式绘制。
+     *
+     * 用户反馈「希望图中有更明显的 xy 坐标轴」，并给出参考图指出 x 轴应当**延伸出去**。
+     * 本用例钉住三件事（都是这次改动引入的、且容易被后续重构改回去的）：
+     * 1. **x 轴横线超出数据范围**（左右都伸出），而不是正好等于绘图区宽度；
+     * 2. **竖轴位置**：原点落在 x 范围内时画在 x=0，否则退化到绘图区左边界
+     *    （不能无条件画在 x=0，否则 `y=1/x`、`y=2^x` 这类窗口会画到空处）；
+     * 3. **定义域边界竖线不再贯穿整个绘图区高度**，而是止于曲线（参考图画法）。
+     */
+    @Test
+    fun `坐标轴按参考图样式绘制`() {
+        JLatexMathAndroid.init(RuntimeEnvironment.getApplication())
+
+        fun spec(xMin: Double, xMax: Double) = PlotSpec(
+            x = Axis(label = "f", min = xMin, max = xMax, ticks = listOf(xMin, xMax)),
+            y = Axis(ticks = listOf(1.0)),
+            series = listOf(Series(expr = "x^2")),
+            markLines = listOf(MarkLine(x = xMin), MarkLine(x = xMax)),
+        )
+
+        val w = 960f
+        val h = 560f
+
+        // ---- ① 原点在范围内 ⇒ 竖轴画在 x=0（居中），且 x 轴横线两端都伸出绘图区 ----
+        val center = LineRecordingCanvas()
+        renderer.drawAll(center, spec(-2.0, 2.0), w, h)
+        val horiz = center.horizontalLines
+        assertTrue("x 轴横线应被绘制", horiz.isNotEmpty())
+        val widest = horiz.maxByOrNull { it[1] - it[0] }!!
+        val plotLeft = w * 0.082f
+        val plotRight = w - w * 0.082f
+        assertTrue(
+            "x 轴横线应向左伸出绘图区（左端 ${widest[0]} < plotLeft $plotLeft）",
+            widest[0] < plotLeft - 1f,
+        )
+        assertTrue(
+            "x 轴横线应向右伸出绘图区（右端 ${widest[1]} > plotRight $plotRight）",
+            widest[1] > plotRight + 1f,
+        )
+        // 竖轴里应有一根落在画布中心附近（x=0 映射过来正好居中，因为留白对称）
+        val centerXs = center.verticalLineXs.filter { kotlin.math.abs(it - w / 2f) < w * 0.03f }
+        assertTrue(
+            "原点在范围内时，竖轴应画在 x=0（画布中心附近）；实测竖线 x=${center.verticalLineXs}",
+            centerXs.isNotEmpty(),
+        )
+
+        // ---- ② 原点不在范围内 ⇒ 竖轴退化到绘图区左边界，不会画到空处 ----
+        val offCenter = LineRecordingCanvas()
+        renderer.drawAll(offCenter, spec(1.0, 3.0), w, h)
+        val offVerticals = offCenter.verticalLineXs
+        assertTrue("应仍有竖线（左边界轴线 + 两条 markLine）", offVerticals.isNotEmpty())
+        val offLeftMost = offVerticals.min()
+        val insetX = (plotRight - plotLeft) * 0.2368f
+        assertEquals(
+            "原点不在范围内时，竖轴应落在绘图区左边界（内缩后）",
+            plotLeft + insetX,
+            offLeftMost,
+            1.5f,
+        )
+        // 并且不该有竖线落在画布中心（x=0 不在 [1,3] 内）
+        assertTrue(
+            "原点不在范围内时不应在画布中心画竖轴",
+            offVerticals.none { kotlin.math.abs(it - w / 2f) < w * 0.02f },
         )
     }
 }

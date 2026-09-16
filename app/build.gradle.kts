@@ -25,8 +25,8 @@ android {
         applicationIdSuffix = ".debug"
         minSdk = 26
         targetSdk = 35
-        versionCode = 38
-        versionName = "1.0.37"
+        versionCode = 39
+        versionName = "1.0.38"
 
         // 只包含公开的 OAuth 中转地址；百度 SecretKey 始终只保存在 Worker 中。
         buildConfigField(
@@ -90,6 +90,16 @@ android {
         targetCompatibility = JavaVersion.VERSION_11
         isCoreLibraryDesugaringEnabled = true
     }
+
+    // ⚠️ 构建/测试必须用 **JDK 21**：
+    //     export JAVA_HOME="D:/tools/jdk-21.0.12+8"
+    //
+    // 用 JDK 25 跑 `testDebugUnitTest` 会在依赖 JLatexMath 的几个测试类上报
+    // `NoClassDefFoundError: Could not initialize class org.scilab.forge.jlatexmath.TeXFormula`
+    // （JLatexMathArraySupportTest 7 项 + JLatexMathLeadingTokensTest 1 项，
+    // 且两个能力探测输出会变成 109/109 全 FAIL），看起来像公式渲染全线崩了，
+    // 实际与生产代码无关 —— 单独跑这些类又能全绿，属于 JDK 版本相关的假红。
+    // 遇到时先看 JLatexMathAvailabilityTest 的输出拿根因，不要往渲染逻辑上找。
 
     kotlin {
         compilerOptions {
