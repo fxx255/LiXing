@@ -650,12 +650,39 @@ fun AssistantScreen(
                 verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
                 if (state.messages.isEmpty()) {
-                    item(key = "empty-hint") { EmptyHint() }
+                    // 极端短暂的一帧：`busy` 已置位、但 user 消息还没写进列表
+                    // （ViewModel 里先 busy=true 再 `messages + userMessage`）。
+                    // 此时没有「最新消息」可挂思考面板，若不兜底它会闪掉；
+                    // 而用户刚发出消息，也不该看到「可以问的问题」这类引导文案，
+                    // 所以这两种内容二选一，不并列显示。
+                    if (state.busy) {
+                        item(key = "busy-orphan") {
+                            ThinkingPanel(
+                                reasoning = state.activeReasoning,
+                                answerStarted = state.activeAnswerStarted,
+                                expanded = state.reasoningExpanded,
+                                onToggle = viewModel::toggleReasoningExpanded,
+                            )
+                        }
+                    } else {
+                        item(key = "empty-hint") { EmptyHint() }
+                    }
                 }
                 itemsIndexed(state.messages.asReversed(), key = { index, _ -> "msg-${state.messages.size - 1 - index}" }) { index, message ->
-                    if (index == 0 && state.busy && message.role == "user") {
-                        // Keep the transient reasoning outside the user bubble while placing it
-                        // in the same newest-message item, only a few dp below that bubble.
+                    // 思考面板永远挂在**最新一条消息的气泡下方**。
+                    //
+                    // 为什么必须挂在 item 内部、而不是作为独立的 LazyColumn item：
+                    // 这个列表是 `reverseLayout = true`（从底部往上排），一个独立 item
+                    // 会被排到整列的**最上方**——而流式回答是不断往最新气泡里追加内容的，
+                    // 于是用户看到「已经回复了一大段、还在继续思考，可思考窗口却停在页面顶部」
+                    // （用户反馈）。挂进最新消息的 Column、排在气泡之后，视觉上就正好是
+                    // 「紧贴最新输出气泡的下方」，与输出位置一起往下走。
+                    //
+                    // 无论最新消息是 user（刚发出、还没等到首个 token）还是 assistant
+                    // （已在流式输出），都走这里——过去这两种情况分在两个分支里处理，
+                    // 正是「思考窗口位置时对时错」的来源。
+                    val showThinking = index == 0 && state.busy
+                    if (showThinking) {
                         Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                             MessageBubble(
                                 role = message.role,
@@ -696,16 +723,6 @@ fun AssistantScreen(
                                 )
                             }
                         }
-                    }
-                }
-                if (state.busy && state.messages.lastOrNull()?.role != "user") {
-                    item(key = "busy") {
-                        ThinkingPanel(
-                            reasoning = state.activeReasoning,
-                            answerStarted = state.activeAnswerStarted,
-                            expanded = state.reasoningExpanded,
-                            onToggle = viewModel::toggleReasoningExpanded,
-                        )
                     }
                 }
             }
