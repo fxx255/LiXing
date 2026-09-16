@@ -156,16 +156,21 @@ class PlotBitmapRendererTest {
      * 回归：理想低通/带通谱只在 |f| ≤ B/2 上有定义，模型把定义域设成 ±2
      * （B/2 的数值占位）并在 ±2 处加 markLines 竖线标出定义域边界。
      *
-     * 用户反馈「在上次修改图像左侧文字溢出问题之后，新出现生成该图像曲线稳定溢出
-     * 该有的 -B/2 到 B/2 之间」。根因是 v1.0.34 的 x 轴 4% 外扩：定义域被撑成 ±2.08，
-     * 于是 ±B/2 的竖线落在绘图区**内部**（离边框还有 4% 的缝隙），而曲线正好终止在
-     * 竖线上 —— 视觉上就成了「曲线越过 -B/2..B/2 继续往外延伸」。
+     * 这里要同时盯住两个**互相拉扯**的诉求（历史上一改就顾此失彼）：
+     * 1. **坐标轴范围必须严格等于定义域**。v1.0.34 把范围外扩 4% 后定义域被撑成 ±2.08，
+     *    `±B/2` 的竖线落进框内，用户看到「曲线越过 −B/2..B/2 继续外延」；
+     * 2. **曲线与框线之间要留出视觉余量**。v1.0.36 把范围改回精确后，曲线又正好顶死在
+     *    绘图区边框上，用户反馈「既不直观无法看出曲线特征，也不美观」。
      *
-     * 判据：定义域边界处的 markLine 必须与绘图区边框**重合**（外扩后会出现明显缝隙）。
-     * 这里用记录型 Canvas 读实际绘制 x 坐标，不依赖 Robolectric 栅格化。
+     * 正确解法是把两者**解耦**：范围不动（保证刻度位置正确），只把绘制的矩形**向内缩**。
+     * 所以本用例断言的是：边界竖线既不与框线重合（有可见余量），也不偏离定义域应有的
+     * 位置（即余量只来自内缩，而不是范围被改了）。
+     *
+     * 用记录型 Canvas 读实际绘制坐标 —— Robolectric 既不栅格化 Path、`measureText`
+     * 每字符又恒返回 1px，像素断言在这里都是假绿。
      */
     @Test
-    fun `显式定义域边界与绘图区边框重合`() {
+    fun `定义域边界位置精确且与框线留有可见余量`() {
         JLatexMathAndroid.init(RuntimeEnvironment.getApplication())
 
         val spec = PlotSpec(
@@ -190,23 +195,34 @@ class PlotBitmapRendererTest {
         val recorder = LineRecordingCanvas()
         renderer.drawAll(recorder, spec, w, h)
 
-        // 三条竖线（两条边界 + 一条坐标轴）中，取最左与最右的 x
         val verticals = recorder.verticalLineXs
         assertTrue("应有竖线被绘制（markLine/坐标轴）", verticals.size >= 2)
         val leftMost = verticals.min()
         val rightMost = verticals.max()
 
-        // 绘图区右边界：画布宽 - RIGHT_PAD_RATIO（右侧无自适应）
-        val plotRight = w - w * 0.028f
-        // 关键断言：右边界竖线必须与绘图区右边缘重合（容差 1px）
-        assertEquals(
-            "定义域上界 B/2 的竖线应与绘图区右边缘重合（未外扩）",
-            plotRight,
-            rightMost,
-            1f,
-        )
+        // 绘图区（未内缩）的左右边界
+        val outerLeft = w * 0.082f
+        val outerRight = w - w * 0.028f
+        val outerW = outerRight - outerLeft
+        val insetX = outerW * 0.05f
 
-        // 左边界竖线应位于画布左侧留白处（y 轴标签自适应可能加宽留白，故只要求落在绘图区左边）
-        assertTrue("左边界竖线应在画布内：$leftMost", leftMost > 0f && leftMost < plotRight)
+        // ① 定义域上界的竖线位置 = 内缩后的右边界（= 范围未变，仅绘图区缩进）
+        assertEquals(
+            "B/2 的竖线应落在内缩后的绘图区右边界（范围精确 + 有内缩余量）",
+            outerRight - insetX,
+            rightMost,
+            1.5f,
+        )
+        // ② 余量必须真实存在且大小合理：既不能贴死框线，也不能大到浪费面积
+        val margin = outerRight - rightMost
+        assertTrue("曲线右侧必须有可见余量（margin=$margin）", margin > w * 0.02f)
+        assertTrue("右侧余量不应过大（margin=$margin）", margin < w * 0.12f)
+        // ③ 左右两侧余量应对称（同一次内缩的结果）
+        assertEquals(
+            "左右余量应对称",
+            outerRight - rightMost,
+            leftMost - outerLeft,
+            1.5f,
+        )
     }
 }

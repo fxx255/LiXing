@@ -329,25 +329,47 @@ class PlotBitmapRenderer(
         val plotW = width - padLeftFinal - padRight
         val plotH = height - padTop - padBottom
 
-        // 坐标变换：绘图区定位之后才能定义（plotX/plotW 依赖上面的自适应结果）
-        fun sx(x: Double): Float = plotX + ((x - xLo) / spanX * plotW).toFloat()
-        fun sy(y: Double): Float = plotY + plotH - ((y - yLo) / spanY * plotH).toFloat()
+        // ---- 3b. 绘图区**内缩**：给曲线四周留出视觉余量 ----
+        //
+        // 这里要把两件事彻底分开，它们之前被混成了一件：
+        //   · **坐标轴范围**（xLo/xHi）—— 语义量。模型显式给的 min/max 是定义域，
+        //     必须精确保留，`±B/2` 的刻度与 markLine 才落在正确位置上；
+        //   · **绘图区物理边界**（下面这个内缩矩形）—— 纯视觉量。曲线不必顶到边界，
+        //     留一圈空隙才看得出形状、也才好看。
+        //
+        // 早先的做法是把「留余量」做在**范围**上（把范围往外扩 4%），结果定义域被
+        // 撑大、`±B/2` 的竖线跑进框内，看起来像曲线越过了定义域边界（用户第二轮反馈）。
+        // 改成只外扩范围后，曲线又正好顶死在框线上，既不好看也看不出特征（用户第三轮反馈）。
+        // 现在：范围一动不动，只把绘图区**向内缩**——两个诉求同时满足。
+        //
+        // 注意 [sx]/[sy] 映射的是内缩后的矩形，所以曲线、网格、markLine、markArea
+        // 全部自动获得余量；坐标轴画在内缩矩形的边上，刻度仍按真实数值定位。
+        val insetX = plotW * PLOT_INSET_X_RATIO
+        val insetY = plotH * PLOT_INSET_Y_RATIO
+        val drawX = plotX + insetX
+        val drawY = plotY + insetY
+        val drawW = (plotW - insetX * 2f).coerceAtLeast(1f)
+        val drawH = (plotH - insetY * 2f).coerceAtLeast(1f)
+
+        // 坐标变换：绘图区（含内缩余量）定位之后才能定义
+        fun sx(x: Double): Float = drawX + ((x - xLo) / spanX * drawW).toFloat()
+        fun sy(y: Double): Float = drawY + drawH - ((y - yLo) / spanY * drawH).toFloat()
 
         // ---- 4. markArea（垫在网格下面）----
         // 图内注释统一夹在**绘图区**里：贴着右边缘的注释不会再横穿到图片外面
         // （用户反馈「注释文字右侧溢出图片」）。
         val plotSave = canvas.save()
-        labelBounds = RectF(plotX, plotY, plotX + plotW, plotY + plotH)
+        labelBounds = RectF(drawX, drawY, drawX + drawW, drawY + drawH)
         for (area in spec.markAreas) {
             val a0 = sx(area.x0)
             val a1 = sx(area.x1)
             fillPaint.color = theme.markArea
             fillPaint.pathEffect = null
-            canvas.drawRect(min(a0, a1), plotY, maxOf(a0, a1), plotY + plotH, fillPaint)
+            canvas.drawRect(min(a0, a1), drawY, maxOf(a0, a1), drawY + drawH, fillPaint)
             area.label?.let {
                 // 图内文字可能是 LaTeX（模型常写 $B$、\Delta f），交给 drawSmartText 自动排版
                 // 画在区域内部靠上，并与 markLine 标签错开高度，避免叠字
-                drawSmartText(canvas, it, (a0 + a1) / 2, plotY + height * 0.058f, tickSize, theme.subText, alignCenter = true)
+                drawSmartText(canvas, it, (a0 + a1) / 2, drawY + height * 0.058f, tickSize, theme.subText, alignCenter = true)
             }
         }
         canvas.restoreToCount(plotSave)
@@ -359,17 +381,17 @@ class PlotBitmapRenderer(
         linePaint.pathEffect = null
         for (t in xTicks) {
             val px = sx(t)
-            canvas.drawLine(px, plotY, px, plotY + plotH, linePaint)
+            canvas.drawLine(px, drawY, px, drawY + drawH, linePaint)
         }
         for (t in yTicks) {
             val py = sy(t)
-            canvas.drawLine(plotX, py, plotX + plotW, py, linePaint)
+            canvas.drawLine(drawX, py, drawX + drawW, py, linePaint)
         }
 
         // ---- 6. 序列：面积 → 折线 ----
         // 裁剪到绘图区：被折叠到范围外的极端点不应画到框外（会压住轴标签）。
         val seriesSave = canvas.save()
-        canvas.clipRect(plotX, plotY, plotX + plotW, plotY + plotH)
+        canvas.clipRect(drawX, drawY, drawX + drawW, drawY + drawH)
         spec.series.forEachIndexed { index, s ->
             val pts = sampled[index]
             if (pts.isEmpty()) return@forEachIndexed
@@ -378,7 +400,7 @@ class PlotBitmapRenderer(
             if (s.fill) {
                 fillPaint.color = withAlpha(base, 38)
                 fillPaint.pathEffect = null
-                fillArea(canvas, pts, ::sx, ::sy, plotY + plotH)
+                fillArea(canvas, pts, ::sx, ::sy, drawY + drawH)
             }
             if (s.style == "marker") {
                 fillPaint.color = withAlpha(base, (255 * s.opacity).toInt())
@@ -395,15 +417,16 @@ class PlotBitmapRenderer(
         canvas.restoreToCount(seriesSave)
 
         // ---- 7. 坐标轴 ----
+        // 坐标轴画在**内缩后**绘图区的两条边上（曲线不会压到它们）。
         linePaint.color = theme.axis
         linePaint.strokeWidth = dp(1f)
         linePaint.pathEffect = null
-        canvas.drawLine(plotX, plotY + plotH, plotX + plotW, plotY + plotH, linePaint)
-        canvas.drawLine(plotX, plotY, plotX, plotY + plotH, linePaint)
+        canvas.drawLine(drawX, drawY + drawH, drawX + drawW, drawY + drawH, linePaint)
+        canvas.drawLine(drawX, drawY, drawX, drawY + drawH, linePaint)
 
         // ---- 7b. 断轴标记：有数据被折叠到范围外时，在竖直轴上画「断口」 ----
-        if (yRange.foldedHigh) drawAxisBreak(canvas, plotX, plotY + dp(9f))
-        if (yRange.foldedLow) drawAxisBreak(canvas, plotX, plotY + plotH - dp(9f))
+        if (yRange.foldedHigh) drawAxisBreak(canvas, drawX, drawY + dp(9f))
+        if (yRange.foldedLow) drawAxisBreak(canvas, drawX, drawY + drawH - dp(9f))
 
         // ---- 8. 刻度与标签 ----
         // 刻度文字夹在**画布**内（它们本来就在绘图区外、贴着轴排布），
@@ -425,7 +448,7 @@ class PlotBitmapRenderer(
                 canvas,
                 raw,
                 centerX,
-                min(plotY + plotH + height * 0.038f, tickBottomLimit),
+                min(drawY + drawH + height * 0.038f, tickBottomLimit),
                 tickSize,
                 theme.subText,
                 alignCenter = true,
@@ -441,7 +464,7 @@ class PlotBitmapRenderer(
         // 上面已经按实际文案宽度定好了字号与绘图区位置，正常情况下列文正好填满留白、
         // 不带省略号；这里的夹取只作为最后兜底（例如留白已放到上限仍装不下）。
         val savedBounds = labelBounds
-        labelBounds = RectF(0f, plotY, (plotX - width * 0.008f).coerceAtLeast(0f), plotY + plotH)
+        labelBounds = RectF(0f, drawY, (drawX - width * 0.008f).coerceAtLeast(0f), drawY + drawH)
         // y 轴刻度文案的字号已由 planYTickSize 定好：装得下就用基准字号，
         // 装不下先缩字号、必要时绘图区已被右移，**不再出现「只剩三个点」**。
         for ((index, t) in yTicks.withIndex()) {
@@ -450,7 +473,7 @@ class PlotBitmapRenderer(
             drawSmartText(
                 canvas,
                 raw,
-                plotX - width * Y_TICK_GAP_RATIO - w,
+                drawX - width * Y_TICK_GAP_RATIO - w,
                 sy(t) + tickSizeY * 0.36f,
                 tickSizeY,
                 theme.subText,
@@ -461,12 +484,12 @@ class PlotBitmapRenderer(
         // ---- 9. 轴标题 ----
         val xLabel = spec.x.label
         if (xLabel.isNotEmpty()) {
-            drawSmartText(canvas, xLabel, plotX + plotW / 2, height - height * 0.022f, labelSize, theme.text, alignCenter = true)
+            drawSmartText(canvas, xLabel, drawX + drawW / 2, height - height * 0.022f, labelSize, theme.text, alignCenter = true)
         }
         if (spec.y.label.isNotEmpty()) {
             val withUnit = if (spec.y.unit.isNotEmpty()) "${spec.y.label} (${spec.y.unit})" else spec.y.label
             val axisX = width * 0.018f
-            val axisCenterY = plotY + plotH / 2
+            val axisCenterY = drawY + drawH / 2
             // 竖排轴标题：先把文字沿 y 轴的**可用长度**（绘图区高度）当作横向限额，
             // 在未旋转的坐标系里截断，再整体旋转 -90°。
             // 这样不必去推「旋转后坐标 → 原坐标」的映射，逻辑与横排标签完全一致：
@@ -474,10 +497,10 @@ class PlotBitmapRenderer(
             val save = canvas.save()
             canvas.rotate(-90f, axisX, axisCenterY)
             labelBounds = RectF(
-                axisCenterY - plotH / 2,
+                axisCenterY - drawH / 2,
                 axisX,
-                axisCenterY + plotH / 2,
-                axisX + plotH,
+                axisCenterY + drawH / 2,
+                axisX + drawH,
             )
             drawSmartText(
                 canvas,
@@ -503,14 +526,14 @@ class PlotBitmapRenderer(
             linePaint.color = theme.markLine
             linePaint.strokeWidth = dp(0.9f)
             linePaint.pathEffect = DashPathEffect(floatArrayOf(dp(5f), dp(4f)), 0f)
-            canvas.drawLine(sx(x), plotY, sx(x), plotY + plotH, linePaint)
+            canvas.drawLine(sx(x), drawY, sx(x), drawY + drawH, linePaint)
             linePaint.pathEffect = null
             line.label?.let {
                 // 放进绘图区顶部：绘图区上方已经让给图例了，放外面会叠在一起。
                 // 夹在绘图区内，贴边的标记标签不会横穿到图片外面。
                 val save = canvas.save()
-                labelBounds = RectF(plotX, plotY, plotX + plotW, plotY + plotH)
-                drawSmartText(canvas, it, sx(x), plotY + height * 0.025f, tickSize, theme.subText, alignCenter = true)
+                labelBounds = RectF(drawX, drawY, drawX + drawW, drawY + drawH)
+                drawSmartText(canvas, it, sx(x), drawY + height * 0.025f, tickSize, theme.subText, alignCenter = true)
                 canvas.restoreToCount(save)
                 labelBounds = RectF(0f, 0f, width, height)
             }
@@ -668,6 +691,20 @@ private const val BOTTOM_PAD_RATIO = 0.125f
 
 /** 刻度文案与坐标轴之间的横向间隙（相对画布宽）。 */
 private const val Y_TICK_GAP_RATIO = 0.010f
+
+/**
+ * 绘图区内缩比例（相对绘图区自身宽/高）：曲线四周的**视觉余量**。
+ *
+ * 这是「留余量」的正确落点 —— 它改的是**画在哪**，而不是**范围是多少**：
+ * 坐标轴范围仍严格等于定义域（刻度 `±B/2` 位置精确），但曲线的首末点与
+ * 上下极值都不会顶到框线上，与轴之间留出一圈空隙。
+ *
+ * 取值权衡：太小则曲线贴框、看不出形状（用户反馈「既不直观也不美观」）；
+ * 太大则白白浪费绘图区面积、曲线被压扁。5% 横 / 7% 纵是常见出版物的观感，
+ * 纵向多留一点是因为曲线极值（主瓣峰）通常顶在顶部、更显眼。
+ */
+private const val PLOT_INSET_X_RATIO = 0.05f
+private const val PLOT_INSET_Y_RATIO = 0.07f
 
 /** y 轴靠缩字号仍不够时，左侧留白最多再额外加宽的画布宽比例。 */
 private const val LEFT_PAD_EXTRA_MAX_RATIO = 0.10f

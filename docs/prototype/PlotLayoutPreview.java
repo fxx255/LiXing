@@ -26,6 +26,9 @@ public class PlotLayoutPreview {
     static final float Y_TICK_GAP_RATIO = 0.010f;
     static final float LEFT_PAD_EXTRA_MAX_RATIO = 0.10f;
     static final float Y_TICK_MIN_SIZE_SCALE = 0.62f;
+    /** 绘图区内缩比例：曲线四周的视觉余量（改「画在哪」而非「范围是多少」）。 */
+    static final float PLOT_INSET_X_RATIO = 0.05f;
+    static final float PLOT_INSET_Y_RATIO = 0.07f;
 
     static final Color BG = new Color(0x1C1C1E);
     static final Color TEXT = new Color(0xC9C9CE);
@@ -46,12 +49,21 @@ public class PlotLayoutPreview {
         return new float[]{minSize, widest * (minSize / baseSize)};
     }
 
+    /** 渲染模式：用于对比三个历史阶段的行为。 */
+    enum Mode {
+        /** v1.0.35：范围外扩 4%（定义域被撑大 ⇒ 曲线看起来越过 ±B/2）+ y 文案截断。 */
+        LEGACY,
+        /** v1.0.36：范围精确、但绘图区**不内缩** ⇒ 曲线顶死在框线上。 */
+        TIGHT,
+        /** 当前：范围精确 + 绘图区内缩 ⇒ 位置正确且留有余量。 */
+        INSET,
+    }
+
     /**
      * 渲染一张图。
-     *
-     * @param legacy true = 复现 v1.0.35 旧行为（定义域外扩 4% + y 文案固定字号截断）
      */
-    static BufferedImage render(boolean legacy, int w, int h) {
+    static BufferedImage render(Mode mode, int w, int h) {
+        boolean legacy = mode == Mode.LEGACY;
         BufferedImage img = new BufferedImage(w, h, BufferedImage.TYPE_INT_RGB);
         Graphics2D g = img.createGraphics();
         g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
@@ -112,17 +124,27 @@ public class PlotLayoutPreview {
             padLeftFinal = padLeft + extra;
         }
 
+        // 外层绘图区（图例/标题带所处矩形）
         float plotX = padLeftFinal;
         float plotY = padTop;
         float plotW = w - padLeftFinal - padRight;
         float plotH = h - padTop - padBottom;
 
+        // 内层绘图区：数据真正落笔的范围。范围是语义量（必须精确），
+        // 这块矩形是视觉量（可以留白），二者解耦 —— 这就是本次修复的关键。
+        float insetX = mode == Mode.INSET ? plotW * PLOT_INSET_X_RATIO : 0f;
+        float insetY = mode == Mode.INSET ? plotH * PLOT_INSET_Y_RATIO : 0f;
+        float drawX = plotX + insetX;
+        float drawY = plotY + insetY;
+        float drawW = plotW - insetX * 2f;
+        float drawH = plotH - insetY * 2f;
+
         // ---- 网格 ----
         g.setColor(new Color(0x2B2B2F));
         g.setStroke(new BasicStroke(1f));
         for (double t : new double[]{-2, 0, 2}) {
-            float px = plotX + (float) ((t - xLo) / spanX * plotW);
-            g.drawLine((int) px, (int) plotY, (int) px, (int) (plotY + plotH));
+            float px = drawX + (float) ((t - xLo) / spanX * drawW);
+            g.drawLine((int) px, (int) drawY, (int) px, (int) (drawY + drawH));
         }
 
         // ---- 曲线：y = 0.35 + 0.65*(x/2)^2，在定义域 ±2 内采样 ----
@@ -135,8 +157,8 @@ public class PlotLayoutPreview {
             // 注意：采样区间用的是**定义域**（dataLo..dataHi），不是 xLo..xHi
             double x = dataLo + (dataHi - dataLo) * i / N;
             double y = 0.35 + 0.65 * (x / 2.0) * (x / 2.0);
-            float px = plotX + (float) ((x - xLo) / spanX * plotW);
-            float py = plotY + plotH - (float) ((y - yLo) / spanY * plotH);
+            float px = drawX + (float) ((x - xLo) / spanX * drawW);
+            float py = drawY + drawH - (float) ((y - yLo) / spanY * drawH);
             if (!started) { path.moveTo(px, py); started = true; } else { path.lineTo(px, py); }
         }
         g.draw(path);
@@ -144,26 +166,26 @@ public class PlotLayoutPreview {
         // ---- 坐标轴 ----
         g.setColor(AXIS);
         g.setStroke(new BasicStroke(1f));
-        g.drawLine((int) plotX, (int) (plotY + plotH), (int) (plotX + plotW), (int) (plotY + plotH));
-        g.drawLine((int) plotX, (int) plotY, (int) plotX, (int) (plotY + plotH));
+        g.drawLine((int) drawX, (int) (drawY + drawH), (int) (drawX + drawW), (int) (drawY + drawH));
+        g.drawLine((int) drawX, (int) drawY, (int) drawX, (int) (drawY + drawH));
 
-        // ---- markLine：±B/2 定义域边界 ----
+        // ---- markLine：±B/2 定义域边界（落在绘图区内部，不贴框线）----
         g.setColor(MARK);
         g.setStroke(new BasicStroke(1f, BasicStroke.CAP_BUTT, BasicStroke.JOIN_MITER,
                 10f, new float[]{w * 0.005f, w * 0.004f}, 0f));
         for (double t : new double[]{-2, 2}) {
-            float px = plotX + (float) ((t - xLo) / spanX * plotW);
-            g.drawLine((int) px, (int) plotY, (int) px, (int) (plotY + plotH));
+            float px = drawX + (float) ((t - xLo) / spanX * drawW);
+            g.drawLine((int) px, (int) drawY, (int) px, (int) (drawY + drawH));
         }
 
         // ---- y 轴刻度文案 ----
         Font yFont = new Font("SansSerif", Font.PLAIN, Math.round(tickSizeY));
         g.setFont(yFont);
         FontMetrics yfm = g.getFontMetrics(yFont);
-        float labelBaselineY = plotY + plotH - (float) ((0.35 - yLo) / spanY * plotH) + tickSizeY * 0.36f;
+        float labelBaselineY = drawY + drawH - (float) ((0.35 - yLo) / spanY * drawH) + tickSizeY * 0.36f;
         String shown = yTickText;
         float lw = yfm.stringWidth(shown);
-        float lx = plotX - w * Y_TICK_GAP_RATIO - lw;
+        float lx = drawX - w * Y_TICK_GAP_RATIO - lw;
         if (legacy) {
             // 旧行为：夹在左侧留白里，装不下就只画省略号（用户看到的「三个点」）
             float limit = padLeft - w * 0.008f;
@@ -183,9 +205,9 @@ public class PlotLayoutPreview {
         double[] positions = {-2, 0, 2};
         g.setColor(SUBTEXT);
         for (int i = 0; i < positions.length; i++) {
-            float cx = plotX + (float) ((positions[i] - xLo) / spanX * plotW);
+            float cx = drawX + (float) ((positions[i] - xLo) / spanX * drawW);
             int tw = xfm.stringWidth(labels[i]);
-            g.drawString(labels[i], cx - tw / 2f, plotY + plotH + h * 0.038f);
+            g.drawString(labels[i], cx - tw / 2f, drawY + drawH + h * 0.038f);
         }
 
         // ---- 标题 ----
@@ -196,25 +218,55 @@ public class PlotLayoutPreview {
         g.drawString(title, w / 2f - tfm.stringWidth(title) / 2f, h * 0.052f);
 
         // ---- 左上角标注 ----
-        g.setFont(new Font("SansSerif", Font.BOLD, Math.round(w * 0.020f)));
-        g.setColor(legacy ? new Color(0xFF6B6B) : new Color(0x3DDC97));
-        g.drawString(legacy ? "BEFORE  (v1.0.35)" : "AFTER  (fixed)", w * 0.02f, h * 0.03f);
+        String badge;
+        Color badgeColor;
+        switch (mode) {
+            case LEGACY:
+                badge = "BEFORE (v1.0.35): range padded 4% -> curve crosses \u00b1B/2; y label truncated";
+                badgeColor = new Color(0xFF6B6B);
+                break;
+            case TIGHT:
+                badge = "v1.0.36 first try: range exact BUT curve touches the frame";
+                badgeColor = new Color(0xFFB454);
+                break;
+            default:
+                badge = "FIXED: range exact + plot inset -> curve ends on \u00b1B/2 with clear margin";
+                badgeColor = new Color(0x3DDC97);
+                break;
+        }
+        g.setFont(new Font("SansSerif", Font.BOLD, Math.round(w * 0.019f)));
+        g.setColor(badgeColor);
+        g.drawString(badge, w * 0.02f, h * 0.028f);
 
         g.dispose();
         return img;
     }
 
     public static void main(String[] args) throws Exception {
-        int w = 993, h = 655;
-        BufferedImage before = render(true, w, h);
-        BufferedImage after = render(false, w, h);
-
-        BufferedImage combo = new BufferedImage(w, h * 2 + 20, BufferedImage.TYPE_INT_RGB);
+        int w = 993, h = 560;
+        BufferedImage[] imgs = {
+                render(Mode.LEGACY, w, h),
+                render(Mode.TIGHT, w, h),
+                render(Mode.INSET, w, h),
+        };
+        String[] captions = {
+                "1) v1.0.35  \u2014  \u66f2\u7ebf\u8d8a\u8fc7 \u00b1B/2\u3001y \u523b\u5ea6\u53ea\u5269\u7701\u7565\u53f7",
+                "2) v1.0.36 \u9996\u7248  \u2014  \u8fb9\u754c\u7cbe\u786e\u4f46\u66f2\u7ebf\u9876\u6b7b\u6846\u7ebf",
+                "3) \u6700\u7ec8\u65b9\u6848  \u2014  \u8fb9\u754c\u7cbe\u786e + \u56db\u5468\u7559\u6709\u4f59\u91cf",
+        };
+        int gap = 26;
+        BufferedImage combo = new BufferedImage(w, (h + gap) * imgs.length, BufferedImage.TYPE_INT_RGB);
         Graphics2D g = combo.createGraphics();
+        g.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_ON);
         g.setColor(Color.BLACK);
-        g.fillRect(0, 0, w, h * 2 + 20);
-        g.drawImage(before, 0, 0, null);
-        g.drawImage(after, 0, h + 20, null);
+        g.fillRect(0, 0, combo.getWidth(), combo.getHeight());
+        for (int i = 0; i < imgs.length; i++) {
+            int y = i * (h + gap);
+            g.drawImage(imgs[i], 0, y, null);
+            g.setColor(new Color(0xE6E6E8));
+            g.setFont(new Font("SansSerif", Font.BOLD, Math.round(w * 0.020f)));
+            g.drawString(captions[i], w * 0.03f, y + h + gap * 0.62f);
+        }
         g.dispose();
 
         String out = args.length > 0 ? args[0] : "plot-layout-preview.png";
@@ -222,20 +274,24 @@ public class PlotLayoutPreview {
         System.out.println("written: " + out + "  size=" + combo.getWidth() + "x" + combo.getHeight());
 
         // 打印关键数值便于核对
-        for (boolean legacy : new boolean[]{true, false}) {
-            Graphics2D gg = (Graphics2D) new BufferedImage(1, 1, BufferedImage.TYPE_INT_RGB).getGraphics();
-            float padLeft = w * LEFT_PAD_RATIO;
-            FontMetrics fm = gg.getFontMetrics(
-                    new Font("SansSerif", Font.PLAIN, Math.round(w * 0.024f)));
-            float widest = fm.stringWidth("N\u2080(2\u03c0f_c)\u00b2");
-            float[] plan = planYTickSize(widest, padLeft - w * Y_TICK_GAP_RATIO, w * 0.024f);
-            System.out.printf("%s: yLabelWidth=%.1f available=%.1f -> textSize=%.2f padLeft=%.1f%n",
-                    legacy ? "BEFORE" : "AFTER ",
-                    widest, padLeft - w * Y_TICK_GAP_RATIO, legacy ? w * 0.024f : plan[0],
-                    legacy ? padLeft : padLeft + Math.max(0f,
-                            Math.min(w * LEFT_PAD_EXTRA_MAX_RATIO,
-                                    plan[1] + w * Y_TICK_GAP_RATIO - padLeft)));
-            gg.dispose();
-        }
+        Graphics2D gg = (Graphics2D) new BufferedImage(1, 1, BufferedImage.TYPE_INT_RGB).getGraphics();
+        float padLeft = w * LEFT_PAD_RATIO;
+        FontMetrics fm = gg.getFontMetrics(new Font("SansSerif", Font.PLAIN, Math.round(w * 0.024f)));
+        float widest = fm.stringWidth("N\u2080(2\u03c0f_c)\u00b2");
+        float available = padLeft - w * Y_TICK_GAP_RATIO;
+        float[] plan = planYTickSize(widest, available, w * 0.024f);
+        float padL = padLeft + Math.max(0f, Math.min(w * LEFT_PAD_EXTRA_MAX_RATIO,
+                plan[1] + w * Y_TICK_GAP_RATIO - padLeft));
+        System.out.printf("yLabelWidth=%.1f available=%.1f -> textSize=%.2f (min %.2f) padLeft=%.1f%n",
+                widest, available, plan[0], w * 0.024f * Y_TICK_MIN_SIZE_SCALE, padL);
+
+        float plotW = w - padL - w * RIGHT_PAD_RATIO;
+        float plotH = h - h * TITLE_BAND_RATIO - h * BOTTOM_PAD_RATIO;
+        float insetX = plotW * PLOT_INSET_X_RATIO;
+        System.out.printf("plotW=%.1f insetX=%.1f  -> left margin of data=%.1fpx (%.2f%% of w)%n",
+                plotW, insetX, insetX, insetX / w * 100f);
+        System.out.printf("plotH=%.1f insetY=%.1f (%.2f%% of h)%n",
+                plotH, plotH * PLOT_INSET_Y_RATIO, plotH * PLOT_INSET_Y_RATIO / h * 100f);
+        gg.dispose();
     }
 }
