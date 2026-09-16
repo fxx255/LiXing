@@ -47,6 +47,16 @@ private class LineRecordingCanvas : android.graphics.Canvas() {
     /** 所有横线（y 相同、x 不同）的 `[左端, 右端, y]`。用来验证「x 轴是否伸出绘图区」。 */
     val horizontalLines = mutableListOf<FloatArray>()
 
+    /**
+     * 所有**斜线**的 `[startX, startY, stopX, stopY]`（含平移）。
+     *
+     * 箭头的每条箭臂都是斜线，而渲染器里除箭头外**只有断轴标记**（`drawAxisBreak`）
+     * 会画斜线——两者靠「是否共享同一顶点」区分：箭头的两条臂收敛于同一个 tip 点，
+     * 断轴的两条斜线是平行错开的。有了它才能对「箭头画没画、画多大、指向哪边」
+     * 做可信断言（Robolectric 不栅格化，像素级断言全是假绿）。
+     */
+    val diagonalLines = mutableListOf<FloatArray>()
+
     override fun drawLine(startX: Float, startY: Float, stopX: Float, stopY: Float, paint: android.graphics.Paint) {
         // 渲染器只用 translate 做平移，取矩阵的平移分量即坐标偏移
         val v = FloatArray(9)
@@ -64,6 +74,9 @@ private class LineRecordingCanvas : android.graphics.Canvas() {
                 maxOf(startX, stopX) + dx,
                 startY + dy,
             )
+        }
+        if (kotlin.math.abs(startX - stopX) >= 0.01f && kotlin.math.abs(startY - stopY) >= 0.01f) {
+            diagonalLines += floatArrayOf(startX + dx, startY + dy, stopX + dx, stopY + dy)
         }
     }
 }
@@ -339,4 +352,134 @@ class PlotBitmapRendererTest {
             offVerticals.none { kotlin.math.abs(it - w / 2f) < w * 0.02f },
         )
     }
+
+    /**
+     * 坐标轴末端必须是**箭头**（两条收敛于顶点的斜线），且尺寸按画布比例、与 density 无关。
+     *
+     * 用户要求「坐标轴头部改成箭头」。这条测试替代原先「端刻度」的断言——
+     * 箭头与断轴标记都会产生斜线，所以按「两条臂是否共享同一顶点」区分：
+     * 箭头的两条臂收敛于同一个 tip，断轴的两条斜线是平行错开的。
+     */
+    @Test
+    fun `坐标轴末端画成箭头而不是单条端刻度`() {
+        val w = 600f
+        val h = 360f
+        val recorder = LineRecordingCanvas()
+        renderer.drawAll(recorder, basicSpec(), w, h)
+        val diag = recorder.diagonalLines
+        assertTrue("应画出斜线（至少两个箭头的四条臂），实测 ${diag.size} 条", diag.size >= 4)
+
+        // 找出所有「两条臂共享顶点」的箭头
+        val arrows = findArrowTips(diag, tol = 1.5f)
+        assertTrue(
+            "应至少识别出 2 个箭头（x 轴右端 + y 轴顶端），实测 ${arrows.size} 个，tip=$arrows",
+            arrows.size >= 2,
+        )
+
+        // x 轴右端的箭头：tip 的 y 等于 x 轴高度（横线中最长那条的 y）
+        val axisY = recorder.horizontalLines.maxByOrNull { it[1] - it[0] }!![2]
+        val xArrowTip = arrows.filter { kotlin.math.abs(it[1] - axisY) < 2f }
+        assertTrue("x 轴末端应有箭头，tip 应落在轴线上（axisY=$axisY，tips=$arrows）", xArrowTip.isNotEmpty())
+
+        // 臂长应约等于 画布宽 × AXIS_ARROW_X_LEN_RATIO（0.011），容差放宽到 ±25%
+        val expArmX = w * 0.011f
+        val armX = arrows.first { kotlin.math.abs(it[1] - axisY) < 2f }.let { tip ->
+            diag.filter { sharesTip(it, tip, 1.5f) }
+                .maxOf { kotlin.math.abs(it[0] - it[2]) }
+        }
+        assertTrue(
+            "x 轴箭臂应约 ${expArmX}px，实测 ${armX}px",
+            armX > expArmX * 0.75f && armX < expArmX * 1.25f,
+        )
+    }
+
+    /**
+     * 箭头尺寸必须跟**画布尺寸**走，不能跟 density 走。
+     *
+     * 这是本项目 v1.0.32 的真根因：画布是物理像素，dp 会随 density 放大 ⇒
+     * 高密度屏上内边距/字号/箭头全部失控。这里用两个只有 density 不同的渲染器
+     * 在**同一画布尺寸**下对比，箭头尺寸必须完全相同。
+     */
+    @Test
+    fun `箭头尺寸只由画布尺寸决定与 density 无关`() {
+        val w = 700f
+        val h = 400f
+        val armByDensity = listOf(1f, 2f, 3f).map { d ->
+            val rec = LineRecordingCanvas()
+            PlotBitmapRenderer(density = d).drawAll(rec, basicSpec(), w, h)
+            val axisY = rec.horizontalLines.maxByOrNull { it[1] - it[0] }!![2]
+            val tips = findArrowTips(rec.diagonalLines, tol = 1.5f)
+            val tip = tips.first { kotlin.math.abs(it[1] - axisY) < 2f }
+            rec.diagonalLines.filter { sharesTip(it, tip, 1.5f) }
+                .maxOf { kotlin.math.abs(it[0] - it[2]) }
+        }
+        assertEquals(
+            "density 变化不应改变箭头长度（说明用的是画布比例而非 dp）：$armByDensity",
+            1,
+            armByDensity.distinct().size,
+        )
+    }
+
+    /** 箭头指向必须正确：x 轴右端的箭头朝右（tip 在最右侧），y 轴顶端的朝上（tip 在最上方）。 */
+    @Test
+    fun `箭头指向与轴线方向一致`() {
+        val w = 640f
+        val h = 380f
+        val rec = LineRecordingCanvas()
+        renderer.drawAll(rec, basicSpec(), w, h)
+        val tips = findArrowTips(rec.diagonalLines, tol = 1.5f)
+        val axisY = rec.horizontalLines.maxByOrNull { it[1] - it[0] }!![2]
+
+        // x 轴箭头：tip 在轴上，两条臂都向左后方延伸 ⇒ tip 的 x 大于臂末端
+        val xTip = tips.first { kotlin.math.abs(it[1] - axisY) < 2f }
+        val xArms = rec.diagonalLines.filter { sharesTip(it, xTip, 1.5f) }
+        assertTrue("x 轴箭头应先端应朝右伸出", xArms.isNotEmpty())
+        assertTrue(
+            "x 轴箭头的顶点应在臂的右侧（朝右），tip=${xTip[0]}，臂端=${xArms.map { it[2] }}",
+            xArms.all { xTip[0] > it[2] },
+        )
+
+        // y 轴箭头：tip 应在臂末端的上方（朝上）
+        val yTip = tips.minByOrNull { it[1] }!!
+        val yArms = rec.diagonalLines.filter { sharesTip(it, yTip, 1.5f) }
+        assertTrue("y 轴箭头应有两条臂", yArms.size >= 2)
+        assertTrue(
+            "y 轴箭头的顶点应在臂的上方（朝上），tip.y=${yTip[1]}，臂端 y=${yArms.map { it[3] }}",
+            yArms.all { yTip[1] < it[3] },
+        )
+    }
+
+    /** 简化 spec：一条平滑曲线、原点在范围内，保证两轴都会画出来。 */
+    private fun basicSpec() = PlotSpec(
+        title = "y = x^2",
+        x = Axis(label = "x", min = -3.0, max = 3.0),
+        y = Axis(label = "y"),
+        series = listOf(Series(label = "y=x^2", expr = "x^2")),
+    )
+
+    /**
+     * 从斜线集合里找出「箭头顶点」：被**两条**斜线共同作为端点、且两条臂方向不同的点。
+     *
+     * 断轴标记的两条斜线是平行错开的（不共享端点），所以天然被排除。
+     */
+    private fun findArrowTips(diag: List<FloatArray>, tol: Float): List<FloatArray> {
+        val tips = mutableListOf<FloatArray>()
+        val candidates = mutableListOf<Pair<Float, Float>>()
+        for (line in diag) {
+            candidates += line[0] to line[1]
+            candidates += line[2] to line[3]
+        }
+        for ((x, y) in candidates) {
+            val touching = diag.filter { sharesTip(it, floatArrayOf(x, y), tol) }
+            if (touching.size >= 2 && tips.none { kotlin.math.abs(it[0] - x) < tol && kotlin.math.abs(it[1] - y) < tol }) {
+                tips += floatArrayOf(x, y)
+            }
+        }
+        return tips
+    }
+
+    /** 该斜线是否以 `tip` 为端点之一。 */
+    private fun sharesTip(line: FloatArray, tip: FloatArray, tol: Float): Boolean =
+        (kotlin.math.abs(line[0] - tip[0]) < tol && kotlin.math.abs(line[1] - tip[1]) < tol) ||
+            (kotlin.math.abs(line[2] - tip[0]) < tol && kotlin.math.abs(line[3] - tip[1]) < tol)
 }

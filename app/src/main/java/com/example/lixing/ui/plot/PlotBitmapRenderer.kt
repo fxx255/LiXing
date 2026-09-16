@@ -449,9 +449,14 @@ class PlotBitmapRenderer(
         val yAxisBottom = axisY + height * AXIS_VERT_BELOW_RATIO
         canvas.drawLine(yAxisX, yAxisTop, yAxisX, yAxisBottom, linePaint)
 
-        // 轴端小刻度（x 轴右端 + y 轴顶端），进一步强化「这是坐标轴」的读感
-        canvas.drawLine(axisRight, axisY, axisRight, axisY - height * 0.014f, linePaint)
-        canvas.drawLine(yAxisX, yAxisTop, yAxisX + width * 0.010f, yAxisTop, linePaint)
+        // 轴端箭头：替代原先的「小刻度」——箭头对「这是坐标轴」的表达比一小截刻度
+        // 更明确，也是教材插图的通行画法（用户要求「坐标轴头部改成箭头」）。
+        //
+        // 尺寸一律取**画布宽/高的比例**，绝不能用 dp：画布是物理像素，dp 会随
+        // density 放大，在高密度屏上箭头会大得离谱（这是本项目 v1.0.32 的真根因，
+        // 内边距与字号都踩过同一个坑）。
+        drawAxisArrowX(canvas, axisRight, axisY, linePaint, +1, width, height)
+        drawAxisArrowY(canvas, yAxisX, yAxisTop, linePaint, -1, width, height)
 
         // 轴名贴在**轴的远端**（教材参考图里 `f` 就标在 x 轴右端下方）。
         // 位置取轴末端而不是绘图区中心——居中那个位置留给「轴标题」的语义已废弃，
@@ -640,6 +645,55 @@ class PlotBitmapRenderer(
         val gap = dp(2.6f)
         canvas.drawLine(axisX - w, y + h, axisX + w, y - h, linePaint)
         canvas.drawLine(axisX - w, y + h + gap, axisX + w, y - h + gap, linePaint)
+    }
+
+    /**
+     * x 轴末端的箭头（两条短斜线构成 `>` 或 `<`）。
+     *
+     * @param dir `+1` 画成指向右的 `>`（x 轴右端用），`-1` 画成指向左的 `<`。
+     * @param canvasW 画布宽（物理像素），箭臂长度按它的比例取。
+     *
+     * 尺寸全部按**画布宽的比例**给定：0.011 这个值沿用 `docs/prototype/PlotAxisStyles.java`
+     * 里在 1000px 宽画布上比过的结果（箭臂约 11px），肉眼刚好、又不至于抢戏。
+     * **绝不能改成 dp**——画布是物理像素，dp 会随 density 放大（v1.0.32 真根因）。
+     */
+    private fun drawAxisArrowX(
+        canvas: Canvas,
+        tipX: Float,
+        y: Float,
+        paint: Paint,
+        dir: Int,
+        canvasW: Float,
+        canvasH: Float,
+    ) {
+        val len = canvasW * AXIS_ARROW_X_LEN_RATIO
+        val half = len * AXIS_ARROW_HALF_RATIO
+        canvas.drawLine(tipX, y, tipX - len * dir, y - half, paint)
+        canvas.drawLine(tipX, y, tipX - len * dir, y + half, paint)
+    }
+
+    /**
+     * y 轴末端的箭头（两条短斜线构成 `^` 或 `v`）。
+     *
+     * @param dir `-1` 画成指向上的 `^`（y 轴顶端用），`+1` 画成指向下的 `v`。
+     * @param canvasH 画布高（物理像素），纵向箭臂按它的比例取。
+     *
+     * 纵向箭臂取**画布高的比例**（横向取宽），保持箭头在长宽比不同的画布上不变形：
+     * 绘图区约 1.8:1 偏扁，若纵向也用宽的比例，箭头会被压成扁尖、不像箭头。
+     */
+    private fun drawAxisArrowY(
+        canvas: Canvas,
+        x: Float,
+        tipY: Float,
+        paint: Paint,
+        dir: Int,
+        canvasW: Float,
+        canvasH: Float,
+    ) {
+        val len = canvasH * AXIS_ARROW_Y_LEN_RATIO
+        val half = len * AXIS_ARROW_HALF_RATIO
+        canvas.drawLine(x, tipY, x - half, tipY - len * dir, paint)
+        canvas.drawLine(x, tipY, x + half, tipY - len * dir, paint)
     }
 
     /**
@@ -853,6 +907,26 @@ private const val AXIS_VERT_OVERHANG_RATIO = 0.10f
 
 /** y 轴竖线底端**穿过 x 轴**往下伸的量（相对画布高）。让两轴相交处有个出头，更像坐标轴。 */
 private const val AXIS_VERT_BELOW_RATIO = 0.012f
+
+/**
+ * 坐标轴末端箭头的尺寸（相对**画布**宽/高，绝不能用 dp）。
+ *
+ * 箭臂长度：横向 0.011 × 画布宽、纵向 0.017 × 画布高。
+ * 横向取值沿用 `docs/prototype/PlotAxisStyles.java` 里在 1000px 宽画布上比过的结果；
+ * 纵向取 0.017 是为了让**视觉重量与横向相当**——标准画布 993×575 下横箭臂约 10.9px、
+ * 纵箭臂约 9.8px，两者肉眼接近。若纵向也按 0.013 取（约 7.5px），y 轴箭头会明显
+ * 比 x 轴的瘦一圈，两个箭头看着不成套（`plot-arrow-zoom.png` 里能看到这个差异）。
+ *
+ * [AXIS_ARROW_HALF_RATIO] 是箭臂张开半角的控制量：`half = len × 0.5`
+ * 对应约 26.6° 的张开半角（`atan(0.5) ≈ 26.6°`），是常见的箭头形状。
+ * 太大变钝、太小变尖细。
+ *
+ * 横纵各取**自身方向**的比例：绘图区约 1.8:1 偏扁，若纵向也用宽的比例，箭头会被
+ * 压成扁尖、不像箭头。
+ */
+private const val AXIS_ARROW_X_LEN_RATIO = 0.011f
+private const val AXIS_ARROW_Y_LEN_RATIO = 0.017f
+private const val AXIS_ARROW_HALF_RATIO = 0.5f
 
 /**
  * y 轴刻度文案的排版方案。

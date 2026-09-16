@@ -1020,14 +1020,65 @@ private fun removeUnsupportedLatexCommands(text: String): String {
     // 需要额外宏包、JLatexMath 里根本不存在的命令（已逐个实测确认）。
     // 按语义降级，而不是留着让整段公式渲染失败：
     result = result.replace(Regex("""\\cancel\s*\{([^{}]*)\}""")) { it.groupValues[1] } // cancel 包
-    result = result.replace(Regex("""\\color\s*\{[^{}]*\}"""), "") // xcolor 的 \color
+    result = result.replace(Regex("""\\color\s*\{[^{}]*\}""")) { "" } // xcolor 的 \color
     result = result.replace(Regex("""\\intertext\s*\{([^{}]*)\}""")) {
         "\\\\ \\text{${it.groupValues[1]}}" // amsmath：降级成「换行 + 文本」
     }
-    result = result.replace(Regex("""\\begin\{dcases\}"""), "\\begin{cases}") // mathtools
-    result = result.replace(Regex("""\\end\{dcases\}"""), "\\end{cases}")
+    result = result.replace(Regex("""\\begin\{dcases\}""")) { "\\begin{cases}" } // mathtools
+    result = result.replace(Regex("""\\end\{dcases\}""")) { "\\end{cases}" }
+    result = normalizeUnsupportedDelimiters(result)
     // \frac 的裸参数补花括号（JLatexMath 不支持 \frac B2），放最后统一处理
     result = normalizeLatexFractions(result)
+    return result
+}
+
+/**
+ * 降级 JLatexMath 不支持的左右成对定界符命令。
+ *
+ * ⚠️ **实测结论（[JLatexMathDelimiterSupportTest] 里的探测表，改前务必先读）**：
+ * JLatexMath 对大小写变体的支持**极不对称**——
+ *
+ * | 写法 | 结果 |
+ * |---|---|
+ * | `\lvert … \rvert` | ❌ ParseException |
+ * | `\lVert … \rVert` | ✅ |
+ * | `\left\lvert … \right\rvert` | ❌ ParseException |
+ * | `\|…\|` / `\left\|…\right\|` | ✅ |
+ * | `|…|` / `\left|…\right|` | ✅ |
+ * | `\lbrace`/`\langle`/`\lceil`/`\lfloor` | ✅ |
+ *
+ * 即：**双竖线能用、单竖线不能用**（只差一个字母大小写）。用户截图里
+ * `\lvert y_L(T)\rvert` 整条渲染失败就是此因。
+ *
+ * 所以必须**分开降级**，绝不能把两类混成一个规则：
+ * - `\lvert`/`\rvert` → `|`（绝对值/模，单竖线语义）
+ * - `\lVert`/`\rVert` → `\|`（范数，双竖线语义）
+ *
+ * 若把 `\lVert` 也换成单竖线，会**悄悄改变数学含义**（把范数写成绝对值），
+ * 比渲染失败更糟——渲染失败用户看得见，语义变错看不见。
+ *
+ * `\left`/`\right` 前缀要**一起换**（`\left\lvert` → `\left|`）：只换掉后半段会
+ * 留下 `\left|`，虽然恰好也合法，但分两步走容易在「`\left` 后面不是 `\lvert`」
+ * 这类形态上误伤，整体匹配更稳。
+ */
+private fun normalizeUnsupportedDelimiters(latex: String): String {
+    var result = latex
+    // ⚠️ 替换串一律用 **lambda 形式** `{ "…" }`，不要用字符串重载：
+    // `Regex.replace(input, "\\|")` 走的是 Java `Matcher.replaceAll` 语义，
+    // 会把替换串里的 `\` 当转义符再解析一次 ⇒ `\|` 变成字面 `|`，
+    // 反斜杠被静默吃掉（范数 `\lVert x \rVert` 会退化成 `| x |`，语义从
+    // 「范数」悄悄变成「绝对值」——渲染成功但含义错了，比渲染失败更糟）。
+    // lambda 的返回值是字面量，不经过转义解析，所见即所得。
+    // 双竖线（范数）
+    result = result.replace(Regex("""\\left\s*\\lVert""")) { "\\left\\|" }
+    result = result.replace(Regex("""\\right\s*\\rVert""")) { "\\right\\|" }
+    result = result.replace(Regex("""\\lVert""")) { "\\|" }
+    result = result.replace(Regex("""\\rVert""")) { "\\|" }
+    // 单竖线（绝对值/模）——这个是真正的 FAIL 项，必须降级
+    result = result.replace(Regex("""\\left\s*\\lvert""")) { "\\left|" }
+    result = result.replace(Regex("""\\right\s*\\rvert""")) { "\\right|" }
+    result = result.replace(Regex("""\\lvert""")) { "|" }
+    result = result.replace(Regex("""\\rvert""")) { "|" }
     return result
 }
 
