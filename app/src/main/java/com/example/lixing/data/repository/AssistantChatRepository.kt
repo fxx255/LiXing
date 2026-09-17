@@ -53,6 +53,8 @@ class AssistantChatRepository @Inject constructor(
         content: String,
         imagePaths: List<String>,
         displayContent: String? = null,
+        /** 挂在这条消息上的待确认方案信封（空串 = 无）。见 [AssistantMessageEntity.pendingReview]。 */
+        pendingReview: String = "",
     ) =
         withContext(io) {
             dao.insertMessage(
@@ -62,10 +64,23 @@ class AssistantChatRepository @Inject constructor(
                     content = content,
                     imagePaths = imagePaths.takeIf { it.isNotEmpty() }?.let(json::encodeToString).orEmpty(),
                     displayContent = displayContent,
+                    pendingReview = pendingReview,
                 ),
             )
             dao.touchConversation(conversationId, Instant.now())
         }
+
+    /** 更新某条消息的待确认方案信封（确认/取消之后调用）。 */
+    suspend fun updatePendingReview(messageId: String, payload: String) =
+        withContext(io) { dao.updatePendingReview(messageId, payload) }
+
+    /**
+     * 按会话更新待确认方案信封。
+     *
+     * [payload] 传空串即「清空」（用户放弃了方案），传已应用的信封即「置灰保留」。
+     */
+    suspend fun updatePendingReviewForConversation(conversationId: String, payload: String) =
+        withContext(io) { dao.updatePendingReviewForConversation(conversationId, payload) }
 
     fun decodeImagePaths(raw: String): List<String> = runCatching {
         if (raw.isBlank()) emptyList() else json.decodeFromString<List<String>>(raw)

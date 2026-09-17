@@ -14,6 +14,8 @@ import com.example.lixing.domain.model.RepeatRule
 import com.example.lixing.domain.model.TargetType
 import com.example.lixing.domain.model.TaskType
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.decodeFromString
+import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
@@ -57,7 +59,55 @@ data class ParsedAssistantReply(
      * 注意：**不参与持久化**。思考内容从不写库、不备份（见 [AssistantViewModel] 的约定）。
      */
     val rawReasoning: String = "",
+    /**
+     * 本轮模型给出的 `plan_actions` 数组的**原始 JSON**（未解析的那一份）。
+     *
+     * 为什么要留原始串：待确认方案必须能跨进程存活 —— 否则进程一被回收
+     * （用户锁屏后最常见），回到助手界面时「确认」按钮就消失了，
+     * 用户还没确认的修改就没了。恢复时直接复用现有解析逻辑即可。
+     *
+     * 与 [actions] 的区别：[PlanAction] 是密封类，序列化/反序列化成本高且易错；
+     * 存原始串还有一个好处 —— 恢复时会**重新校验**（计划可能已经被别处改动过），
+     * 而不是盲目信任当初的解析结果。
+     *
+     * 只在正常解析（[fromRoot]）时填充；截断抢救出来的动作不写这一项
+     * （那种情况下 JSON 本身都不完整，不该据以持久化）。
+     */
+    val rawPlanActionsJson: String? = null,
 )
+
+/**
+ * 待确认计划方案的信封：随消息落库，让「确认计划调整」按钮能**跨进程存活**。
+ *
+ * 以前它只是 ViewModel 的内存状态，而 `openConversation` 还会主动清空，
+ * 于是用户锁屏回来、或切走助手界面再回来，还没确认的修改就凭空消失了。
+ *
+ * 为什么存**原始 JSON** 而不是 `PlanAction` 列表：`PlanAction` 是密封类，
+ * 序列化要给每个子类写适配器，成本高又容易漏掉新增类型。存模型给的原始串，
+ * 恢复时直接复用现有的解析 + 校验逻辑；顺带还能发现「计划已被别处改过」的情况
+ * （校验失败会显示成该条的 problem 而不是静默丢掉）。
+ */
+@Serializable
+data class PendingPlanReviewPayload(
+    /** 模型给出的 `plan_actions` 数组原始 JSON。 */
+    val actionsJson: String,
+    /** 各条动作的勾选状态。长度可能短于动作数，缺的按「已选」处理。 */
+    val selected: List<Boolean> = emptyList(),
+    /** 是否已确认应用过。保留这个标记是为了让按钮**置灰**而不是凭空消失。 */
+    val applied: Boolean = false,
+)
+
+private val pendingReviewJson = Json { ignoreUnknownKeys = true }
+
+internal fun encodePendingReview(payload: PendingPlanReviewPayload): String =
+    runCatching { pendingReviewJson.encodeToString(payload) }.getOrDefault("")
+
+internal fun decodePendingReview(raw: String): PendingPlanReviewPayload? =
+    if (raw.isBlank()) {
+        null
+    } else {
+        runCatching { pendingReviewJson.decodeFromString<PendingPlanReviewPayload>(raw) }.getOrNull()
+    }
 
 /**
  * 解析助手返回文本。
@@ -207,9 +257,14 @@ object AssistantResponseParser {
         val reply = (root["reply"] as? JsonPrimitive)?.contentOrNull
             ?.let { if (normalizeMarkdown) normalizeAssistantMarkdown(it).trim() else it }
             .orEmpty()
-        val actions = (root["plan_actions"] as? JsonArray)
+        val actionsArray = root["plan_actions"] as? JsonArray
+        val actions = actionsArray
             ?.mapIndexedNotNull { index, element -> parseAction(element, index, warnings) }
             .orEmpty()
+        // 只在动作确实解析出内容时留原始串，供持久化待确认方案用（见字段注释）
+        val rawPlanActionsJson = actionsArray
+            ?.takeIf { it.isNotEmpty() && actions.isNotEmpty() }
+            ?.toString()
         val englishActions = (root["english_actions"] as? JsonArray)
             ?.mapIndexedNotNull { index, element -> parseEnglishAction(element, index, warnings) }
             .orEmpty()
@@ -221,6 +276,7 @@ object AssistantResponseParser {
             warnings = warnings,
             englishActions = englishActions,
             plots = plots,
+            rawPlanActionsJson = rawPlanActionsJson,
         )
     }
 
@@ -495,6 +551,21 @@ object AssistantResponseParser {
             warnings += "第 ${index + 1} 条计划建议不合法（${e.message}），已忽略；请让助手重新生成方案"
             null
         }
+    }
+
+    /**
+     * 从 `plan_actions` 数组的原始 JSON 还原动作列表。
+     *
+     * 用途：恢复落库的待确认方案（见 [PendingPlanReviewPayload]）。
+     * 复用正常的逐条解析路径，所以非法条目同样会被跳过并记警告，
+     * 不会因为一条坏数据把整份方案丢掉。
+     */
+    internal fun parseActionsJson(raw: String): List<PlanAction> {
+        if (raw.isBlank()) return emptyList()
+        val array = runCatching { Json.parseToJsonElement(raw).jsonArray }.getOrNull()
+            ?: return emptyList()
+        val warnings = mutableListOf<String>()
+        return array.mapIndexedNotNull { index, element -> parseAction(element, index, warnings) }
     }
 
     private fun parseUpdateTimeSlot(obj: JsonObject): PlanAction? {

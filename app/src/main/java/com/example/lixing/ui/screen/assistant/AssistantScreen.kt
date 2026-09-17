@@ -678,6 +678,11 @@ fun AssistantScreen(
                                 englishCount = if (state.pendingEnglishOwnerIndex == messageIndex) state.pendingEnglishActions.size else 0,
                                 onOpenPlan = viewModel::openPlanReview,
                                 onOpenEnglish = viewModel::openEnglishReview,
+                                planAppliedCount = if (state.pendingActionsOwnerIndex == messageIndex) {
+                                    state.planReviewAppliedCount
+                                } else {
+                                    0
+                                },
                             )
                         }
                     }
@@ -2511,8 +2516,16 @@ private fun AssistantMessageActionBar(
     englishCount: Int,
     onOpenPlan: () -> Unit,
     onOpenEnglish: () -> Unit,
+    /**
+     * 已确认应用过的条数。
+     *
+     * 有它才能把入口留成**灰态**而不是让按钮凭空消失：用户点完确认、锁屏或切走
+     * 再回来时，需要看得出「那次确认确实生效了」。以前这里什么都没有，
+     * 用户只能看到按钮没了，无从判断。
+     */
+    planAppliedCount: Int = 0,
 ) {
-    if (planCount == 0 && englishCount == 0) return
+    if (planCount == 0 && englishCount == 0 && planAppliedCount == 0) return
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         if (planCount > 0) {
             FilledTonalButton(
@@ -2521,6 +2534,16 @@ private fun AssistantMessageActionBar(
                 shape = LiXingRadius.Pill,
             ) {
                 Text("📋 确认计划调整（$planCount 项）")
+            }
+        } else if (planAppliedCount > 0) {
+            // 不可点的灰态留痕，不是错误提示，所以不用 errorContainer
+            OutlinedButton(
+                onClick = {},
+                enabled = false,
+                modifier = Modifier.fillMaxWidth(),
+                shape = LiXingRadius.Pill,
+            ) {
+                Text("✅ 已应用 $planAppliedCount 项修改")
             }
         }
         if (englishCount > 0) {

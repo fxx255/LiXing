@@ -569,6 +569,25 @@ INSERT INTO `user_profile` (`id`, `nickname`, `total_points`, `level`, `title`, 
         }
     }
 
+    /**
+     * v11 → v12：助手消息挂上「待确认计划修改方案」。
+     *
+     * 目的是让它**跨进程存活**：以前待确认方案只是 ViewModel 的内存状态，
+     * 进程一被回收（用户锁屏后回来最常见）就没了 —— 用户还没点确认的修改
+     * 凭空消失，界面上连痕迹都不留。
+     *
+     * 存的是 JSON 信封（模型给的 plan_actions 原始串 + 各条勾选状态 + 是否已应用），
+     * 空串表示没有待确认项。非破坏性：老数据自动成为「无待确认项」。
+     * 新增列自动纳入多端同步与版本化备份。
+     */
+    private val MIGRATION_11_12 = object : Migration(11, 12) {
+        override fun migrate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
+            db.execSQL(
+                "ALTER TABLE `assistant_message` ADD COLUMN `pending_review` TEXT NOT NULL DEFAULT ''",
+            )
+        }
+    }
+
     val ALL: Array<Migration> = arrayOf(
         MIGRATION_1_2,
         MIGRATION_2_3,
@@ -580,5 +599,6 @@ INSERT INTO `user_profile` (`id`, `nickname`, `total_points`, `level`, `title`, 
         MIGRATION_8_9,
         MIGRATION_9_10,
         MIGRATION_10_11,
+        MIGRATION_11_12,
     )
 }

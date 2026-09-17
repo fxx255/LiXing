@@ -8,7 +8,11 @@ import com.example.lixing.data.assistant.AssistantContextBuilder
 import com.example.lixing.data.assistant.AssistantImagePrep
 import com.example.lixing.data.assistant.AssistantModelClient
 import com.example.lixing.data.assistant.AssistantModelException
+import com.example.lixing.data.assistant.AssistantResponseParser
 import com.example.lixing.data.assistant.ParsedAssistantReply
+import com.example.lixing.data.assistant.PendingPlanReviewPayload
+import com.example.lixing.data.assistant.decodePendingReview
+import com.example.lixing.data.assistant.encodePendingReview
 import com.example.lixing.data.assistant.AssistantStreamEvent
 import com.example.lixing.data.assistant.LocalTextRecognizer
 import com.example.lixing.data.assistant.OcrProgress
@@ -71,6 +75,13 @@ data class AssistantUiState(
     val pendingActions: List<PendingPlanAction> = emptyList(),
     /** [pendingActions] 由哪一条消息产生；按钮只挂在那条气泡下面。null 表示没有待确认项。 */
     val pendingActionsOwnerIndex: Int? = null,
+    /**
+     * 已确认应用过的方案条数（挂在 [pendingActionsOwnerIndex] 那条消息上）。
+     *
+     * 用来把入口按钮**置灰保留**而不是让它凭空消失 —— 用户想知道
+     * 「我刚才那次确认到底有没有生效」，按钮没了就无从判断。
+     */
+    val planReviewAppliedCount: Int = 0,
     val planReviewOpen: Boolean = false,
     val planReviewDate: LocalDate? = null,
     val applying: Boolean = false,
@@ -304,10 +315,17 @@ class AssistantViewModel @Inject constructor(
 
     fun closeHistory() = _state.update { it.copy(historyOpen = false) }
 
-    /** 打开一条历史会话：读取消息并续聊。计划建议不跨会话保留。 */
+    /**
+     * 打开一条历史会话：读取消息并续聊。
+     *
+     * 待确认方案会从落库的信封里**恢复**（以前这里是无条件清空的）：用户
+     * 「还没点确认就锁屏 / 切走再回来」时，方案和按钮都不该消失。
+     */
     fun openConversation(id: String) {
         viewModelScope.launch {
             val messages = chatRepository.messages(id)
+            val today = StudyClock(dayStart = prefsRepository.current().dayStartTime).today()
+            val restored = restorePendingReview(messages.map { it.pendingReview }, today)
             _state.update {
                 it.copy(
                     historyOpen = false,
@@ -320,10 +338,11 @@ class AssistantViewModel @Inject constructor(
                             displayContent = m.displayContent,
                         )
                     },
-                    pendingActions = emptyList(),
-                    pendingActionsOwnerIndex = null,
+                    pendingActions = restored?.previews.orEmpty(),
+                    pendingActionsOwnerIndex = restored?.ownerIndex,
                     planReviewOpen = false,
-                    planReviewDate = null,
+                    planReviewDate = restored?.let { today },
+                    planReviewAppliedCount = restored?.appliedCount ?: 0,
                     pendingEnglishActions = emptyList(),
                     pendingEnglishOwnerIndex = null,
                     englishReviewOpen = false,
@@ -332,6 +351,42 @@ class AssistantViewModel @Inject constructor(
                 )
             }
         }
+    }
+
+    /** 从落库的信封恢复出来的待确认方案。 */
+    private data class RestoredPlanReview(
+        val previews: List<PendingPlanAction>,
+        val ownerIndex: Int,
+        /** 已应用过 ⇒ 按钮置灰，不再提供待确认项。 */
+        val appliedCount: Int,
+    )
+
+    /**
+     * 从各条消息的 `pendingReview` 信封里恢复待确认方案。
+     *
+     * 只认**最后一条**带信封的消息 —— 与 [AssistantUiState.pendingActionsOwnerIndex]
+     * 的语义一致：待确认项永远挂在最新那条回答上。
+     *
+     * 恢复时**重新解析并重新校验**（而不是盲目信任当初的结果）：
+     * 计划可能已经被别处改过，那样对应条目会带上 problem，而不是静默生效或整体丢弃。
+     */
+    private suspend fun restorePendingReview(
+        payloads: List<String>,
+        today: LocalDate,
+    ): RestoredPlanReview? {
+        val index = payloads.indexOfLast { it.isNotBlank() }
+        if (index < 0) return null
+        val payload = decodePendingReview(payloads[index]) ?: return null
+        val actions = AssistantResponseParser.parseActionsJson(payload.actionsJson)
+        if (payload.applied) {
+            // 已确认过：不显示待确认项，但保留数量用于「已应用 N 项」的灰态提示
+            return RestoredPlanReview(emptyList(), index, actions.size)
+        }
+        if (actions.isEmpty()) return null
+        val previews = buildPreviews(actions, today).mapIndexed { i, preview ->
+            preview.copy(selected = payload.selected.getOrElse(i) { true })
+        }
+        return RestoredPlanReview(previews, index, 0)
     }
 
     /** 开始全新对话：清空界面；旧会话仍保留在历史里。 */
@@ -856,9 +911,30 @@ class AssistantViewModel @Inject constructor(
         answerIndex: Int,
         imagePaths: List<String> = emptyList(),
     ) {
-        chatRepository.appendMessage(conversationId, "assistant", text, imagePaths, null)
         val previews = reply.actions.takeIf { it.isNotEmpty() }?.let { buildPreviews(it, today) }
         val englishPreviews = buildEnglishPreviews(reply.englishActions)
+        // 待确认方案随消息一起落库。
+        //
+        // 以前它只活在内存里，而 openConversation 又会主动清空，于是用户
+        // 「还没点确认就锁屏 / 切走」再回来，按钮和方案一起消失。
+        // 存原始 plan_actions JSON：恢复时复用解析+校验逻辑，无需给密封类写序列化器。
+        val rawActionsJson = reply.rawPlanActionsJson
+        val reviewPayload = if (previews != null && rawActionsJson != null) {
+            PendingPlanReviewPayload(
+                actionsJson = rawActionsJson,
+                selected = previews.map { it.selected },
+            )
+        } else {
+            null
+        }
+        chatRepository.appendMessage(
+            conversationId = conversationId,
+            role = "assistant",
+            content = text,
+            imagePaths = imagePaths,
+            displayContent = null,
+            pendingReview = reviewPayload?.let(::encodePendingReview).orEmpty(),
+        )
         _state.update { state ->
             // 回答本身已在流式阶段写入 [answerIndex]，这里只补图片与待确认项：
             // 不再追加消息，否则一条长回答会占好几个气泡、也会污染后续上下文。
@@ -1003,13 +1079,24 @@ class AssistantViewModel @Inject constructor(
 
     fun closePlanReview() = _state.update { it.copy(planReviewOpen = false) }
 
-    fun dismissPendingActions() = _state.update {
-        it.copy(
-            pendingActions = emptyList(),
-            pendingActionsOwnerIndex = null,
-            planReviewOpen = false,
-            planReviewDate = null,
-        )
+    /** 放弃这版待确认方案。 */
+    fun dismissPendingActions() {
+        val conversationId = _state.value.currentConversationId
+        _state.update {
+            it.copy(
+                pendingActions = emptyList(),
+                pendingActionsOwnerIndex = null,
+                planReviewOpen = false,
+                planReviewDate = null,
+                planReviewAppliedCount = 0,
+            )
+        }
+        // 落库的信封也要清掉：否则重开这个会话时，已经被用户放弃的方案又会「复活」。
+        if (conversationId != null) {
+            viewModelScope.launch {
+                runCatching { chatRepository.updatePendingReviewForConversation(conversationId, "") }
+            }
+        }
     }
 
     // ---------------- 英语积累变更 ----------------
@@ -1128,7 +1215,14 @@ class AssistantViewModel @Inject constructor(
                         pendingActions = remaining,
                         planReviewOpen = remaining.isNotEmpty(),
                         planReviewDate = state.planReviewDate.takeIf { remaining.isNotEmpty() },
+                        // 有成功项就让入口按钮留成灰态，用户回来能看出「这次确认生效了」
+                        planReviewAppliedCount = state.planReviewAppliedCount + okCount,
                     )
+                }
+                // 把「已应用」写回落库的信封：否则锁屏/切走再回来后，入口按钮直接消失，
+                // 用户无从判断那次确认到底有没有生效。
+                if (okCount > 0) {
+                    _state.value.currentConversationId?.let { markReviewApplied(it) }
                 }
             } catch (e: Exception) {
                 _state.update {
@@ -1136,6 +1230,26 @@ class AssistantViewModel @Inject constructor(
                 }
             }
         }
+    }
+
+    /**
+     * 把「已应用」写回落库的信封。
+     *
+     * 这样用户锁屏 / 切走再回来时，入口按钮会以**灰态**保留（「已应用 N 项修改」），
+     * 而不是凭空消失 —— 否则用户根本判断不了那次确认到底有没有生效。
+     *
+     * 只改 `applied` 标记，保留 `actionsJson`：条数还要用它算。
+     */
+    private suspend fun markReviewApplied(conversationId: String) {
+        val raw = chatRepository.messages(conversationId)
+            .lastOrNull { it.pendingReview.isNotBlank() }
+            ?.pendingReview
+            ?: return
+        val payload = decodePendingReview(raw) ?: return
+        chatRepository.updatePendingReviewForConversation(
+            conversationId,
+            encodePendingReview(payload.copy(applied = true)),
+        )
     }
 
     // ---------------- 预览构建 ----------------

@@ -55,4 +55,17 @@ data class AssistantMessageEntity(
     /** 多端同步的 Lamport 时钟戳，由同步引擎维护；0 = 从未参与同步。 */
     @ColumnInfo(name = "sync_modified_at", defaultValue = "0")
     val syncModifiedAt: Long = 0,
+    /**
+     * 挂在这条消息上的**待确认计划修改方案**（JSON 信封）。空串 = 没有待确认项。
+     *
+     * 为什么要落库：它以前只是 ViewModel 里的内存状态，进程一被回收
+     * （**用户锁屏后回来**最常见，其次是切走助手界面）就直接没了 ——
+     * 用户还没来得及点「确认」的修改凭空消失，界面上连个痕迹都不留。
+     *
+     * 存的是信封而不是动作本身：内含模型给出的 `plan_actions` **原始 JSON**、
+     * 各条的勾选状态、以及是否已应用（已应用时按钮置灰但保留）。
+     * 恢复时用现有解析逻辑重新解析并重新校验 —— 计划可能已被别处改过。
+     */
+    @ColumnInfo(name = "pending_review", defaultValue = "")
+    val pendingReview: String = "",
 )
