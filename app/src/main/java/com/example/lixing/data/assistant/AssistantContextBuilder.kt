@@ -45,7 +45,7 @@ class AssistantContextBuilder @Inject constructor(
         val plan = planRepository.getActivePlan() ?: return "## 当前计划\n（还没有学习计划）"
         val subjects = planRepository.getSubjects(plan.id)
         val slots = planRepository.getTimeSlots(plan.id)
-        val templates = planRepository.getEnabledTemplates(plan.id)
+        val templates = planRepository.getTemplates(plan.id)
         buildString {
             appendLine("## 当前计划")
             appendLine("- 计划：${plan.name}（${plan.startDate} ~ 目标日 ${plan.targetDate}）")
@@ -58,7 +58,11 @@ class AssistantContextBuilder @Inject constructor(
                         if (it.isEnabled) "" else "（已停用）",
                 )
             }
-            appendLine("- 启用的任务模板：")
+            // 带上**全部**模板（含已停用的）：模型要对某条停用模板做「打开」操作，
+            // 前提是它拿得到那条模板的 id。以前只喂启用中的模板，于是「把某个任务打开」
+            // 这类需求永远失败 —— 模型只能回「没有这个 id」，而用户根本不知道
+            // 自己哪些任务对模型是「隐形」的。停用的显式标注出来，避免模型误当成在用。
+            appendLine("- 任务模板（含已停用；停用的标了「已停用」）：")
             templates.forEach { t ->
                 val subject = subjects.firstOrNull { it.id == t.subjectId }?.name ?: "?"
                 val slot = slots.firstOrNull { it.id == t.timeSlotId }?.name ?: "?"
@@ -66,9 +70,12 @@ class AssistantContextBuilder @Inject constructor(
                     t.targetValue > 1 -> "目标 ${t.targetValue}"
                     else -> "完成即可"
                 }
+                val flags = buildString {
+                    if (t.isKeystone) append("，关键任务")
+                    if (!t.isEnabled) append("，已停用")
+                }
                 appendLine(
-                    "  - [id=${t.id}] ${t.title}（科目:$subject，时段:$slot，$target，重复:${t.repeatRule.name}" +
-                        if (t.isKeystone) "，关键任务）" else "）",
+                    "  - [id=${t.id}] ${t.title}（科目:$subject，时段:$slot，$target，重复:${t.repeatRule.name}$flags）",
                 )
             }
         }.trimEnd()

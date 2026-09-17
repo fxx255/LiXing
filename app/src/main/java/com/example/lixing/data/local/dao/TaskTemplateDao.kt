@@ -37,6 +37,24 @@ interface TaskTemplateDao {
     )
     suspend fun getEnabledTemplates(planId: String): List<TaskTemplateEntity>
 
+    /**
+     * 取计划下的**全部**模板，含已停用的。
+     *
+     * 助手上下文必须用这个而不是 [getEnabledTemplates]：模型要能对停用模板做
+     * `UPDATE_TASK_TEMPLATE(isEnabled=true)`（「把某个任务打开」），前提是它拿得到
+     * 那条模板的 id。只喂启用中的模板会让这类需求永远失败 —— 模型只能回
+     * 「没有这个 id」，而用户完全不知道自己哪些任务对模型是「隐形」的。
+     */
+    @Query(
+        """
+        SELECT t.* FROM task_template t
+        INNER JOIN subject s ON s.id = t.subject_id
+        WHERE s.plan_id = :planId
+        ORDER BY t.sort_order, t.id
+        """,
+    )
+    suspend fun getTemplates(planId: String): List<TaskTemplateEntity>
+
     @Query("SELECT * FROM task_template WHERE subject_id = :subjectId ORDER BY sort_order, id")
     fun observeTemplatesBySubject(subjectId: String): Flow<List<TaskTemplateEntity>>
 

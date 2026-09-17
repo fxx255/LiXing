@@ -738,12 +738,21 @@ fun AssistantScreen(
                         }
                         state.lastContextNote?.let { note ->
                             Text(
-                                "上次附带：$note",
+                                // 与输入框上方的「本次将附带」区分开：这条是**上一轮实际**带上的，
+                                // 包含模型按问题自动补充的部分，所以两者不一致是正常的。
+                                "上轮实际附带：$note",
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                         }
                     }
+                    // 常驻显示「本次将附带什么」。
+                    //
+                    // 以前只有折叠面板里的「上次附带：…」，用户勾完完全不知道有没有生效
+                    // （真实反馈：「勾选了计划选项，但是没有用，是不是按钮有问题」）——
+                    // 按钮没问题，是**没有任何反馈**。这里把当前勾选状态直接摆在输入框上方，
+                    // 勾一下就能看到它变了。
+                    ContextHintRow(selected = state.contextKinds)
                     if (state.pendingPhotoPaths.isNotEmpty()) {
                         PendingPhotoRow(
                             paths = state.pendingPhotoPaths,
@@ -1160,6 +1169,32 @@ private fun NotEnabledPanel(padding: PaddingValues) {
         Spacer(Modifier.height(16.dp))
         Text("到「设置 → AI 学习助手」填写接口地址、模型名与 API 密钥后即可使用。")
     }
+}
+
+/**
+ * 输入框上方的常驻提示：**本次将附带哪些本机数据**。
+ *
+ * 为什么要有它：上下文到底有没有附带，以前只有折叠面板里的「上次附带：…」能看出来，
+ * 用户勾选后得不到任何反馈 —— 真实反馈就是「勾选了计划选项，但是没有用，
+ * 是不是按钮有问题」。按钮没问题，是**缺反馈**。
+ *
+ * 只列**用户勾选**的那几项：模型按问题自动补充的部分要等发送时才知道，
+ * 提前显示会误导（显示了却没带，比不显示更糟）。
+ */
+@Composable
+private fun ContextHintRow(selected: Set<AssistantContextKind>) {
+    // 按 enum 声明顺序排列，而不是 Set 的迭代顺序，免得每次重组文字都在跳
+    val labels = AssistantContextKind.entries.filter { it in selected }.map { it.label }
+    val text = if (labels.isEmpty()) {
+        "本次将附带：无（点右侧「+」可勾选要附带的资料）"
+    } else {
+        "本次将附带：" + labels.joinToString("、")
+    }
+    Text(
+        text = text,
+        style = MaterialTheme.typography.labelSmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
 }
 
 @Composable

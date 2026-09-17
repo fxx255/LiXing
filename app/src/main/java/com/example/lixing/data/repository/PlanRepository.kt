@@ -78,6 +78,10 @@ class PlanRepository @Inject constructor(
     suspend fun getEnabledTemplates(planId: String): List<TaskTemplateEntity> =
         withContext(io) { templateDao.getEnabledTemplates(planId) }
 
+    /** 计划下的全部模板，含已停用的（助手上下文用，见 DAO 注释）。 */
+    suspend fun getTemplates(planId: String): List<TaskTemplateEntity> =
+        withContext(io) { templateDao.getTemplates(planId) }
+
     suspend fun getSubject(id: String): SubjectEntity? = withContext(io) { planDao.getSubject(id) }
 
     suspend fun getTimeSlot(id: String): TimeSlotEntity? = withContext(io) { planDao.getTimeSlot(id) }
