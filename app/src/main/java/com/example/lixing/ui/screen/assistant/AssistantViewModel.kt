@@ -427,8 +427,11 @@ class AssistantViewModel @Inject constructor(
                 // 手动勾选的始终附带；其余由模型按问题预判补充。
                 val manual = _state.value.contextKinds
                 val auto = modelClient.chooseContext(outgoing)
-                val kinds = requiredAssistantContext(outgoing, manual + auto)
+                val kinds = requiredAssistantContext(outgoing, manual + auto, inPlanChangeFlow(_state.value))
                 val context = contextBuilder.build(kinds, today)
+                // 自纠正兜底：这次没带计划数据时，先备好「补上计划数据」的版本。
+                // 模型一旦声明「缺 id」，runChatTurn 会用它重试一次（用户无感）。
+                val planRetryContext = planRetryContextFor(kinds, today)
                 val contextNote = if (kinds.isEmpty()) {
                     "本次未附带本机数据"
                 } else {
@@ -439,6 +442,7 @@ class AssistantViewModel @Inject constructor(
                 runChatTurn(
                     conversationId = conversationId,
                     context = context,
+                    planRetryContext = planRetryContext,
                     imageBase64s = emptyList(),
                     webSearchEnabled = webSearchEnabled,
                     forceWebSearch = _state.value.forceWebSearch,
@@ -646,9 +650,30 @@ class AssistantViewModel @Inject constructor(
      * 3. 累计输出超过总熔断长度 → 收尾并明示。
      * 返回最后一段回复（含 warnings，供调用方展示）。
      */
+    /**
+     * 备好「补上计划数据」的上下文，供自纠正重试用。
+     *
+     * 这次已经带了计划数据就返回 null —— 没什么可补的。
+     * 用 runCatching 兜住：拼上下文失败绝不能反过来把正常回答也搞挂。
+     */
+    private suspend fun planRetryContextFor(
+        kinds: Set<AssistantContextKind>,
+        today: LocalDate,
+    ): String? {
+        if (AssistantContextKind.PLAN in kinds) return null
+        return runCatching { contextBuilder.build(kinds + AssistantContextKind.PLAN, today) }
+            .getOrNull()
+            ?.takeIf { it.isNotBlank() }
+    }
+
     private suspend fun runChatTurn(
         conversationId: String,
         context: String,
+        /**
+         * 自纠正用：模型声明「缺计划数据」时改用它重试一次。
+         * null 表示本轮已经带了计划数据（或取不到），无需重试。
+         */
+        planRetryContext: String? = null,
         imageBase64s: List<String>,
         webSearchEnabled: Boolean,
         forceWebSearch: Boolean = false,
@@ -671,6 +696,10 @@ class AssistantViewModel @Inject constructor(
         var totalChars = 0
         var barrenRounds = 0
         var lastReply: ParsedAssistantReply? = null
+        // 自纠正：本轮实际使用的上下文。模型声明「缺计划数据」时会换成补全版重试一次。
+        // 只允许补一次，避免和模型来回拉锯。
+        var effectiveContext = context
+        var planRetryUsed = false
         // 跨轮累积的图表：见下方 accumulation 处注释（只用最后一轮的 plots 会丢图）
         val accumulatedPlots = mutableListOf<PlotSpec>()
         while (true) {
@@ -692,7 +721,7 @@ class AssistantViewModel @Inject constructor(
             val reply = try {
                 modelClient.chatStreaming(
                     history,
-                    context,
+                    effectiveContext,
                     images,
                     webSearchEnabled && firstRound,
                     forceWebSearch && firstRound,
@@ -710,9 +739,37 @@ class AssistantViewModel @Inject constructor(
                 appendAssistantTurn(conversationId, generated, previous, today, answerIndex, renderPlots(accumulatedPlots))
                 return previous.copy(warnings = previous.warnings + "续写未完成：${error.message}")
             }
+            // ── 自纠正：模型明确说「缺计划数据 / 没有 id」时，补上计划数据重试一次 ──
+            //
+            // 为什么需要这一步：要不要带计划数据是靠**猜**的（用户没勾选、模型预判不准、
+            // 句子里没有「计划」二字，任一都会漏）。漏判时模型手里一个真实 id 都没有，
+            // 要么拒绝生成（表现为「确认页一直起不来」），要么**编造 id** ——
+            // 后者更糟，因为要等用户点了「接受」才暴露失败。
+            //
+            // 这里把「我缺数据」当成一个可纠正的信号接住，而不是当成普通回答显示给用户。
+            // 只补一次：避免模型反复要数据导致来回拉锯。
+            if (firstRound && !planRetryUsed && planRetryContext != null && replyNeedsPlanContext(reply)) {
+                planRetryUsed = true
+                effectiveContext = planRetryContext
+                generated = ""
+                images = imageBase64s // 重试要复原首轮带的图片
+                _state.update { it.copy(activeReasoning = "", activeAnswerStarted = false) }
+                continue
+            }
             lastReply = reply
             images = emptyList() // 续写轮不再带图：首轮图片内容已在对话历史里
             var part = reply.reply
+            // 约定标记若最终没被消化掉（已经补过计划数据仍要、或它出现在续写轮），
+            // 绝不能把 [[NEED_PLAN_CONTEXT]] 这个内部标记原样露给用户 ——
+            // 那比「拿不到数据」更让人摸不着头脑。换成一句可执行的提示。
+            if (NEED_PLAN_CONTEXT_MARKER in part) {
+                val stripped = part.replace(NEED_PLAN_CONTEXT_MARKER, "").trim()
+                part = if (stripped.isEmpty()) {
+                    PLAN_CONTEXT_UNAVAILABLE_HINT
+                } else {
+                    "$stripped\n\n$PLAN_CONTEXT_UNAVAILABLE_HINT"
+                }
+            }
             // 续写轮里模型并不知道前面已输出过几张图，锚点通常从 1 重新编号。
             // 按「已累积的图表数」平移，保证 [[FIGURE:n]] 始终指向合并列表里的正确下标；
             // 不平移的话，第 2 轮的 [[FIGURE:1]] 会错误地指到第 1 轮的第一张图上。
@@ -886,8 +943,10 @@ class AssistantViewModel @Inject constructor(
                 val today = StudyClock(dayStart = prefs.dayStartTime).today()
                 val manual = _state.value.contextKinds
                 val auto = modelClient.chooseContext(outgoing)
-                val kinds = requiredAssistantContext(outgoing, manual + auto)
+                val kinds = requiredAssistantContext(outgoing, manual + auto, inPlanChangeFlow(_state.value))
                 val modelContext = contextBuilder.build(kinds, today)
+                // 见另一处调用点的说明：模型声明缺 id 时用它补注入并重试一次
+                val planRetryContext = planRetryContextFor(kinds, today)
                 val contextNote = if (kinds.isEmpty()) "本次未附带本机数据" else {
                     val names = kinds.joinToString("、") { it.label }
                     if ((auto - manual).isNotEmpty()) "$names（含模型自动选择）" else names
@@ -895,6 +954,7 @@ class AssistantViewModel @Inject constructor(
                 runChatTurn(
                     conversationId = conversationId,
                     context = modelContext,
+                    planRetryContext = planRetryContext,
                     imageBase64s = imageBase64s,
                     webSearchEnabled = webSearchEnabled,
                     forceWebSearch = _state.value.forceWebSearch,
@@ -1437,6 +1497,19 @@ class AssistantViewModel @Inject constructor(
 internal fun requiredAssistantContext(
     prompt: String,
     selected: Set<AssistantContextKind>,
+    /**
+     * 本轮是否处于「计划变更流程」中（见 [inPlanChangeFlow]）。
+     *
+     * 为什么要单独判：`inferAssistantContext` 是**关键词猜意图**，而改计划的说法经常不含
+     * 「计划」二字（「以后都改」「政治都放到晚上」「英语改成题目专项」）。一旦漏判，
+     * 模型就拿不到任何带 `[id=...]` 的计划数据，于是只能拒绝生成（表现为「确认页起不来」）
+     * 或**编造 id**（点「接受」时报「任务模板不存在（id=…）」）—— 这正是
+     * 「第一轮能改、第二轮改不了」的根因。
+     *
+     * 判据放宽是有意的：多注入一次计划数据只多花几百 token，
+     * 而漏判的代价是整轮改计划直接失败。
+     */
+    inPlanChangeFlow: Boolean = false,
 ): Set<AssistantContextKind> {
     val inferred = inferAssistantContext(prompt)
     val todayMarkers = listOf(
@@ -1448,8 +1521,87 @@ internal fun requiredAssistantContext(
     } else {
         emptySet()
     }
-    return selected + inferred + required
+    // 「正在改计划」⇒ 无条件带上计划数据，不依赖关键词是否命中
+    val flowRequired = if (inPlanChangeFlow) setOf(AssistantContextKind.PLAN) else emptySet()
+    return selected + inferred + required + flowRequired
 }
+
+/** 助手给出待确认方案时惯用的措辞；命中即认为下一轮仍在计划变更流程里。 */
+private val PLAN_FLOW_MARKERS = listOf(
+    "待确认方案", "请确认", "确认后生效", "计划变更", "调整方案",
+)
+
+/**
+ * 本轮是否处于「计划变更流程」中 —— 也就是：用户这句话多半是在回应上一轮的方案。
+ *
+ * 两个判据：① 手上还有待确认动作；② 上一条助手消息在谈方案。
+ * 只要其一成立就把计划数据带上，因为**模型生成任何计划动作都必须引用真实 id**。
+ *
+ * ⚠️ 这里宁可放宽：误判的代价只是多带一段计划数据（几百 token），
+ * 漏判的代价是整轮改计划失败、还可能让模型编造 id。
+ */
+internal fun inPlanChangeFlow(state: AssistantUiState): Boolean {
+    if (state.pendingActions.isNotEmpty()) return true
+    val lastAssistant = state.messages.lastOrNull { it.role == "assistant" } ?: return false
+    val text = lastAssistant.displayContent ?: lastAssistant.content
+    return PLAN_FLOW_MARKERS.any(text::contains)
+}
+
+/**
+ * 模型声明「需要计划数据但上下文里没有」时使用的约定标记。
+ *
+ * 提示词里要求模型缺数据时**只回这一行**（见 `AssistantModelClient.SYSTEM_PROMPT`），
+ * 客户端收到后会自动补上计划数据重试一次，用户无感。
+ */
+internal const val NEED_PLAN_CONTEXT_MARKER = "[[NEED_PLAN_CONTEXT]]"
+
+/**
+ * 约定标记没能被消化掉时替换给用户的提示。
+ *
+ * 出现它说明补注入也没拿到计划数据（例如当前没有生效中的计划），
+ * 此时必须告诉用户**下一步做什么**，而不是只留一句「我拿不到数据」。
+ */
+internal const val PLAN_CONTEXT_UNAVAILABLE_HINT =
+    "（没能读到你的计划数据，暂时无法生成修改方案。请在输入框上方确认「当前计划」已开启，或检查是否还有进行中的计划。）"
+
+/**
+ * 模型这一轮是否在声明「缺计划数据 / 拿不到 id」。
+ *
+ * 两道判据并用：
+ * 1. **约定标记** —— 模型遵守提示词时最可靠；
+ * 2. **措辞兜底** —— 模型未必遵守约定，于是再看它是否「既没产出任何计划动作，
+ *    又在正文里同时提到『没有拿到 / 缺少』+『计划 / 模板 / 时段』+『id』」。
+ *
+ * 误判的代价很小（多带一段计划数据、多重试一次请求），
+ * 而漏判的代价是模型编造 id、要等用户点「接受」才发现失败 —— 所以这里偏向宽松。
+ */
+internal fun replyNeedsPlanContext(reply: ParsedAssistantReply): Boolean {
+    if (NEED_PLAN_CONTEXT_MARKER in reply.reply) return true
+    // 已经产出了计划动作 ⇒ 说明它手上有数据，不是「缺数据」
+    if (reply.actions.isNotEmpty()) return false
+    val text = reply.reply
+    // 判据以 **id** 为准，而不是「计划/模板/时段/任务」这些名词：
+    // 实测模型具体怎么说很随意，有时只说「我这一轮拿到的上下文里一个真实 id 都没有」，
+    // 一个业务名词都不带 —— 那样会被名词条件挡掉。
+    // 而「缺 id」正是这个问题的核心症状，提到它才是真的在要计划数据。
+    //
+    // 反面：不要求名词也不放宽到「提到 id 就算」——因为误触发的代价不只是多一次请求，
+    // 还会**丢弃第一次已经生成的回答**（重试会重置正文），用户会看到回答闪一下重来。
+    val complainsMissing = listOf(
+        "没有拿到", "没拿到", "拿不到", "缺少", "没有提供", "没有找到",
+        "无法生成", "没有生成", "都没有", "需要带",
+    ).any(text::contains)
+    return complainsMissing && ID_WORD.containsMatchIn(text)
+}
+
+/**
+ * 独立的 `id` 字样。
+ *
+ * ⚠️ 不能直接用 `contains("id")` —— `provide`、`idea`、`consider` 里都含 "id"，
+ * 会把普通英文回答误判成「缺 id」，进而白触发一次补注入重试。
+ * 中文文本里 id 两侧通常是汉字（属非单词字符），所以 `\b` 依然能正确匹配。
+ */
+private val ID_WORD = Regex("""\bid\b""", RegexOption.IGNORE_CASE)
 
 internal fun inferAssistantContext(prompt: String): Set<AssistantContextKind> {
     val compact = prompt.lowercase().replace(Regex("\\s+"), "")

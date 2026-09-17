@@ -490,7 +490,9 @@ object AssistantResponseParser {
                 }
             }
         } catch (e: IllegalArgumentException) {
-            warnings += "第 ${index + 1} 条计划建议不合法：${e.message}，已忽略"
+            // 文案要给下一步动作：只写「已忽略」，用户看到方案「生成了」却少了几条，
+            // 会以为已经改好（真实故障：模型编造了不存在的 id，点「接受」才发现失败）。
+            warnings += "第 ${index + 1} 条计划建议不合法（${e.message}），已忽略；请让助手重新生成方案"
             null
         }
     }
