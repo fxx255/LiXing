@@ -37,3 +37,12 @@ MuMu 12-1 使用手机的 1268×2756、520 dpi 参数运行 **5 项设备测试�
 测试安装包：`app/build/outputs/apk/debug/app-debug.apk`。仅安装到指定模拟器；手机拔走后未再进行安装或操作。`git diff --check` 通过。
 
 长思考测试使用模拟 HTTP 响应，不调用用户的模型服务。修复确保思考不会充当正式回复，但不能保证外部模型每次都能在额度内完成解答。
+
+## 1.0.41 发布记录
+
+- 版本：`1.0.41` / `versionCode=42`，代码提交 `5555a4a1861678b48943793052b0517d23722ff0`，Git 标签 `v1.0.41`。
+- JDK 21、Gradle 8.14.3 执行 `:app:assembleRelease --offline --no-daemon` 成功，R8 mapping 已归档至本机 `docs/mappings/mapping-v1.0.41.txt`（不入库）。
+- ARM64 安装包：296,912,085 字节；SHA-256：`2b7f2697d327a51f25c714853008349375b8f91f1bab512d596e4d7fb5a7a76c`。GitHub 资产的独立 digest 与本地一致。
+- 包名仍为 `com.example.lixing.debug`，签名证书 SHA-256 仍为 `9c5f21a4e1923d3f290339cccbe4b3cb3fba3c849d385e867f5781fb8b1a8de2`。正式包在 MuMu模拟器12-1 覆盖安装成功，冷启动正常，设备报告版本 1.0.41（42）。
+- [GitHub Release](https://github.com/fxx255/LiXing/releases/tag/v1.0.41) 已公开并确认为 latest；APK 原始下载地址与 `ghfast.top` 镜像均实测返回 HTTP 206，前 1024 字节为 APK/ZIP 文件头，响应总大小与清单一致。
+- 云函数沿用现有 `UPDATE_MANIFEST_URL` 读取最新发布清单，无需改动函数代码或重新部署。公开 `/update/check` 已实测返回 `ok=true`、`versionCode=42`、`versionName=1.0.41`；APK 地址、大小及 SHA-256 均匹配新清单，响应未使用旧缓存或兜底清单。
