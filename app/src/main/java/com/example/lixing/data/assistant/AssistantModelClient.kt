@@ -9,6 +9,8 @@ import com.example.lixing.domain.assistant.AssistantMessage
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonArray
@@ -160,10 +162,11 @@ class AssistantModelClient @Inject constructor(
                     messages = messages,
                     context = context,
                     imageBase64s = imageBase64s,
-                    webSearchEnabled = chatCompletionsSearch,
                     previous = firstOutput,
                     onEvent = onEvent,
                 )
+            } catch (error: CancellationException) {
+                throw error
             } catch (error: Exception) {
                 Log.w("AssistantModel", "final answer recovery failed", error)
                 firstOutput
@@ -173,15 +176,9 @@ class AssistantModelClient @Inject constructor(
         }
         val answer = output.answer.trim()
         if (answer.isEmpty() && output.reasoning.isNotBlank()) {
-            return@withContext ParsedAssistantReply(
-                reply = buildString {
-                    append("### 未完成的解题过程\n\n")
-                    append(output.reasoning.takeLast(REASONING_FALLBACK_CHARS).trim())
-                },
-                actions = emptyList(),
-                warnings = listOf("服务商两次只返回思考内容，已展示可恢复的推理尾部") + listOfNotNull(searchNote),
-                // 思考内容一并带出：调用方可能据此判断「这一轮其实产出在 reasoning 通道里」
-                rawReasoning = output.reasoning,
+            throw AssistantModelException(
+                AssistantModelException.Kind.INVALID_RESPONSE,
+                "模型在补充生成后仍未返回最终答案，请重试或降低思考强度；思考过程未作为回答保存",
             )
         }
         if (answer.isEmpty()) {
@@ -193,7 +190,7 @@ class AssistantModelClient @Inject constructor(
         try {
             val userPrompt = messages.lastOrNull { it.role == "user" }?.content.orEmpty()
             val base = guardMissingEnglishActions(
-                guardMissingPlanActions(AssistantResponseParser.parse(answer), userPrompt),
+                guardMissingPlanActions(AssistantResponseParser.parse(answer, normalizeMarkdown = false), userPrompt),
                 userPrompt,
             ).copy(
                 truncated = output.finishReason == "length",
@@ -641,10 +638,11 @@ class AssistantModelClient @Inject constructor(
         stream: Boolean,
         webSearchEnabled: Boolean = false,
         userProfile: AssistantUserProfile = AssistantUserProfile(),
+        maxOutputTokens: Int = MAX_OUTPUT_TOKENS,
     ): JsonObject = buildJsonObject {
         put("model", configured.model)
         put("temperature", 0.4)
-        put("max_tokens", MAX_OUTPUT_TOKENS)
+        put("max_tokens", maxOutputTokens)
         put("stream", stream)
         nativeReasoningRequestFields(
             baseUrl = configured.baseUrl,
@@ -720,11 +718,15 @@ class AssistantModelClient @Inject constructor(
         messages: List<AssistantMessage>,
         context: String,
         imageBase64s: List<String>,
-        webSearchEnabled: Boolean,
         previous: StreamOutput,
         onEvent: suspend (AssistantStreamEvent) -> Unit,
     ): StreamOutput {
-        val recoveryMessages = messages + listOf(
+        // Keep the original picture with the original question, not the recovery instruction.
+        val recoveryMessages = messages.mapIndexed { index, message ->
+            if (index == messages.lastIndex && message.role == "user" && imageBase64s.isNotEmpty()) {
+                message.copy(imageBase64s = imageBase64s)
+            } else message
+        } + listOf(
             AssistantMessage(
                 role = "assistant",
                 content = "上一轮内部分析的末尾如下，仅用于续写，不要逐字复述：\n\n" +
@@ -736,19 +738,28 @@ class AssistantModelClient @Inject constructor(
             ),
         )
         val payload = buildChatPayload(
-            configured = configured,
+            configured = configured.copy(reasoningEffort = AiReasoningEffort.LOW),
             messages = recoveryMessages,
             context = context,
-            imageBase64s = imageBase64s,
+            imageBase64s = emptyList(),
             stream = true,
-            webSearchEnabled = webSearchEnabled,
+            webSearchEnabled = false,
+            maxOutputTokens = RECOVERY_OUTPUT_TOKENS,
         )
         val request = Request.Builder()
             .url(completionsUrl(configured.baseUrl))
             .header("Authorization", "Bearer ${configured.apiKey}")
             .post(payload.toString().toRequestBody(mediaType))
             .build()
-        val recovered = executeStreaming(request, onEvent)
+        val recovered = try {
+            executeStreaming(request, onEvent)
+        } catch (error: AssistantModelException) {
+            // Older compatible endpoints may cap max_tokens at 8192. Retry that budget only
+            // when the endpoint rejects the request, not on auth/network failures.
+            if (error.kind != AssistantModelException.Kind.SERVER || !error.message.orEmpty().contains("HTTP 400")) throw error
+            val compatible = JsonObject(payload + ("max_tokens" to JsonPrimitive(MAX_OUTPUT_TOKENS)))
+            executeStreaming(request.newBuilder().post(compatible.toString().toRequestBody(mediaType)).build(), onEvent)
+        }
         return recovered.copy(
             reasoning = (previous.reasoning + recovered.reasoning).takeLast(MAX_REASONING_CAPTURE_CHARS),
             citations = previous.citations + recovered.citations,
@@ -789,6 +800,7 @@ class AssistantModelClient @Inject constructor(
             val raw = StringBuilder()
             val source = body.source()
             while (!source.exhausted()) {
+                currentCoroutineContext().ensureActive()
                 val line = source.readUtf8Line() ?: break
                 if (!line.startsWith("data:")) {
                     if (line.isNotBlank()) raw.append(line)
@@ -796,14 +808,15 @@ class AssistantModelClient @Inject constructor(
                 }
                 sawSse = true
                 val data = line.removePrefix("data:").trim()
-                if (data.isEmpty() || data == "[DONE]") continue
+                if (data == "[DONE]") break
+                if (data.isEmpty()) continue
                 val chunk = runCatching { json.parseToJsonElement(data) as? JsonObject }.getOrNull() ?: continue
                 citations += extractCitations(chunk["citations"])
                 val choice = (chunk["choices"] as? JsonArray)?.firstOrNull() as? JsonObject ?: continue
+                finishReason = (choice["finish_reason"] as? JsonPrimitive)?.contentOrNull ?: finishReason
                 val message = (choice["delta"] as? JsonObject) ?: (choice["message"] as? JsonObject) ?: continue
                 citations += extractCitations(message["annotations"])
                 citations += extractCitations(message["citations"])
-                finishReason = (choice["finish_reason"] as? JsonPrimitive)?.contentOrNull ?: finishReason
                 extractText(
                     message["reasoning_content"] ?: message["reasoning"] ?: message["reasoning_details"],
                 ).takeIf { it.isNotEmpty() }?.let {
@@ -951,7 +964,7 @@ class AssistantModelClient @Inject constructor(
             val parsed = try {
                 val userPrompt = messages.lastOrNull { it.role == "user" }?.content.orEmpty()
                 guardMissingEnglishActions(
-                    guardMissingPlanActions(AssistantResponseParser.parse(answer), userPrompt),
+                    guardMissingPlanActions(AssistantResponseParser.parse(answer, normalizeMarkdown = false), userPrompt),
                     userPrompt,
                 )
             } catch (e: Exception) {
@@ -1064,8 +1077,8 @@ class AssistantModelClient @Inject constructor(
 
     internal companion object {
         const val MAX_OUTPUT_TOKENS = 8192
+        const val RECOVERY_OUTPUT_TOKENS = 16384
         const val RECOVERY_REASONING_CHARS = 12_000
-        const val REASONING_FALLBACK_CHARS = 8_000
         const val MAX_REASONING_CAPTURE_CHARS = 64_000
 
         /** 上下文预判提示词：只输出 JSON，不做任何回答。 */

@@ -25,7 +25,6 @@ internal fun wrapLongFormulas(
             trimmed.startsWith("~~~") -> "~~~"
             else -> null
         }
-        val t = line.trim()
         // 表格整块原样放行。
         //
         // 表格行以 `|` 分隔单元格，而 wrapInlineLine 是按「整行宽度」决定是否把公式
@@ -38,47 +37,53 @@ internal fun wrapLongFormulas(
             index++
             continue
         }
-        when {
-            lineFence != null -> {
+        if (lineFence != null || fence != null) {
+            if (lineFence != null) {
                 fence = if (fence == null) lineFence else if (fence == lineFence) null else fence
-                out += line
             }
-            fence != null -> out += line
-            inDisplay -> {
-                when {
-                    // 纯 $$ 行：常规关闭
-                    t == DISPLAY_DELIMITER -> {
-                        inDisplay = false
-                        out += splitFormulaBlocks(block.toString().trim(), maxWidthPx, measure)
-                        block.setLength(0)
-                    }
-                    // 「内容 $$」行：内容并入块后再关闭（模型偶尔把闭合符写在公式尾部）。
-                    // 行内必须只有这一个 $$，否则可能是「…$$ … $$」的行内对，交回普通文本处理。
-                    t.endsWith(DISPLAY_DELIMITER) &&
-                        t.indexOf(DISPLAY_DELIMITER) == t.length - DISPLAY_DELIMITER.length -> {
-                        if (t.length > DISPLAY_DELIMITER.length) {
-                            block.append('\n').append(t.substring(0, t.length - DISPLAY_DELIMITER.length))
-                        }
-                        inDisplay = false
-                        out += splitFormulaBlocks(block.toString().trim(), maxWidthPx, measure)
-                        block.setLength(0)
-                    }
-                    else -> {
-                        if (block.isNotEmpty()) block.append('\n')
-                        block.append(line)
-                    }
-                }
+            out += line
+            index++
+            continue
+        }
+        var rest = line
+        if (inDisplay) {
+            val close = mathDelimiters(rest).firstOrNull()
+            if (close == null) {
+                if (block.isNotEmpty()) block.append('\n')
+                block.append(rest)
+                index++
+                continue
             }
-            t == DISPLAY_DELIMITER -> inDisplay = true
-            // 「$$ 内容」行（如 "$$y(n) ="）：开启显示块，内容并入块。
-            // 之前这种写法开不了显示块，后续行的裸环境会整段落成纯文本。
-            // 仅当行内再无第二个 $$ 时成立；「$$…$$ 文字」这类行内公式仍走 wrapInlineLine。
-            t.startsWith(DISPLAY_DELIMITER) && t.indexOf(DISPLAY_DELIMITER, 2) < 0 -> {
-                inDisplay = true
-                val content = t.substring(DISPLAY_DELIMITER.length).trim()
-                if (content.isNotEmpty()) block.append(content)
+            block.append('\n').append(rest.substring(0, close))
+            out += splitFormulaBlocks(block.toString().trim(), maxWidthPx, measure)
+            block.setLength(0)
+            inDisplay = false
+            rest = rest.substring(close + 2)
+            if (rest.isEmpty()) {
+                index++
+                continue
             }
-            else -> out += wrapInlineLine(line, maxWidthPx, measure)
+        }
+        // Same-line pairs remain inline. An unmatched final opener may follow prose.
+        val delimiters = mathDelimiters(rest)
+        if (delimiters.size % 2 == 1) {
+            val open = delimiters.last()
+            val prefix = rest.substring(0, open)
+            val body = rest.substring(open + 2)
+            // A damaged inline formula must not consume every later paragraph. Only recover
+            // before unmistakable Chinese prose outside TeX groups; never change its math.
+            val prose = if (prefix.isNotBlank()) topLevelProseStart(body) else -1
+            if (prose >= 0) {
+                out += wrapInlineLine(prefix + DISPLAY_DELIMITER + body.substring(0, prose).trimEnd() +
+                    DISPLAY_DELIMITER + " " + body.substring(prose), maxWidthPx, measure)
+                index++
+                continue
+            }
+            if (prefix.isNotBlank()) out += wrapInlineLine(prefix, maxWidthPx, measure)
+            block.append(body)
+            inDisplay = true
+        } else {
+            out += wrapInlineLine(rest, maxWidthPx, measure)
         }
         index++
     }
@@ -86,6 +91,47 @@ internal fun wrapLongFormulas(
         out += splitFormulaBlocks(block.toString().trim(), maxWidthPx, measure)
     }
     return out.joinToString("\n")
+}
+
+private fun topLevelProseStart(text: String): Int {
+    var depth = 0
+    var i = 0
+    while (i < text.length) {
+        if (text[i] == '\\') {
+            i++
+            if (text.getOrNull(i)?.isLetter() == true) {
+                while (text.getOrNull(i)?.let { it in 'a'..'z' || it in 'A'..'Z' } == true) i++
+            } else i++
+            continue
+        }
+        when (text[i]) { '{' -> depth++; '}' -> depth-- }
+        if (depth == 0 && text[i] in '\u3400'..'\u9fff') return i
+        i++
+    }
+    return -1
+}
+
+/** Dollar pairs outside code and escapes; opening and closing use the same rule. */
+private fun mathDelimiters(line: String): List<Int> {
+    val result = mutableListOf<Int>()
+    var codeTicks = 0
+    var i = 0
+    while (i < line.length) {
+        if (line[i] == '`') {
+            var end = i + 1
+            while (end < line.length && line[end] == '`') end++
+            val count = end - i
+            codeTicks = if (codeTicks == 0) count else if (codeTicks == count) 0 else codeTicks
+            i = end
+            continue
+        }
+        if (line[i] == '\\') { i += 2; continue }
+        if (codeTicks == 0 && line.startsWith(DISPLAY_DELIMITER, i)) {
+            result += i
+            i += 2
+        } else i++
+    }
+    return result
 }
 
 /**
@@ -135,10 +181,11 @@ private fun wrapInlineLine(line: String, maxWidthPx: Int, measure: (String) -> I
     if (!line.contains(DISPLAY_DELIMITER)) return listOf(line)
     val out = mutableListOf<String>()
     val text = StringBuilder()
+    val delimiters = mathDelimiters(line)
     var i = 0
     while (i < line.length) {
-        if (line.startsWith(DISPLAY_DELIMITER, i)) {
-            val close = line.indexOf(DISPLAY_DELIMITER, i + 2)
+        if (i in delimiters) {
+            val close = delimiters.firstOrNull { it > i } ?: -1
             if (close < 0) {
                 text.append(line, i, line.length)
                 break

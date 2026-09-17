@@ -13,6 +13,29 @@ class FormulaWrappingTest {
     private val measure: (String) -> Int = { it.length * 10 }
 
     @Test
+    fun `damaged inline formula cannot capture later valid math and prose`() {
+        val input = "结论：双纽线 $$\\rho^2=\\cos22θ 所围成的图形面积为\n\n${d}S=1.$$"
+        val result = wrapLongFormulas(input, 1000, measure)
+        assertTrue(result, result.contains("$$\\rho^2=\\cos22θ$$ 所围成的图形面积为"))
+        assertTrue(result, result.endsWith("${d}S=1.$$"))
+    }
+
+    @Test
+    fun `multiline math may open after prose and close before more inline formulas`() {
+        val input = "**结论先说**：$$\n\\rho^2=\\cos 2\\theta\n" +
+            "$$ 的两瓣占据 $$\\left[-\\tfrac{\\pi}{4},\\tfrac{\\pi}{4}\\right]$$（右瓣）。"
+        val result = wrapLongFormulas(input, 1000, measure)
+        assertTrue(result, result.contains("**结论先说**：\n$$\n\\rho^2=\\cos 2\\theta\n$$"))
+        assertTrue(result, result.contains("的两瓣占据 $$\\left[-\\tfrac{\\pi}{4},\\tfrac{\\pi}{4}\\right]$$（右瓣）。"))
+    }
+
+    @Test
+    fun `closing display delimiter before prose does not swallow following paragraphs`() {
+        val result = wrapLongFormulas("$$\nx=1\n$$ 所以成立。\n\n下一段 ${d}y=2$$。", 1000, measure)
+        assertEquals("$$\nx=1\n$$\n 所以成立。\n\n下一段 ${d}y=2$$。", result)
+    }
+
+    @Test
     fun `sized absolute and invisible delimiters stay paired when wrapping`() {
         listOf(
             "P=\\left|a+b+c+d\\right|+z",

@@ -1335,17 +1335,22 @@ internal fun MessageBubble(
     // 收缩宽度的 Box，否则靠右对齐失效（v1.0.5 用户气泡全跑到左边的根因）。
     BoxWithConstraints(Modifier.fillMaxWidth()) {
         val bubbleMaxWidth = minOf(maxWidth * BUBBLE_WIDTH_RATIO, BUBBLE_MAX_WIDTH)
-        Surface(
+        // A very tall rounded Surface clip can reject touches on later visible children
+        // on dense screens. Paint the rounded background without clipping the whole answer.
+        // Padding and each image/TextView's own clip keep content within its bounds.
+        Box(
             modifier = Modifier
                 .align(if (isUser) Alignment.CenterEnd else Alignment.CenterStart)
-                .widthIn(max = bubbleMaxWidth),
-            color = if (isUser) MaterialTheme.colorScheme.primaryContainer
-            else MaterialTheme.colorScheme.surfaceContainerHigh,
-            shape = RoundedCornerShape(
-                topStart = 14.dp, topEnd = 14.dp,
-                bottomStart = if (isUser) 14.dp else 4.dp,
-                bottomEnd = if (isUser) 4.dp else 14.dp,
-            ),
+                .widthIn(max = bubbleMaxWidth)
+                .background(
+                    color = if (isUser) MaterialTheme.colorScheme.primaryContainer
+                    else MaterialTheme.colorScheme.surfaceContainerHigh,
+                    shape = RoundedCornerShape(
+                        topStart = 14.dp, topEnd = 14.dp,
+                        bottomStart = if (isUser) 14.dp else 4.dp,
+                        bottomEnd = if (isUser) 4.dp else 14.dp,
+                    ),
+                ),
         ) {
             Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 // 用户拍的题图：小缩略图排在文字上方（拍照问答的既有形态不变）
@@ -1370,7 +1375,10 @@ internal fun MessageBubble(
                     // （用户反馈「表格无法拖动、图片点不开」）。
                     // 现在只把「可选择的长按复制」限制在文字上，图片与滚动容器放在外面。
                     if (isUser) {
-                        SelectionContainer { Text(content, style = MaterialTheme.typography.bodyLarge) }
+                        SelectionContainer {
+                            Text(content, style = MaterialTheme.typography.bodyLarge,
+                                color = MaterialTheme.colorScheme.onPrimaryContainer)
+                        }
                     } else {
                         AssistantMarkdownBody(content, imagePaths, onImageClick)
                     }
@@ -2236,7 +2244,7 @@ private fun AssistantThumbnail(
 }
 
 @Composable
-private fun PhotoViewerDialog(paths: List<String>, initialIndex: Int, onDismiss: () -> Unit) {
+internal fun PhotoViewerDialog(paths: List<String>, initialIndex: Int, onDismiss: () -> Unit) {
     val pagerState = rememberPagerState(
         initialPage = initialIndex.coerceIn(0, (paths.size - 1).coerceAtLeast(0)),
         pageCount = { paths.size },

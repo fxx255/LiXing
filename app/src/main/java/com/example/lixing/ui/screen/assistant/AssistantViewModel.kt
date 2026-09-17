@@ -8,7 +8,6 @@ import com.example.lixing.data.assistant.AssistantContextBuilder
 import com.example.lixing.data.assistant.AssistantImagePrep
 import com.example.lixing.data.assistant.AssistantModelClient
 import com.example.lixing.data.assistant.AssistantModelException
-import com.example.lixing.data.assistant.AssistantResponseParser
 import com.example.lixing.data.assistant.ParsedAssistantReply
 import com.example.lixing.data.assistant.AssistantStreamEvent
 import com.example.lixing.data.assistant.LocalTextRecognizer
@@ -144,7 +143,29 @@ private const val HISTORY_IMAGE_MAX_BASE64_CHARS = 8_000_000
  */
 private const val CONTINUE_INSTRUCTION =
     "上面是这个长回答已经写出的部分（可能只截取了尾部）。请直接接着写未完成的内容，" +
-        "不要重复已写过的部分，也不要提前收尾或总结——除非确实已经全部写完。"
+        "若末尾段落或公式被截断，请从该段落开头重写完整段落（保持开头一致），再继续后文；" +
+        "不要只猜测补一个公式后缀。保留成对的公式定界符和加粗标记，不写‘接上文’。" +
+        "不要重复更早已完成的段落，也不要提前收尾——除非确实已经全部写完。仍只输出独立完整的 JSON 对象。"
+
+/** Merge raw reply fragments before Markdown normalization, including a replayed partial paragraph. */
+internal fun mergeAssistantContinuation(previous: String, next: String): String {
+    if (previous.isEmpty()) return next
+    if (next.isEmpty()) return previous
+    val incoming = next.trimStart()
+    val paragraphStart = previous.lastIndexOf("\n\n").let { if (it < 0) 0 else it + 2 }
+    val tail = previous.substring(paragraphStart)
+    // The continuation instruction asks for the unfinished paragraph again. Require a
+    // substantial common prefix so common labels or single mathematical digits never match.
+    val common = tail.commonPrefixWith(incoming).length
+    if (common >= 12) return previous.substring(0, paragraphStart) + incoming
+    // Some endpoints replay the end of the previous output verbatim.
+    for (length in minOf(previous.length, incoming.length) downTo 16) {
+        if (previous.regionMatches(previous.length - length, incoming, 0, length)) {
+            return previous + incoming.substring(length)
+        }
+    }
+    return previous + next
+}
 
 /**
  * 构造真正发给模型的历史消息。
@@ -184,41 +205,6 @@ internal fun appendReasoningForDisplay(
     require(maxChars > 0)
     val body = current.removePrefix(REASONING_OMITTED_PREFIX) + delta
     return if (body.length <= maxChars) body else REASONING_OMITTED_PREFIX + body.takeLast(maxChars)
-}
-
-/**
- * 从 reasoning 通道文本里取回「其实属于正文」的内容。
- *
- * 触发场景：部分兼容服务商在**续写轮**会把答案正文流进 `reasoning_content`，
- * 导致 `reply.reply` 为空——正文区不再增长，那些内容只出现在思考面板里。
- * 用户看到的就是「生成一张图之后，后续回复都输出到思考链里了」。
- *
- * 策略保守，宁可返回空也不把真正的思考当正文贴出去：
- * 1. reasoning 整体能被解析出 reply（说明它本就是一份完整的结构化回答）→ 取 reply；
- * 2. 否则从**最后一个** `"reply"` 往前找到最近的 `{`，把这段交给解析器（含截断抢救）→ 取 reply；
- * 3. 都不成立返回空串。
- *
- * 注意返回值必须**不等于**输入本身，否则「思考原文」会被当成正文重复展示一遍。
- */
-internal fun salvageReplyFromReasoningText(rawReasoning: String): String {
-    val reasoning = rawReasoning.trim()
-    if (reasoning.isEmpty()) return ""
-    // ① reasoning 本身就是（或包含）完整的 JSON 正文结构
-    runCatching { AssistantResponseParser.parse(reasoning) }
-        .getOrNull()
-        ?.reply
-        ?.takeIf { it.isNotBlank() && it.trim() != reasoning }
-        ?.let { return it }
-    // ② 从最后一个 `"reply"` 起截取，交给解析器做截断抢救
-    val anchor = reasoning.lastIndexOf("\"reply\"")
-    if (anchor < 0) return ""
-    val start = reasoning.lastIndexOf('{', anchor).takeIf { it in 0..anchor } ?: return ""
-    val candidate = reasoning.substring(start)
-    return runCatching { AssistantResponseParser.parse(candidate) }
-        .getOrNull()
-        ?.reply
-        ?.takeIf { it.isNotBlank() && it.trim() != candidate.trim() }
-        .orEmpty()
 }
 
 /**
@@ -703,38 +689,37 @@ class AssistantViewModel @Inject constructor(
             // 清空后每轮的面板内容与「这一段正在思考什么」一一对应。
             _state.update { it.copy(activeReasoning = "", activeAnswerStarted = false) }
             // 联网只在首轮做：续写再搜一次既拖时间，又可能引入与上文冲突的材料
-            val reply = modelClient.chatStreaming(
-                history,
-                context,
-                images,
-                webSearchEnabled && firstRound,
-                forceWebSearch && firstRound,
-            ) { event ->
-                when (event) {
-                    is AssistantStreamEvent.ReasoningDelta -> _state.update {
-                        it.copy(activeReasoning = appendReasoningForDisplay(it.activeReasoning, event.text))
+            val reply = try {
+                modelClient.chatStreaming(
+                    history,
+                    context,
+                    images,
+                    webSearchEnabled && firstRound,
+                    forceWebSearch && firstRound,
+                ) { event ->
+                    when (event) {
+                        is AssistantStreamEvent.ReasoningDelta -> _state.update {
+                            it.copy(activeReasoning = appendReasoningForDisplay(it.activeReasoning, event.text))
+                        }
+                        is AssistantStreamEvent.AnswerDelta -> _state.update { it.copy(activeAnswerStarted = true) }
                     }
-                    is AssistantStreamEvent.AnswerDelta -> _state.update { it.copy(activeAnswerStarted = true) }
                 }
+            } catch (error: AssistantModelException) {
+                // A failed continuation must not discard earlier answer text and plots.
+                val previous = lastReply ?: throw error
+                appendAssistantTurn(conversationId, generated, previous, today, answerIndex, renderPlots(accumulatedPlots))
+                return previous.copy(warnings = previous.warnings + "续写未完成：${error.message}")
             }
             lastReply = reply
             images = emptyList() // 续写轮不再带图：首轮图片内容已在对话历史里
-            // 续写轮里模型有时把本该输出的正文写进了 reasoning 通道（正文为空），
-            // 这时若只认 reply.reply，正文区会一直不增长，而那些内容只出现在思考面板里。
-            // 把 reasoning 里可用的正文片段接回 generated，保证后续内容出现在正确的位置。
-            val salvaged = if (!firstRound && reply.reply.isBlank()) {
-                salvageReplyFromReasoning(reply)
-            } else {
-                ""
-            }
-            var part = reply.reply.ifBlank { salvaged }
+            var part = reply.reply
             // 续写轮里模型并不知道前面已输出过几张图，锚点通常从 1 重新编号。
             // 按「已累积的图表数」平移，保证 [[FIGURE:n]] 始终指向合并列表里的正确下标；
             // 不平移的话，第 2 轮的 [[FIGURE:1]] 会错误地指到第 1 轮的第一张图上。
             if (accumulatedPlots.isNotEmpty()) {
                 part = offsetFigureAnchors(part, accumulatedPlots.size)
             }
-            generated += part
+            generated = mergeAssistantContinuation(generated, part)
             // 图表必须跨轮累积：只用 lastReply.plots 会丢掉前面轮次已经产出的图。
             // 典型场景是长推导撞上输出上限自动续写——第 1 轮「见下图」+ 输出 plots，
             // 第 2 轮只续写文字（plots 为空），结果正文写着「见下图」而图整个消失。
@@ -804,17 +789,6 @@ class AssistantViewModel @Inject constructor(
             state.copy(messages = list)
         }
     }
-
-    /**
-     * 从解析结果里捞回「其实属于正文、却被写进 reasoning 通道」的内容。
-     *
-     * 背景：部分兼容服务商在续写场景下会把答案正文流进 `reasoning_content` 字段
-     * （协议上那是思考通道）。表现是**正文区不再增长，内容只出现在思考面板里**，
-     * 用户反馈「生成一张图之后，后续回复都输出到思考链里了」。
-     * 具体策略见 [salvageReplyFromReasoningText]。
-     */
-    private fun salvageReplyFromReasoning(reply: ParsedAssistantReply): String =
-        salvageReplyFromReasoningText(reply.rawReasoning)
 
     /** 收尾：把整篇回答与生成的图表落库，并把本轮产生的待确认项挂到这条消息上。 */
     private suspend fun appendAssistantTurn(

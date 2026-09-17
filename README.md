@@ -267,7 +267,7 @@ cloudbase/              腾讯云云函数源码：百度 OAuth + AI 助手网�
 - **R8 不能混淆 JLatexMath**：该库靠反射加载预定义命令类，被改名后公式渲染会抛 `NullPointerException` 并显示占位框，`proguard-rules.pro` 里的 `-keep class org.scilab.forge.jlatexmath.** { *; }` 不能删；改动混淆规则后请真机点开一条含 `cases` 的公式复验；
 - **每次发版都要归档 R8 mapping**：`docs/release.sh` 会自动复制到 `docs/mappings/mapping-v<版本>.txt`（该目录不入库），线上崩溃日志反混淆全靠它，不要跳过；
 - **发版前确认能连上 GitHub**：Release 上传依赖 `gh`，国内需先开代理（如 Clash Verge）。注意只有后台服务进程在跑、主程序没启动时代理端口不会监听，此时 `gh auth status` 会误报 “token is invalid”，不必急着重登，先确认端口是否真的在监听；
-- **清单里的 `apkUrl` 必须走加速镜像**：国内手机直连 GitHub 下载不可用，`docs/release.sh` 默认拼 `ghfast.top` 前缀，App 端另有多个镜像自动回退；
+- **清单里的 `apkUrl` 必须保留 GitHub 原始直链**：`docs/make-update-json.py` 生成不带镜像前缀的地址，App 端负责添加加速镜像并自动回退，避免重复拼接代理地址；
 - **云函数 `update-check` 已切到 `UPDATE_MANIFEST_URL` 模式**，指向 `releases/latest/download/update.json`，发布新版本后无需再动云函数；
 - **push ≠ 发版**：改完代码要记得 bump `versionCode` / `versionName` 并跑一次 `docs/release.sh`，否则清单还是旧版本号，手机上检查更新不会有任何变化。
 

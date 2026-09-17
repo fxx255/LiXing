@@ -11,11 +11,31 @@ import org.robolectric.RuntimeEnvironment
 import org.robolectric.annotation.Config
 import ru.noties.jlatexmath.JLatexMathAndroid
 import ru.noties.jlatexmath.JLatexMathDrawable
+import com.example.lixing.ui.screen.assistant.createMarkdownTextView
+import io.noties.markwon.Markwon
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [33], application = Application::class)
 class FormulaRenderingRegressionTest {
     @Before fun init() { JLatexMathAndroid.init(RuntimeEnvironment.getApplication()) }
+
+    @Test fun `screenshot seven mixed multiline delimiters are consumed by actual Markwon`() {
+        val markdown = "**结论先说**：$$\n\\rho^2=\\cos 2\\theta\n" +
+            "$$ 的图像，两瓣分别占据 $$\\left[-\\tfrac{\\pi}{4},\\tfrac{\\pi}{4}\\right]$$（右瓣）与 " +
+            "$$\\left[\\tfrac{3\\pi}{4},\\tfrac{5\\pi}{4}\\right]$$（左瓣）。"
+        for (width in listOf(300, 900)) {
+            val prepared = wrapLongFormulas(sanitizeAssistantLatex(normalizeAssistantMarkdown(markdown)), width) {
+                JLatexMathDrawable.builder(it).textSize(36f).build().intrinsicWidth
+            }
+            val view = createMarkdownTextView(RuntimeEnvironment.getApplication(), android.graphics.Color.BLACK,
+                android.graphics.Color.BLUE, selectable = false)
+            (view.tag as Markwon).setMarkdown(view, prepared)
+            assertFalse(view.text.toString(), view.text.contains("$$"))
+            Regex("""\$\$([\s\S]*?)\$\$""").findAll(prepared).forEach {
+                JLatexMathDrawable.builder(it.groupValues[1].trim()).textSize(36f).build()
+            }
+        }
+    }
 
     @Test fun `power spectrum derivation stays renderable at phone and tablet widths`() {
         val formulas = listOf(

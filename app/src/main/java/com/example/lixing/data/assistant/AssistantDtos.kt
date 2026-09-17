@@ -52,9 +52,7 @@ data class ParsedAssistantReply(
     /**
      * 本轮服务商返回的原始思考内容（reasoning 通道）。
      *
-     * 正常回答用不到它，只用于一个补救场景：部分兼容服务商在续写时会把本该输出的
-     * 正文写进 reasoning 通道，导致正文区不增长、内容只出现在思考面板里。调用方
-     * 据此把误入思考的内容取回正文。
+     * 仅用于临时诊断；不能据此从思考内容提取正文，即使其中含有示例 JSON。
      *
      * 注意：**不参与持久化**。思考内容从不写库、不备份（见 [AssistantViewModel] 的约定）。
      */
@@ -167,7 +165,7 @@ object AssistantResponseParser {
     private val json = Json { ignoreUnknownKeys = true }
     private val timeRegex = Regex("""^([01]?\d|2[0-3]):([0-5]\d)$""")
 
-    fun parse(raw: String): ParsedAssistantReply {
+    fun parse(raw: String, normalizeMarkdown: Boolean = true): ParsedAssistantReply {
         val trimmed = raw.trim()
         val normalized = trimmed
             .removePrefix("```json")
@@ -175,16 +173,16 @@ object AssistantResponseParser {
             .removePrefix("```")
             .removeSuffix("```")
             .trim()
-        parseJsonObject(normalized)?.let { return fromRoot(it, trimmed) }
+        parseJsonObject(normalized)?.let { return fromRoot(it, trimmed, normalizeMarkdown) }
 
         // 模型偶尔在 JSON 外面包了说明文字或围栏：尝试任意位置提取 JSON 再解析。
         for (candidate in jsonCandidates(trimmed)) {
             val root = parseJsonObject(candidate) ?: continue
-            return fromRoot(root, trimmed)
+            return fromRoot(root, trimmed, normalizeMarkdown)
         }
 
         // 截断的 JSON：抢救正文与已完整的动作条目，避免「回答正常但按钮消失」。
-        salvageTruncated(normalized, trimmed)?.let { return it }
+        salvageTruncated(normalized, trimmed, normalizeMarkdown)?.let { return it }
 
         return ParsedAssistantReply(trimmed, emptyList(), emptyList())
     }
@@ -204,11 +202,10 @@ object AssistantResponseParser {
         return candidates
     }
 
-    private fun fromRoot(root: JsonObject, trimmed: String): ParsedAssistantReply {
+    private fun fromRoot(root: JsonObject, trimmed: String, normalizeMarkdown: Boolean): ParsedAssistantReply {
         val warnings = mutableListOf<String>()
         val reply = (root["reply"] as? JsonPrimitive)?.contentOrNull
-            ?.let(::normalizeAssistantMarkdown)
-            ?.trim()
+            ?.let { if (normalizeMarkdown) normalizeAssistantMarkdown(it).trim() else it }
             .orEmpty()
         val actions = (root["plan_actions"] as? JsonArray)
             ?.mapIndexedNotNull { index, element -> parseAction(element, index, warnings) }
@@ -356,8 +353,9 @@ object AssistantResponseParser {
      * 渲染层拿不到图就把锚点当成普通文字显示出来（用户看到正文里裸着
      * `[[FIGURE:1]]`）。这是「图片不显示 + 锚点露出」的根因之一。
      */
-    private fun salvageTruncated(normalized: String, trimmed: String): ParsedAssistantReply? {
-        val reply = partialReply(normalized) ?: return null
+    private fun salvageTruncated(normalized: String, trimmed: String, normalizeMarkdown: Boolean): ParsedAssistantReply? {
+        val rawReply = partialReply(normalized) ?: return null
+        val reply = if (normalizeMarkdown) normalizeAssistantMarkdown(rawReply) else rawReply
         val warnings = mutableListOf(
             "模型返回的结构化协议未完整结束（可能被输出上限截断），已恢复正文与可解析的动作",
         )
@@ -469,7 +467,6 @@ object AssistantResponseParser {
             json.parseToJsonElement(sanitizeJsonEscapes(encoded)).jsonPrimitive.contentOrNull
         }
             .getOrNull()
-            ?.let(::normalizeAssistantMarkdown)
     }
 
     private fun parseAction(element: JsonElement, index: Int, warnings: MutableList<String>): PlanAction? {
