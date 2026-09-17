@@ -13,6 +13,26 @@ class FormulaWrappingTest {
     private val measure: (String) -> Int = { it.length * 10 }
 
     @Test
+    fun `sized absolute and invisible delimiters stay paired when wrapping`() {
+        listOf(
+            "P=\\left|a+b+c+d\\right|+z",
+            "P=\\left.f(x)+g(x)\\right|_{x=0}+z",
+            "P=\\left\\langle a+b+c\\right\\rangle+z",
+        ).forEach { latex ->
+            splitFormula(latex, 80, measure).forEach { piece ->
+                assertEquals(piece, piece.split("\\left").size, piece.split("\\right").size)
+            }
+        }
+    }
+
+    @Test
+    fun `single line cases inside multiline display does not gain delimiters`() {
+        val markdown = "$$\nP_{y_c}(f)=P_{y_s}(f)=\n" +
+            "\\begin{cases}4\\pi^2N_0\\left(f_c^2+f^2\\right)&|f|<B/2\\\\0&|f|>B/2\\end{cases}\n$$"
+        assertEquals(markdown, sanitizeAssistantLatex(markdown))
+    }
+
+    @Test
     fun `short formulas stay untouched`() {
         val markdown = "已知 ${d}x^2=1${d}，求值。"
         assertEquals(markdown, wrapLongFormulas(markdown, 100, measure))

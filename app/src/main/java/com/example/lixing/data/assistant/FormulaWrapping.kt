@@ -166,6 +166,15 @@ internal fun splitFormula(latex: String, maxWidthPx: Int, measure: (String) -> I
     val value = latex.trim()
     if (value.isEmpty()) return emptyList()
     if (measure(value) <= maxWidthPx) return listOf(value)
+    // 拆成独立显示块时消费掉行分隔符，不能把 \\ 留在上一段末尾或下一段开头。
+    val rowBreaks = splitPoints(value, 0)
+    if (rowBreaks.isNotEmpty()) {
+        var start = 0
+        val rows = rowBreaks.map { cut ->
+            value.substring(start, cut).also { start = cut + 2 }
+        } + value.substring(start)
+        return rows.filter { it.isNotBlank() }.flatMap { splitFormula(it, maxWidthPx, measure) }
+    }
     // 整体是一个 array/aligned 这类「行式」环境且放不下：
     // 先按行解包成独立的块级公式（去掉环境包裹与对齐符 &），
     // 而不是在环境内部的 \\ 处硬切——那会产生带无配对 \begin/\end 的孤儿片段，必然解析失败。
@@ -175,7 +184,7 @@ internal fun splitFormula(latex: String, maxWidthPx: Int, measure: (String) -> I
         }
     }
     var pieces = listOf(value)
-    for (priority in 0..3) {
+    for (priority in 1..3) {
         if (pieces.all { measure(it) <= maxWidthPx }) break
         pieces = pieces.flatMap { piece ->
             if (measure(piece) <= maxWidthPx) listOf(piece) else greedySplit(piece, priority, maxWidthPx, measure)
@@ -200,7 +209,8 @@ internal fun unwrapEnvironmentRows(latex: String): List<String>? {
     val match = ENVIRONMENT_LINE_RE.find(latex) ?: return null
     val env = match.groupValues[1]
     if (env !in UNWRAPPABLE_ENVS) return null
-    val body = stripLeadingGroup(match.groupValues[2].trim())
+    val rawBody = match.groupValues[2].trim()
+    val body = if (env == "array") stripLeadingGroup(rawBody) else rawBody
     if (body.isEmpty() || body.contains("\\begin{") || body.contains("\\hline")) return null
     val (rows, skippedRowBreak) = splitTopLevelRows(body)
     // 有被跳过的 \\（\left[ 之类跨行配对括号内部）：按行解包会留下带孤立括号和残留 \\ 的坏行，
@@ -245,11 +255,12 @@ private fun splitTopLevelRows(body: String): Pair<List<String>, Boolean> {
     val rows = mutableListOf<String>()
     val current = StringBuilder()
     var depth = 0
+    var delimiterDepth = 0
     var skippedRowBreak = false
     var i = 0
     while (i < body.length) {
         if (body.startsWith("\\\\", i)) {
-            if (depth == 0) {
+            if (depth == 0 && delimiterDepth == 0) {
                 rows += current.toString()
                 current.setLength(0)
             } else {
@@ -257,6 +268,22 @@ private fun splitTopLevelRows(body: String): Pair<List<String>, Boolean> {
                 current.append("\\\\")
             }
             i += 2
+            continue
+        }
+        if (body[i] == '\\') {
+            val commandEnd = sizedDelimiterEnd(body, i)
+            if (commandEnd != null) {
+                if (body.startsWith("\\left", i)) delimiterDepth++ else delimiterDepth--
+                current.append(body, i, commandEnd)
+                i = commandEnd
+                continue
+            }
+            // 控制符必须整体处理，转义花括号并非分组边界。
+            val start = i++
+            if (body.getOrNull(i)?.isLetter() == true) {
+                while (body.getOrNull(i)?.isLetter() == true) i++
+            } else if (i < body.length) i++
+            current.append(body, start, i)
             continue
         }
         when (body[i]) {
@@ -302,6 +329,9 @@ private fun splitPoints(latex: String, priority: Int): List<Int> {
     var depth = 0
     // \begin{...}...\end{...} 环境内部绝不能切：切开的片段带着无配对的环境标记，必然解析失败。
     var envDepth = 0
+    // `\\left`/`\\right` 定界符可能跨越等号、逗号或换行；这些位置不能成为拆分点，
+    // 否则会生成 `\\left|...` 与 `...\\right|` 两个无法独立解析的公式片段。
+    var delimiterDepth = 0
     var i = 0
     while (i < latex.length) {
         val c = latex[i]
@@ -320,7 +350,13 @@ private fun splitPoints(latex: String, priority: Int): List<Int> {
                 i++
                 continue
             }
-            if (priority == 0 && envDepth == 0 && latex.startsWith("\\\\", i)) {
+            val commandEnd = sizedDelimiterEnd(latex, i)
+            if (commandEnd != null) {
+                if (latex.startsWith("\\left", i)) delimiterDepth++ else delimiterDepth--
+                i = commandEnd
+                continue
+            }
+            if (priority == 0 && envDepth == 0 && delimiterDepth == 0 && latex.startsWith("\\\\", i)) {
                 if (depth == 0) points += i
                 i += 2
                 continue
@@ -330,7 +366,7 @@ private fun splitPoints(latex: String, priority: Int): List<Int> {
                     latex.startsWith(it, i) && latex.getOrNull(i + it.length)?.isLetter() != true
                 }
                 if (command != null) {
-                    if (depth == 0) points += i
+                    if (depth == 0 && delimiterDepth == 0) points += i
                     i += command.length
                     continue
                 }
@@ -350,7 +386,7 @@ private fun splitPoints(latex: String, priority: Int): List<Int> {
             '{', '(', '[' -> depth++
             '}', ')', ']' -> depth--
         }
-        if (depth == 0 && envDepth == 0) {
+        if (depth == 0 && envDepth == 0 && delimiterDepth == 0) {
             val isPoint = when (priority) {
                 1 -> c == ',' || c == ';'
                 2 -> c == '=' || c == '<' || c == '>'
@@ -362,6 +398,22 @@ private fun splitPoints(latex: String, priority: Int): List<Int> {
         i++
     }
     return points
+}
+
+/** Consume both the sizing command and its delimiter, including invisible or mixed delimiters. */
+private fun sizedDelimiterEnd(latex: String, start: Int): Int? {
+    val command = listOf("\\left", "\\right").firstOrNull {
+        latex.startsWith(it, start) && latex.getOrNull(start + it.length)?.isLetter() != true
+    } ?: return null
+    var end = start + command.length
+    while (latex.getOrNull(end)?.isWhitespace() == true) end++
+    if (latex.getOrNull(end) == '\\') {
+        end++
+        if (latex.getOrNull(end)?.isLetter() == true) {
+            while (latex.getOrNull(end)?.isLetter() == true) end++
+        } else if (end < latex.length) end++
+    } else if (end < latex.length) end++
+    return end
 }
 
 private val RELATION_COMMANDS = listOf(

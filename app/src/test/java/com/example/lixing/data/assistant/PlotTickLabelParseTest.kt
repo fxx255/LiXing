@@ -14,6 +14,15 @@ import org.junit.Test
 class PlotTickLabelParseTest {
 
     @Test
+    fun `explicit empty ticks hides labels while omitted ticks stays automatic`() {
+        val spec = AssistantResponseParser.parse(
+            """{"reply":"示意图。","plots":[{"series":[{"expr":"x^2+2"}],"y":{"min":0,"max":3.6,"ticks":[],"grid":false}}]}""",
+        ).plots.single()
+        assertEquals(emptyList<Double>(), spec.y.ticks)
+        assertEquals(null, spec.x.ticks)
+    }
+
+    @Test
     fun `刻度文案原样保留参数符号与 LaTeX`() {
         val raw = """
             {"reply":"频谱如下，横轴为归一化频率。","plots":[{

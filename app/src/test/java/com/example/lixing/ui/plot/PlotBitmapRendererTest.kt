@@ -30,6 +30,7 @@ import ru.noties.jlatexmath.JLatexMathAndroid
  * 渲染器只用 translate/rotate 做平移（无缩放/错切），因此矩阵平移量即坐标偏移。
  */
 private class LineRecordingCanvas : android.graphics.Canvas() {
+    val gridLines = mutableListOf<FloatArray>()
 
     /** 所有竖线（x 相同、y 不同）的 x 坐标。 */
     val verticalLineXs = mutableListOf<Float>()
@@ -58,6 +59,9 @@ private class LineRecordingCanvas : android.graphics.Canvas() {
     val diagonalLines = mutableListOf<FloatArray>()
 
     override fun drawLine(startX: Float, startY: Float, stopX: Float, stopY: Float, paint: android.graphics.Paint) {
+        if (paint.color == PlotBitmapRenderer.Theme().grid) {
+            gridLines += floatArrayOf(startX, startY, stopX, stopY)
+        }
         // 渲染器只用 translate 做平移，取矩阵的平移分量即坐标偏移
         val v = FloatArray(9)
         matrix?.getValues(v)
@@ -86,6 +90,32 @@ private class LineRecordingCanvas : android.graphics.Canvas() {
 class PlotBitmapRendererTest {
 
     private val renderer = PlotBitmapRenderer(density = 2f)
+
+    @Test
+    fun verticalArrowStaysBelowTitleAndInsideCanvas() {
+        val recorder = LineRecordingCanvas()
+        renderer.drawAll(recorder, basicSpec(), 1400f, 900f)
+        val tips = findArrowTips(recorder.diagonalLines, 0.1f)
+        val verticalTip = tips.minByOrNull { it[1] }!!
+        assertTrue("Vertical arrow overlaps title band", verticalTip[1] > 900f * 0.06f)
+        assertTrue("Vertical axis lost its top arrow", verticalTip[1] < 900f * 0.2f)
+    }
+
+    @Test
+    fun gridFlagsIndependentlyControlLinesWithoutRemovingAxes() {
+        for (xGrid in listOf(false, true)) for (yGrid in listOf(false, true)) {
+            val recorder = LineRecordingCanvas()
+            val spec = PlotSpec(
+                x = Axis(min = -1.0, max = 1.0, ticks = listOf(-1.0, 0.0, 1.0), grid = xGrid),
+                y = Axis(min = 0.0, max = 4.0, ticks = listOf(1.0, 2.0), grid = yGrid),
+                series = listOf(Series(expr = "x^2+2")),
+            )
+            renderer.drawAll(recorder, spec, 1000f, 700f)
+            assertEquals(if (xGrid) 3 else 0, recorder.gridLines.count { it[0] == it[2] })
+            assertEquals(if (yGrid) 2 else 0, recorder.gridLines.count { it[1] == it[3] })
+            assertTrue("Coordinate axes must remain visible", recorder.diagonalLines.isNotEmpty())
+        }
+    }
 
     /** 采样统计非背景色像素，用来判断"图上确实有东西"。 */
     private fun paintedPixels(bitmap: Bitmap): Int {

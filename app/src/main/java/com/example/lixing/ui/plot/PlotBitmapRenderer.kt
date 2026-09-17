@@ -382,13 +382,17 @@ class PlotBitmapRenderer(
         linePaint.color = theme.grid
         linePaint.strokeWidth = dp(0.8f)
         linePaint.pathEffect = null
-        for (t in xTicks) {
-            val px = sx(t)
-            canvas.drawLine(px, drawY, px, drawY + drawH, linePaint)
+        if (spec.x.grid) {
+            for (t in xTicks) {
+                val px = sx(t)
+                canvas.drawLine(px, drawY, px, drawY + drawH, linePaint)
+            }
         }
-        for (t in yTicks) {
-            val py = sy(t)
-            canvas.drawLine(drawX, py, drawX + drawW, py, linePaint)
+        if (spec.y.grid) {
+            for (t in yTicks) {
+                val py = sy(t)
+                canvas.drawLine(drawX, py, drawX + drawW, py, linePaint)
+            }
         }
 
         // ---- 6. 序列：面积 → 折线 ----
@@ -445,7 +449,8 @@ class PlotBitmapRenderer(
         val zeroInsideX = xLo <= 0.0 && 0.0 <= xHi
         val yAxisX = if (zeroInsideX) sx(0.0) else drawX
         // 竖线顶端伸到绘图区之上（参考图里竖向轴线明显高过曲线顶端）
-        val yAxisTop = drawY - plotH * AXIS_VERT_OVERHANG_RATIO
+        // 延伸线只能占用绘图区内的留白，不能穿过标题/图例或把箭头画到画布外。
+        val yAxisTop = maxOf(plotY, drawY - plotH * AXIS_VERT_OVERHANG_RATIO)
         val yAxisBottom = axisY + height * AXIS_VERT_BELOW_RATIO
         canvas.drawLine(yAxisX, yAxisTop, yAxisX, yAxisBottom, linePaint)
 

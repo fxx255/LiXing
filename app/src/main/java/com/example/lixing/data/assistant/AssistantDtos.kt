@@ -336,8 +336,7 @@ object AssistantResponseParser {
             max = if (validRange) max else null,
             grid = (obj["grid"] as? JsonPrimitive)?.booleanOrNull ?: true,
             ticks = (obj["ticks"] as? JsonArray)?.take(20)
-                ?.mapNotNull { (it as? JsonPrimitive)?.doubleOrNull }
-                ?.takeIf { it.isNotEmpty() },
+                ?.mapNotNull { (it as? JsonPrimitive)?.doubleOrNull?.takeIf(Double::isFinite) },
             tickLabels = (obj["tickLabels"] as? JsonObject)?.mapNotNull { (key, value) ->
                 val tick = key.toDoubleOrNull() ?: return@mapNotNull null
                 val text = (value as? JsonPrimitive)?.contentOrNull ?: return@mapNotNull null
@@ -1133,8 +1132,12 @@ private fun convertAlignedEnvironments(markdown: String): String {
             if (depth == 0) {
                 // 单行环境已在本行闭合。行内任一侧已带 $$ 的（已在公式里）原样放行，
                 // 交给 wrapLongFormulas 按宽度拆分；其余整行补 $$ 包裹。
-                val alreadyInMath = line.substring(0, envMatch.range.first).contains("$$") ||
-                    line.substring(envMatch.range.last + 1).contains("$$")
+                // 还要统计环境之前的整份文档：多行显示块经常是「$$ 单独一行 + 环境单独一行」，
+                // 此时当前行两侧都没有 $$，但环境仍已处于打开的显示块内。
+                val alreadyInMath =
+                    countDisplayDelimiters(lines, 0, i) % 2 == 1 ||
+                        line.substring(0, envMatch.range.first).contains("$$") ||
+                        line.substring(envMatch.range.last + 1).contains("$$")
                 if (alreadyInMath) {
                     out += line
                 } else {

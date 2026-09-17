@@ -649,79 +649,36 @@ fun AssistantScreen(
                 contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
-                if (state.messages.isEmpty()) {
-                    // 极端短暂的一帧：`busy` 已置位、但 user 消息还没写进列表
-                    // （ViewModel 里先 busy=true 再 `messages + userMessage`）。
-                    // 此时没有「最新消息」可挂思考面板，若不兜底它会闪掉；
-                    // 而用户刚发出消息，也不该看到「可以问的问题」这类引导文案，
-                    // 所以这两种内容二选一，不并列显示。
-                    if (state.busy) {
-                        item(key = "busy-orphan") {
-                            ThinkingPanel(
-                                reasoning = state.activeReasoning,
-                                answerStarted = state.activeAnswerStarted,
-                                expanded = state.reasoningExpanded,
-                                onToggle = viewModel::toggleReasoningExpanded,
-                            )
-                        }
-                    } else {
-                        item(key = "empty-hint") { EmptyHint() }
+                // reverseLayout 的第 0 项在视觉底部，思考面板独立占位，始终紧跟最新消息。
+                if (state.busy) {
+                    item(key = "thinking") {
+                        ThinkingPanel(
+                            reasoning = state.activeReasoning,
+                            answerStarted = state.activeAnswerStarted,
+                            expanded = state.reasoningExpanded,
+                            onToggle = viewModel::toggleReasoningExpanded,
+                        )
                     }
+                } else if (state.messages.isEmpty()) {
+                    item(key = "empty-hint") { EmptyHint() }
                 }
                 itemsIndexed(state.messages.asReversed(), key = { index, _ -> "msg-${state.messages.size - 1 - index}" }) { index, message ->
-                    // 思考面板永远挂在**最新一条消息的气泡下方**。
-                    //
-                    // 为什么必须挂在 item 内部、而不是作为独立的 LazyColumn item：
-                    // 这个列表是 `reverseLayout = true`（从底部往上排），一个独立 item
-                    // 会被排到整列的**最上方**——而流式回答是不断往最新气泡里追加内容的，
-                    // 于是用户看到「已经回复了一大段、还在继续思考，可思考窗口却停在页面顶部」
-                    // （用户反馈）。挂进最新消息的 Column、排在气泡之后，视觉上就正好是
-                    // 「紧贴最新输出气泡的下方」，与输出位置一起往下走。
-                    //
-                    // 无论最新消息是 user（刚发出、还没等到首个 token）还是 assistant
-                    // （已在流式输出），都走这里——过去这两种情况分在两个分支里处理，
-                    // 正是「思考窗口位置时对时错」的来源。
-                    val showThinking = index == 0 && state.busy
-                    if (showThinking) {
-                        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                            MessageBubble(
-                                role = message.role,
-                                content = message.displayContent ?: message.content,
-                                imagePaths = message.imagePaths,
-                                onImageClick = { paths, imageIndex -> photoViewer = PhotoViewerState(paths, imageIndex) },
+                    val messageIndex = state.messages.size - 1 - index
+                    // busy 切换时保留同一个正文组合位置，不再销毁/重建整个 Markdown 视图。
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        MessageBubble(
+                            role = message.role,
+                            content = message.displayContent ?: message.content,
+                            imagePaths = message.imagePaths,
+                            onImageClick = { paths, imageIndex -> photoViewer = PhotoViewerState(paths, imageIndex) },
+                        )
+                        if (message.role == "assistant" && !(index == 0 && state.busy)) {
+                            AssistantMessageActionBar(
+                                planCount = if (state.pendingActionsOwnerIndex == messageIndex) state.pendingActions.size else 0,
+                                englishCount = if (state.pendingEnglishOwnerIndex == messageIndex) state.pendingEnglishActions.size else 0,
+                                onOpenPlan = viewModel::openPlanReview,
+                                onOpenEnglish = viewModel::openEnglishReview,
                             )
-                            ThinkingPanel(
-                                reasoning = state.activeReasoning,
-                                answerStarted = state.activeAnswerStarted,
-                                expanded = state.reasoningExpanded,
-                                onToggle = viewModel::toggleReasoningExpanded,
-                            )
-                        }
-                    } else {
-                        val messageIndex = state.messages.size - 1 - index
-                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                            MessageBubble(
-                                role = message.role,
-                                content = message.displayContent ?: message.content,
-                                imagePaths = message.imagePaths,
-                                onImageClick = { paths, imageIndex -> photoViewer = PhotoViewerState(paths, imageIndex) },
-                            )
-                            if (message.role == "assistant") {
-                                AssistantMessageActionBar(
-                                    planCount = if (state.pendingActionsOwnerIndex == messageIndex) {
-                                        state.pendingActions.size
-                                    } else {
-                                        0
-                                    },
-                                    englishCount = if (state.pendingEnglishOwnerIndex == messageIndex) {
-                                        state.pendingEnglishActions.size
-                                    } else {
-                                        0
-                                    },
-                                    onOpenPlan = viewModel::openPlanReview,
-                                    onOpenEnglish = viewModel::openEnglishReview,
-                                )
-                            }
                         }
                     }
                 }
@@ -1221,7 +1178,7 @@ private fun EmptyHint() {
 
 /** The provider's reasoning is visible only while the current request is active. */
 @Composable
-private fun ThinkingPanel(
+internal fun ThinkingPanel(
     reasoning: String,
     answerStarted: Boolean,
     expanded: Boolean,
@@ -1365,7 +1322,7 @@ private const val DECODE_RETRY_MAX = 3
 private const val DECODE_RETRY_DELAY_MS = 600L
 
 @Composable
-private fun MessageBubble(
+internal fun MessageBubble(
     role: String,
     content: String,
     imagePaths: List<String>,
@@ -1781,13 +1738,10 @@ internal fun MarkdownAnswer(content: String) {
                     ) {
                         // selectable=false：见 createMarkdownTextView 内注释。
                         // 表格块交给外层滚动处理手势，TextView 自己不参与触摸消费。
-                        // isTableBlock=true：表格行高必须等「首帧绘制 + 强制重排」后才算得出来，
-                        // 需要走专门的高度复测流程（见 MarkdownChunk）。
                         MarkdownChunk(
                             chunk.text,
                             fixedWidthPx = tableWidthPx,
                             selectable = false,
-                            isTableBlock = true,
                         )
                     }
                 }
@@ -1797,181 +1751,41 @@ internal fun MarkdownAnswer(content: String) {
 }
 
 /**
- * 单个 Markdown 片段：可指定固定宽度（表格用），否则铺满可用宽度。
- *
- * 高度必须由内容**真实上报**给 Compose，否则会连锁引发「只有第一个控件能点」的怪现象：
- * [AndroidView] 在测量阶段拿到的是一个**刚创建、还空着的** TextView（内容要等 update /
- * LaunchedEffect 才写入），于是量出来只有一行高度；等文字/公式/表格填进去，实际高度
- * 早已超出这个数字。父 Column 仍按「一行高」为后续兄弟节点排布 ⇒ 后面的图与表格被
- * 压到前面那块被撑开的区域里，触摸命中测试也随之错乱，表现为「只有第一张图能点开」。
- * 所以这里在内容变化后主动把 `view.height` 报给 Compose（wrap_content 量出的真实高度）。
+ * 由 AndroidView 的正常测量流程决定高度。
+ * Markwon 在表格首次绘制和公式异步加载后会 setText/requestLayout，Interop 随之重新测量。
+ * 不能用固定 height 缓存截住该请求，也不能在 Compose 布局之外反复 measure 同一个 View：
+ * 前者留下陈旧的兄弟节点位置，后者让 View 的 measuredHeight 与 Compose 的格位不一致。
  */
 @Composable
 internal fun MarkdownChunk(
     content: String,
     fixedWidthPx: Int?,
     selectable: Boolean = true,
-    isTableBlock: Boolean = false,
 ) {
     val textColor = MaterialTheme.colorScheme.onSurface.toArgb()
     val linkColor = MaterialTheme.colorScheme.primary.toArgb()
-    // 实测宽度。公式是按「当前可用宽度」拆分的，宽度一变（旋转、平板横屏、分屏）
-    // 必须按新宽度重新拆分，否则会留下按旧宽度算出的超长公式 → 右侧溢出被裁掉。
     var widthPx by remember { mutableIntStateOf(0) }
-    var host by remember { mutableStateOf<TextView?>(null) }
-    // 内容渲染完成后量出的真实高度；0 表示「尚未测量」，此时交给 Compose 正常量。
-    var measuredHeight by remember { mutableIntStateOf(0) }
-    // 固定宽度由外部给定；onSizeChanged 要等一帧才回来，先用它渲染以免闪一下空白
     val renderWidthPx = fixedWidthPx ?: widthPx
-
-    // 渲染 + 高度上报。放在同一个 effect 里：渲染完立刻同步测量，避免中间多一帧错位。
-    LaunchedEffect(host, content, renderWidthPx, textColor, linkColor) {
-        val view = host ?: return@LaunchedEffect
-        renderMarkdown(view, content, renderWidthPx, textColor, linkColor)
-        // wrap_content 的真实高度：宽度已被 widthModifier 约束好，直接量即可
-        var measured = view.measuredHeightCompat(renderWidthPx)
-        if (measured > 0) measuredHeight = measured
-        // 表格块：行高必须「等绘制完 + 强制重排」之后才算得出来。
-        //
-        // 根因（反编译 TableRowSpan 确认）：每行高度 = max(各单元格 Layout 高度) + 2×padding，
-        // 而这个高度只在 getSize() 里被写回。若此时内部的 `layouts` 列表还是空的
-        // （layouts 只在首次 **绘制** 时才按可用宽度填充），getSize() 就**不写 FontMetricsInt**
-        // ⇒ 整行被当成 0 高 ⇒ 表格高度被量成接近 0，我们就把这个偏小的值报给了 Compose。
-        // 更麻烦的是：Android 会复用已建好的 Layout，宽度和文本都没变时**不会重算** ——
-        // 探针实测「首次绘制后再 measure」高度依旧是偏小值（111），只有显式
-        // setText(getText()) 触发重建后才变成真实高度（143，每行 35）。
-        // 这正是「表格高度不足 → 内容溢出 → 能在表格里上下拖动」的完整链条。
-        //
-        // 重排放在轮询循环里**按需补发**，而不是入口处写死几帧：首帧绘制的确切时刻无法预知，
-        // 固定延时可能整段跑在绘制之前、白排一场。这里只要发现「高度连续几轮没变」就再逼一次
-        // 重排，直到高度变化、用尽 [TABLE_REPOLL_MAX] 次、或最终稳定。
-        //
-        // 公式则是**异步**渲染的（JLatexMathPlugin 的 placeholder() 返回 null，后台线程算完
-        // 才通过 Handler 回主线程 setResult）。setMarkdown 返回时量到的高度缺了所有公式的高度；
-        // 等公式就绪，插件会用 setText(同文本) 强制重排、内容变高。两类内容都要盯着。
-        if (!isTableBlock && !mayRenderLatex(content)) return@LaunchedEffect
-        val deadline = System.currentTimeMillis() + HEIGHT_WATCH_WINDOW_MS
-        var stablePolls = 0
-        var tableRepolls = 0
-        while (System.currentTimeMillis() < deadline) {
-            // 高度稳定后不退出，只把频率降到「心跳」档：大矩阵这类公式算得慢
-            // （JLatexMath 单条就要几百 ms，几个矩阵叠一起可能超过 3 秒），
-            // 早退会让它在退出后才变高，于是内容溢出格位。
-            delay(if (stablePolls >= HEIGHT_STABLE_POLLS) HEIGHT_HEARTBEAT_MS else HEIGHT_POLL_INTERVAL_MS)
-            val latest = view.measuredHeightCompat(renderWidthPx)
-            // 高度变化就采纳（**允许变小**）。
-            //
-            // 上一版这里写成了「只增不减」，本意是「宁可多留空白也不让内容溢出」，
-            // 但那会留下一个更糟的隐患：宽度变化时换行数会变、高度本该随之变小
-            // （气泡在流式过程中宽度会从窄变宽），一旦拒绝更新，这块就会永久占着那个
-            // 偏大的高度 —— 它多吃掉的空白同样属于这个真实 View 的 bounds，
-            // 于是把**下面所有兄弟**（图片、表格）的触摸一并吃掉，
-            // 表现为「越靠后的元素越点不动」（用户反馈：第二张图点不开、末尾表格拖不动）。
-            // 所以这里恢复成「跟随最新测量」，靠长心跳窗口保证观测足够久。
-            if (latest > 0 && latest != measured) {
-                measured = latest
-                measuredHeight = latest
-                // 高度一变就复位内部滚动，清掉加载窗口里可能被拖出来的偏移
-                view.scrollTo(0, 0)
-                stablePolls = 0
-                continue
-            }
-            stablePolls++
-            if (isTableBlock &&
-                stablePolls >= TABLE_REPOLL_AFTER_STABLE_POLLS &&
-                tableRepolls < TABLE_REPOLL_MAX
-            ) {
-                tableRepolls++
-                stablePolls = 0
-                runCatching { view.setText(view.text) }
-            }
-        }
-    }
-
     val density = LocalDensity.current
     val widthModifier = if (fixedWidthPx != null) {
         Modifier.width(with(density) { fixedWidthPx.coerceAtLeast(1).toDp() })
     } else {
         Modifier.fillMaxWidth()
     }
-    // 量到真实高度之前不写死高度，避免第一帧被卡成 0 高（那会连第一次测量都拿不到宽度）
-    val heightModifier = if (measuredHeight > 0) {
-        Modifier.height(with(density) { measuredHeight.toDp() })
-    } else {
-        Modifier
-    }
-
-    // clipToBounds 是**交互正确性**的一部分，不只是观感：
-    // 这里装的是一个真实 Android 视图（interop holder），它并不保证裁剪子视图。
-    // 一旦这个 TextView 的实际内容比 Compose 给它的格位高（公式异步加载后变高、
-    // 或高度上报值陈旧），多出来的部分就会画到格位之外，压在**下一个兄弟节点
-    // （通常是生成的图片）**上面，而那是一个 clickable + selectable 的真实视图 ⇒
-    // 它会把本该落在图片上的触摸先吃掉，表现为「只有第一张图能点开」。
-    // 显式裁剪后，溢出部分既不显示也不参与命中测试。
-    Box(modifier = Modifier.clipToBounds()) {
-        AndroidView(
-            modifier = widthModifier.then(heightModifier).onSizeChanged { widthPx = it.width },
-            factory = { context ->
-                createMarkdownTextView(context, textColor, linkColor, selectable = selectable)
-            },
-            update = { view ->
-                host = view
-                // 内容/宽度/配色没变就不重复 setMarkdown：LazyColumn 的重组（滚动、状态变化）
-                // 会反复调用 update，而每次 setMarkdown 都会把公式 span 重置成待加载状态、
-                // 重新排队异步渲染——白费算力，还会让公式短暂缩回 0 高。
-                val renderKey = "$content|$renderWidthPx|$textColor|$linkColor"
-                if (view.getTag(R.id.markdown_render_key) != renderKey) {
-                    view.setTag(R.id.markdown_render_key, renderKey)
-                    renderMarkdown(view, content, renderWidthPx, textColor, linkColor)
-                }
-                val measured = view.measuredHeightCompat(renderWidthPx)
-                if (measured > 0) measuredHeight = measured
-            },
-        )
-    }
-}
-
-/** 内容里可能出现异步渲染的 LaTeX（`$…$` / `$$…$$`）时为 true。 */
-internal fun mayRenderLatex(content: String): Boolean = content.contains('$')
-
-/**
- * 高度复测节奏：每 100ms 量一次，连续 5 次不变就转入「心跳档」。
- * 公式（异步渲染）与表格（行高依赖「绘制后才填充」的内部 layouts）的高度都是「后到」的。
- */
-private const val HEIGHT_POLL_INTERVAL_MS = 100L
-private const val HEIGHT_STABLE_POLLS = 5
-
-/** 高度稳定后转入心跳档的间隔（只降频、不停止观察）。 */
-private const val HEIGHT_HEARTBEAT_MS = 400L
-
-/**
- * 高度观察窗口总时长。
- *
- * 不能只在「高度稳定」后就永久退出：大矩阵这类公式算得慢（JLatexMath 单条几百 ms，
- * 几个 `\begin{bmatrix}` 叠在一起可能超过 3 秒），若在它变高之前就退出，这个偏小的高度
- * 会被一直用下去 —— 而溢出的真实 TextView 会吃掉下方图片的触摸（见 [MarkdownChunk] 注释）。
- * 12 秒足够覆盖慢渲染，又不会让协程长期挂着。
- */
-private const val HEIGHT_WATCH_WINDOW_MS = 12_000L
-
-/** 表格块：高度连续这么多轮没变，就再补一次强制重排（见 [MarkdownChunk] 里的根因注释）。 */
-private const val TABLE_REPOLL_AFTER_STABLE_POLLS = 2
-
-/** 表格块强制重排的次数上限，避免与 Markwon 自身的调度互相拉扯。 */
-private const val TABLE_REPOLL_MAX = 8
-
-/**
- * 量出 TextView 在给定宽度下 wrap_content 的真实高度（像素）。
- *
- * 不能直接用 `view.height`：那是上一次布局的结果，内容刚更新时还是旧值。
- * 这里按精确宽度重新 measure 一次，拿到的就是当前内容的高度。
- */
-private fun TextView.measuredHeightCompat(widthPx: Int): Int {
-    if (widthPx <= 0) return 0
-    val widthSpec = View.MeasureSpec.makeMeasureSpec(widthPx, View.MeasureSpec.EXACTLY)
-    val heightSpec = View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED)
-    measure(widthSpec, heightSpec)
-    return measuredHeight
+    AndroidView(
+        modifier = widthModifier.clipToBounds().onSizeChanged { widthPx = it.width },
+        factory = { context ->
+            createMarkdownTextView(context, textColor, linkColor, selectable = selectable)
+        },
+        update = { view ->
+            // 同一份内容只渲染一次，避免思考面板更新/滚动时重新排队异步公式。
+            val renderKey = "$content|$renderWidthPx|$textColor|$linkColor"
+            if (renderWidthPx > 0 && view.getTag(R.id.markdown_render_key) != renderKey) {
+                renderMarkdown(view, content, renderWidthPx, textColor, linkColor)
+                view.setTag(R.id.markdown_render_key, renderKey)
+            }
+        },
+    )
 }
 
 /** 表格单元格内边距（dp）。Markwon 默认 4dp，这里收紧一档让单元格更紧凑。 */
