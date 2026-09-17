@@ -170,18 +170,22 @@ curl -sS -X PATCH -H "Authorization: token ${TOKEN}" \
   "https://api.github.com/repos/${REPO}/releases/${RELEASE_ID}" -o /dev/null
 sleep 3
 
-# 🔴 **`--draft` 创建的 release 不会创建 git tag**，之后 PATCH draft:false 也**不会补建**。
-# 后果：release 的 tag_name 变成 `untagged-<sha>`，资产的下载 URL 跟着变成
-# `.../download/untagged-<sha>/xxx.apk`；而清单里的 apkUrl 写的是
-# `.../download/v<版本>/xxx.apk` ⇒ **检查更新正常、下载必定 404**（v1.0.39 踩过）。
-# 必须显式建 tag 推送，再 PATCH tag_name 把 release 关联回去。
-echo "==> 补建 git tag v${VERSION_NAME}"
+# 🔴 **`--draft` 创建的 release 不会创建 git tag**，之后关闭 draft 也**不会补建**。
+# 而且实测更麻烦：**PATCH `draft:false` 会把 tag 关联重置成 `untagged-<sha>`**
+# ——即使事前已经 `git tag` 并 push 过（v1.0.40 实测：建 release 时 tag_name 正确，
+# 关完 draft 就变成 untagged-105bd2d5...）。
+# 后果：资产的下载 URL 变成 `.../download/untagged-<sha>/xxx.apk`，而清单里的 apkUrl
+# 写的是 `.../download/v<版本>/xxx.apk` ⇒ **检查更新正常、下载必定 404**。
+# 之所以隐蔽：`releases/latest/download/` 仍能取到清单，云函数与「检查更新」全是好的，
+# **只有真正下载时才炸**。
+# ⇒ 所以「补建 tag + PATCH tag_name」必须放在**关闭 draft 之后**，作为最后一步。
+echo "==> 补建 git tag v${VERSION_NAME}（必须在关闭 draft 之后）"
 git tag -f "v${VERSION_NAME}" "$(git rev-parse HEAD)"
-git push origin "v${VERSION_NAME}"
+git push -f origin "v${VERSION_NAME}"
 curl -sS -X PATCH -H "Authorization: token ${TOKEN}" \
   -H "Content-Type: application/json" -d "{\"tag_name\":\"v${VERSION_NAME}\"}" \
   "https://api.github.com/repos/${REPO}/releases/${RELEASE_ID}" -o /dev/null
-sleep 3
+sleep 4
 
 echo "==> 校验资产下载 URL 指向正确的 tag"
 "$GH_BIN" api "repos/${REPO}/releases/${RELEASE_ID}" \
