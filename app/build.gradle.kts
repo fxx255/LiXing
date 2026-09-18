@@ -173,6 +173,9 @@ dependencies {
     implementation(libs.kotlinx.serialization.json)
     implementation(libs.okhttp)
     implementation(libs.tensorflow.lite.task.vision)
+    // 饮食识别的 TFLite Task Core 引用了 AutoValue 注解；移除 MLKit 后需显式提供，
+    // 否则 release 的 R8 会报缺类。这里只引入注解，不引入代码生成器或 OCR 库。
+    implementation("com.google.auto.value:auto-value-annotations:1.11.0")
 
     // 本地 OCR（pix2text/onnxruntime + OpenCV + MLKit）已整体移除：
     // 光是 math_ocr 模型就 189MB，加上各家的 native 库占了 APK 三分之二以上，
