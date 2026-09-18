@@ -32,7 +32,7 @@ interface AssistantGenerationGuard {
 
 /**
  * 引用计数实现：支持「照片链路」的嵌套调用
- * （performDirectPhotoSend 的转写/OCR 和后续 performPhotoSend 的回答各自 begin/end 一次），
+ * （performDirectPhotoSend 的题目转写和后续 performPhotoSend 的回答各自 begin/end 一次），
  * 计数归零才真正停掉服务。
  */
 @Singleton

@@ -1092,6 +1092,13 @@ internal fun balancedRange(
     val coreHi = finite.lastOrNull { it <= upperFence } ?: dataHi
     val (useLo, useHi) = if (iqr <= 0.0 || coreHi <= coreLo) dataLo to dataHi else coreLo to coreHi
 
+    // 对非负图，0 是有语义的基线，不是普通数据点。带外频谱常用显式 y.min=0，
+    // 也可能通过 points 把 y=0 的零谱段画出来；如果继续给主体下方加边距，
+    // 零谱段就会浮在横轴上方（横轴当前位于绘图区底边）。只有确认数据没有实质
+    // 负值时才启用此规则，含正负值的波形仍按正常范围留白。
+    val hasZeroBaseline = useLo >= -1e-12 &&
+        (specLo?.let { abs(it) <= 1e-12 } == true || abs(dataLo) <= 1e-12)
+
     var lo = specLo ?: useLo
     var hi = specHi ?: useHi
     // 模型范围不能裁掉主体（极少数情况下它给的窗口会把主要特征切掉）
@@ -1110,6 +1117,7 @@ internal fun balancedRange(
         lo = minOf(lo, useLo - coreMargin)
         hi = maxOf(hi, useHi + coreMargin)
     }
+    if (hasZeroBaseline) lo = 0.0
     return AxisRange(lo, hi, foldedLow = dataLo < lo, foldedHigh = dataHi > hi)
 }
 

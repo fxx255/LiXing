@@ -14,8 +14,6 @@ import com.example.lixing.data.assistant.PendingPlanReviewPayload
 import com.example.lixing.data.assistant.decodePendingReview
 import com.example.lixing.data.assistant.encodePendingReview
 import com.example.lixing.data.assistant.AssistantStreamEvent
-import com.example.lixing.data.assistant.LocalTextRecognizer
-import com.example.lixing.data.assistant.OcrProgress
 import com.example.lixing.data.assistant.shouldUseWebSearch
 import com.example.lixing.data.backup.VersionedBackupRepository
 import com.example.lixing.data.local.entity.AssistantConversationEntity
@@ -104,10 +102,6 @@ data class AssistantUiState(
     val reasoningExpanded: Boolean = true,
     /** Forces provider-backed web search even when the prompt has no obvious search phrase. */
     val forceWebSearch: Boolean = false,
-    /** Text-only models use local OCR; vision-enabled models receive the photos directly. */
-    val ocrBusy: Boolean = false,
-    val ocrProgress: OcrProgress? = null,
-    val ocrPreview: OcrPreview? = null,
 )
 
 /** 一条待确认的英语积累变更：展示变更前后，删除项也要用户明确勾选。 */
@@ -118,14 +112,6 @@ data class PendingEnglishAction(
     val after: String,
     val selected: Boolean = true,
     val problem: String? = null,
-)
-
-data class OcrPreview(
-    val prompt: String,
-    val photoPaths: List<String>,
-    val markdown: String,
-    val warnings: List<String>,
-    val hasBlockingErrors: Boolean,
 )
 
 private const val REASONING_OMITTED_PREFIX = "…较早的思考内容已省略…\n"
@@ -254,7 +240,6 @@ class AssistantViewModel @Inject constructor(
     private val taskRepository: TaskRepository,
     private val chatRepository: AssistantChatRepository,
     private val englishEntryRepository: EnglishEntryRepository,
-    private val textRecognizer: LocalTextRecognizer,
     private val aiCredentialStore: AiCredentialStore,
     private val generationGuard: AssistantGenerationGuard,
     private val plotImageStore: PlotImageStore,
@@ -262,7 +247,6 @@ class AssistantViewModel @Inject constructor(
 
     private val _state = MutableStateFlow(AssistantUiState())
     val state: StateFlow<AssistantUiState> = _state.asStateFlow()
-    private var ocrJob: Job? = null
     private var photoRouteJob: Job? = null
 
     init {
@@ -440,7 +424,6 @@ class AssistantViewModel @Inject constructor(
         val current = _state.value
         val text = current.input.trim()
         val photoPaths = current.pendingPhotoPaths.filter { File(it).isFile }
-        if (current.ocrBusy) return
         if (photoPaths.isNotEmpty()) {
             performDirectPhotoSend(text, photoPaths)
             return
@@ -530,12 +513,21 @@ class AssistantViewModel @Inject constructor(
         }
     }
 
-    /** 发送照片后直接进入回答流：多模态直送 / 静默转写 / 静默本地 OCR，不展示中间预览。 */
+    /**
+     * 发送照片后直接进入回答流。
+     *
+     * 图片现在只有两条路（本地 OCR 已移除，见 `app/build.gradle.kts` 的说明）：
+     * ① **主模型支持看图** ⇒ 图片直送，效果最好；
+     * ② **主模型不能看图、但配置了「题目识别」多模态** ⇒ 先用它把题目转写成文字，
+     *    再把纯文本交给主模型（这就是「多模态兜底」）；
+     * ③ 两者都没有 ⇒ **不读图**，明确告诉用户去配置看图模型，
+     *    而不是像以前那样退回本地 OCR（模型 189MB、识别质量还不稳定）。
+     */
     private fun performDirectPhotoSend(prompt: String, photoPaths: List<String>) {
         if (_state.value.busy) return
         viewModelScope.launch {
             _state.update { it.copy(busy = true, error = null) }
-            // 照片链路的转写/OCR 阶段也可能较久，与后续回答生成共用引用计数保活。
+            // 照片链路的转写阶段也可能较久，与后续回答生成共用引用计数保活。
             generationGuard.begin()
             try {
                 val visionEnabled = modelClient.isVisionEnabled()
@@ -556,17 +548,14 @@ class AssistantViewModel @Inject constructor(
                                 imageBase64s = encodePhotos(photoPaths),
                             )
                         }.getOrNull()
-                            ?: localOcrText(photoPaths)
-                            ?: error("多模态转写与本地 OCR 均未识别出内容")
+                            ?: error("题目识别没能读出内容，请重拍或直接在设置里换一个能看图的模型")
                         imageBase64s = emptyList()
                         outgoing = buildOutgoingText(prompt, transcription)
                     }
-                    else -> {
-                        val ocrText = localOcrText(photoPaths)
-                            ?: error("未能从照片中识别出文字，请调整光线或手动输入")
-                        imageBase64s = emptyList()
-                        outgoing = buildOutgoingText(prompt, ocrText)
-                    }
+                    else -> error(
+                        "当前模型不能看图，也没有配置「题目识别」模型。" +
+                            "请在设置里选择支持图片的模型（或为题目识别指定一个多模态配置）后重试，也可以直接打字描述题目。",
+                    )
                 }
                 performPhotoSend(outgoing, photoPaths, prompt, imageBase64s)
             } catch (e: CancellationException) {
@@ -620,80 +609,10 @@ class AssistantViewModel @Inject constructor(
         return encoded
     }
 
-    private suspend fun localOcrText(photoPaths: List<String>): String? =
-        runCatching { textRecognizer.recognizeDocument(photoPaths) }
-            .getOrNull()?.markdown?.takeIf { it.isNotBlank() }
-
     private fun buildOutgoingText(prompt: String, recognized: String): String = buildString {
         if (prompt.isNotBlank()) append(prompt).append("\n\n")
         append(recognized)
     }.trim()
-
-    private fun startOcrPreview(prompt: String, photoPaths: List<String>, notice: String? = null) {
-        ocrJob?.cancel()
-        ocrJob = viewModelScope.launch {
-            _state.update {
-                it.copy(
-                    ocrBusy = true,
-                    ocrProgress = OcrProgress(0, photoPaths.size, "正在准备 OCR", 0f),
-                    ocrPreview = null,
-                    error = notice,
-                )
-            }
-            try {
-                val result = textRecognizer.recognizeDocument(photoPaths) { progress ->
-                    _state.update { it.copy(ocrProgress = progress) }
-                }
-                _state.update {
-                    it.copy(
-                        ocrBusy = false,
-                        ocrProgress = null,
-                        ocrPreview = OcrPreview(
-                            prompt = prompt,
-                            photoPaths = photoPaths,
-                            markdown = result.markdown,
-                            warnings = result.warnings,
-                            hasBlockingErrors = result.hasBlockingErrors,
-                        ),
-                    )
-                }
-            } catch (_: CancellationException) {
-                _state.update { it.copy(ocrBusy = false, ocrProgress = null) }
-            } catch (error: Exception) {
-                _state.update {
-                    it.copy(
-                        ocrBusy = false,
-                        ocrProgress = null,
-                        error = "OCR 失败：${error.message ?: "未知错误"}",
-                    )
-                }
-            }
-        }
-    }
-
-    fun updateOcrPreview(markdown: String) = _state.update { state ->
-        state.ocrPreview?.let { preview ->
-            state.copy(
-                ocrPreview = preview.copy(
-                    markdown = markdown,
-                    hasBlockingErrors = markdown.contains("公式识别失败"),
-                ),
-            )
-        } ?: state
-    }
-
-    fun cancelOcrPreview() = _state.update { it.copy(ocrPreview = null) }
-
-    fun cancelOcr() {
-        photoRouteJob?.cancel()
-        ocrJob?.cancel()
-        _state.update { it.copy(ocrBusy = false, ocrProgress = null) }
-    }
-
-    fun retryOcrPreview() {
-        val preview = _state.value.ocrPreview ?: return
-        startOcrPreview(preview.prompt, preview.photoPaths)
-    }
 
     /**
      * 一轮问答 = 首次请求 + 输出撞长度上限（finish_reason=length）时的自适应续写。
@@ -990,7 +909,6 @@ class AssistantViewModel @Inject constructor(
         viewModelScope.launch {
             _state.update {
                 it.copy(
-                    ocrPreview = null,
                     busy = true,
                     error = null,
                     activeReasoning = "",

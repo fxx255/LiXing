@@ -552,19 +552,6 @@ fun AssistantScreen(
         )
     }
 
-    state.ocrProgress?.let { progress ->
-        OcrProgressDialog(progress = progress, onCancel = viewModel::cancelOcr)
-    }
-    state.ocrPreview?.let { preview ->
-        OcrPreviewDialog(
-            preview = preview,
-            onMarkdownChanged = viewModel::updateOcrPreview,
-            onRetry = viewModel::retryOcrPreview,
-            onCancel = viewModel::cancelOcrPreview,
-            onSend = viewModel::send,
-        )
-    }
-
     BackHandler(enabled = state.planReviewOpen, onBack = viewModel::closePlanReview)
     BackHandler(enabled = state.englishReviewOpen && !state.planReviewOpen, onBack = viewModel::closeEnglishReview)
 
@@ -1422,88 +1409,6 @@ internal fun MessageBubble(
                     } else {
                         AssistantMarkdownBody(content, imagePaths, onImageClick)
                     }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun OcrProgressDialog(
-    progress: com.example.lixing.data.assistant.OcrProgress,
-    onCancel: () -> Unit,
-) {
-    AlertDialog(
-        onDismissRequest = {},
-        title = { Text("正在整理题目") },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Text(progress.stage, style = MaterialTheme.typography.bodyMedium)
-                LinearProgressIndicator(Modifier.fillMaxWidth())
-                Text(
-                    "图片 ${progress.page + 1}/${progress.totalPages}",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-        },
-        confirmButton = { TextButton(onClick = onCancel) { Text("取消") } },
-    )
-}
-
-@Composable
-private fun OcrPreviewDialog(
-    preview: OcrPreview,
-    onMarkdownChanged: (String) -> Unit,
-    onRetry: () -> Unit,
-    onCancel: () -> Unit,
-    onSend: () -> Unit,
-) {
-    var sourceMode by remember(preview) { mutableStateOf(false) }
-    Dialog(
-        onDismissRequest = onCancel,
-        properties = DialogProperties(usePlatformDefaultWidth = false),
-    ) {
-        Surface(Modifier.fillMaxSize().padding(12.dp), shape = LiXingRadius.Card) {
-            Column(Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("OCR 题目预览", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
-                    Spacer(Modifier.weight(1f))
-                    IconButton(onClick = onCancel) { Icon(Icons.Filled.Close, contentDescription = "关闭") }
-                }
-                if (preview.prompt.isNotBlank()) {
-                    Text(preview.prompt, style = MaterialTheme.typography.bodyMedium)
-                }
-                if (preview.warnings.isNotEmpty()) {
-                    Surface(color = MaterialTheme.colorScheme.errorContainer, shape = LiXingRadius.Card) {
-                        Text(
-                            preview.warnings.joinToString("\n"),
-                            modifier = Modifier.fillMaxWidth().padding(10.dp),
-                            color = MaterialTheme.colorScheme.onErrorContainer,
-                            style = MaterialTheme.typography.bodySmall,
-                        )
-                    }
-                }
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    FilterChip(selected = !sourceMode, onClick = { sourceMode = false }, label = { Text("渲染预览") })
-                    FilterChip(selected = sourceMode, onClick = { sourceMode = true }, label = { Text("Markdown 源码") })
-                }
-                if (sourceMode) {
-                    OutlinedTextField(
-                        value = preview.markdown,
-                        onValueChange = onMarkdownChanged,
-                        modifier = Modifier.fillMaxWidth().weight(1f),
-                        minLines = 10,
-                    )
-                } else {
-                    Column(
-                        Modifier.fillMaxWidth().weight(1f).verticalScroll(rememberScrollState()),
-                    ) { MarkdownAnswer(preview.markdown.ifBlank { "未识别到可用文字" }) }
-                }
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End, verticalAlignment = Alignment.CenterVertically) {
-                    TextButton(onClick = onRetry) { Text("重新识别") }
-                    TextButton(onClick = onCancel) { Text("返回") }
-                    TextButton(onClick = onSend, enabled = !preview.hasBlockingErrors && preview.markdown.isNotBlank()) { Text("发送") }
                 }
             }
         }

@@ -118,9 +118,8 @@ android {
         }
     }
 
-    androidResources {
-        noCompress += "onnx"
-    }
+    // onnx 的 noCompress 已随本地 OCR 一并移除：唯一使用方是 math_ocr 模型。
+    // 保留 food_classifier.tflite 的校验（饮食分析仍在用端侧模型）。
 
     testOptions {
         unitTests {
@@ -159,31 +158,7 @@ val verifyMealModel by tasks.registering {
     }
 }
 
-val verifyMathOcrModels by tasks.registering {
-    val modelDir = layout.projectDirectory.dir("src/main/assets/math_ocr")
-    inputs.dir(modelDir)
-    doLast {
-        val expected = mapOf(
-            "pix2text-mfd-1.5.onnx" to "40D4FC852D99BCBF25A9478897D2F49FBBB8F7FDD6569C088CD1C31386293BD7",
-            "encoder_model.onnx" to "BD8D5C322792E9EC45793AF5569E9748F82A3D728A9E00213DBFC56C1486F37D",
-            "decoder_model.onnx" to "FD0F92D7A012F3DAE41E1AC79421AEA0EA888B5A66CB3F9A004E424F82F3DAED",
-            "tokenizer.json" to "3E2AB757277D22639BEC28C9D7972E352D3D1DBA223051FA674002DC5AB64DF3",
-            "config.json" to "9F3812441D397C871B9B2A74E8D956B939AEC5F4F45745BBA9214E968D56449D",
-            "preprocessor_config.json" to "36A945A7CC645688B9EF64DABAE16979CF5F7C1C448569CC306694EDC0598B9B",
-            "generation_config.json" to "CBEA88288D5576A9655AD04E2456768544BE22273A1C5CA160E0D16384639B4F",
-        )
-        expected.forEach { (name, sha) ->
-            val file = modelDir.file(name).asFile
-            check(file.isFile) { "Missing math OCR asset: ${file.path}" }
-            val digest = MessageDigest.getInstance("SHA-256")
-                .digest(file.readBytes())
-                .joinToString("") { "%02X".format(it) }
-            check(digest == sha) { "Math OCR asset is incomplete or modified: $name (SHA-256=$digest)" }
-        }
-    }
-}
-
-tasks.named("preBuild").configure { dependsOn(verifyMealModel, verifyMathOcrModels) }
+tasks.named("preBuild").configure { dependsOn(verifyMealModel) }
 
 dependencies {
     coreLibraryDesugaring(libs.desugar.jdk.libs)
@@ -198,12 +173,12 @@ dependencies {
     implementation(libs.kotlinx.serialization.json)
     implementation(libs.okhttp)
     implementation(libs.tensorflow.lite.task.vision)
-    implementation(libs.opencv.android)
-    implementation(libs.onnxruntime.android)
 
-    // AI 助手的本地 OCR（离线、随 APK 打包、不依赖 GMS）：识别题目文字给非多模态模型用。
-    implementation("com.google.mlkit:text-recognition-chinese:16.0.1")
-    implementation("com.google.mlkit:text-recognition:16.0.1")
+    // 本地 OCR（pix2text/onnxruntime + OpenCV + MLKit）已整体移除：
+    // 光是 math_ocr 模型就 189MB，加上各家的 native 库占了 APK 三分之二以上，
+    // 而且识别质量不稳定。图片现在只走两条路 —— 多模态模型直送，
+    // 或配置里的「题目识别」多模态兜底转写；两者都没有时不读图，
+    // 明确告诉用户去看图模型的设置。见 AssistantViewModel.performDirectPhotoSend。
     implementation("androidx.exifinterface:exifinterface:1.4.1")
 
     // Rich AI answers: Markdown plus local JLatexMath rendering (no WebView or CDN).

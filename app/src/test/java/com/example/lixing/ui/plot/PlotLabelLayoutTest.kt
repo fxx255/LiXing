@@ -271,6 +271,21 @@ class PlotLabelLayoutTest {
         assertTrue("恒定值也要有非零跨度（lo=${range.lo} hi=${range.hi}）", range.hi > range.lo)
     }
 
+    @Test
+    fun `非负图的零基线与横轴重合`() {
+        val explicit = balancedRange(listOf(0.0, 8.0, 20.0), 0.0, 24.0)
+        assertEquals("显式 y.min=0 不应被下方边距推成负数", 0.0, explicit.lo, 1e-12)
+
+        val inferred = balancedRange(listOf(0.0, 8.0, 20.0), null, null)
+        assertEquals("包含零谱段的自动范围也必须保留 y=0 基线", 0.0, inferred.lo, 1e-12)
+    }
+
+    @Test
+    fun `正值且没有零基线的图仍保留下方留白`() {
+        val range = balancedRange(listOf(2.0, 3.0), null, null)
+        assertTrue("非零谷值图不应被误判为零基线", range.lo < 2.0)
+    }
+
     // ---------- 核心不变量：任何情况下都不能把中文交给公式排版器 ----------
 
     /**
