@@ -15,6 +15,7 @@ import com.example.lixing.domain.plot.PlotSpec
 import com.example.lixing.domain.plot.Series
 import com.example.lixing.domain.plot.niceTicks
 import com.example.lixing.domain.plot.prettifyPlotLabel
+import com.example.lixing.domain.plot.sampleShadePolygons
 import com.example.lixing.domain.plot.sampleSeries
 import ru.noties.jlatexmath.JLatexMathDrawable
 import kotlin.math.abs
@@ -51,6 +52,13 @@ class PlotBitmapRenderer(
             0xFF3DDC97.toInt(),
             0xFFFF7EB6.toInt(),
             0xFFB28DFF.toInt(),
+            0xFFFF8A65.toInt(),
+            0xFF4DDDE0.toInt(),
+            0xFFE5E879.toInt(),
+            0xFFD2A679.toInt(),
+            0xFFF06F78.toInt(),
+            0xFF9AC8FF.toInt(),
+            0xFFC4CFD9.toInt(),
         ),
     )
 
@@ -358,25 +366,31 @@ class PlotBitmapRenderer(
         fun sx(x: Double): Float = drawX + ((x - xLo) / spanX * drawW).toFloat()
         fun sy(y: Double): Float = drawY + drawH - ((y - yLo) / spanY * drawH).toFloat()
 
-        // ---- 4. markArea（垫在网格下面）----
-        // 图内注释统一夹在**绘图区**里：贴着右边缘的注释不会再横穿到图片外面
-        // （用户反馈「注释文字右侧溢出图片」）。
-        val plotSave = canvas.save()
-        labelBounds = RectF(drawX, drawY, drawX + drawW, drawY + drawH)
+        // Filled regions stay behind the grid, axes and every data series.
+        val plotBounds = RectF(drawX, drawY, drawX + drawW, drawY + drawH)
+        val fillSave = canvas.save()
+        canvas.clipRect(plotBounds)
         for (area in spec.markAreas) {
-            val a0 = sx(area.x0)
-            val a1 = sx(area.x1)
-            fillPaint.color = theme.markArea
-            fillPaint.pathEffect = null
-            canvas.drawRect(min(a0, a1), drawY, maxOf(a0, a1), drawY + drawH, fillPaint)
-            area.label?.let {
-                // 图内文字可能是 LaTeX（模型常写 $B$、\Delta f），交给 drawSmartText 自动排版
-                // 画在区域内部靠上，并与 markLine 标签错开高度，避免叠字
-                drawSmartText(canvas, it, (a0 + a1) / 2, drawY + height * 0.058f, tickSize, theme.subText, alignCenter = true)
+            val region = Path().apply { addRect(sx(area.x0), sy(area.y1 ?: yHi), sx(area.x1), sy(area.y0 ?: yLo), Path.Direction.CW) }
+            drawRegion(canvas, region, plotBounds, plotColor(area.color, area.colorIndex), area.opacity, area.pattern)
+        }
+        for (region in spec.shades) {
+            val polygons = sampleShadePolygons(region, xLo, xHi, spanY)
+            val path = Path().apply {
+                for (polygon in polygons) {
+                    polygon.forEachIndexed { i, (x, y) -> if (i == 0) moveTo(sx(x), sy(y)) else lineTo(sx(x), sy(y)) }
+                    close()
+                }
+            }
+            drawRegion(canvas, path, plotBounds, plotColor(region.color, region.colorIndex), region.opacity, region.pattern)
+        }
+        spec.series.forEachIndexed { index, series ->
+            if (series.fill) {
+                fillPaint.color = withAlpha(plotColor(series.color, series.colorIndex), (38 * series.opacity).toInt())
+                fillArea(canvas, sampled[index], ::sx, ::sy, sy(0.0).coerceIn(drawY, drawY + drawH))
             }
         }
-        canvas.restoreToCount(plotSave)
-        labelBounds = RectF(0f, 0f, width, height)
+        canvas.restoreToCount(fillSave)
 
         // ---- 5. 网格 ----
         linePaint.color = theme.grid
@@ -394,34 +408,6 @@ class PlotBitmapRenderer(
                 canvas.drawLine(drawX, py, drawX + drawW, py, linePaint)
             }
         }
-
-        // ---- 6. 序列：面积 → 折线 ----
-        // 裁剪到绘图区：被折叠到范围外的极端点不应画到框外（会压住轴标签）。
-        val seriesSave = canvas.save()
-        canvas.clipRect(drawX, drawY, drawX + drawW, drawY + drawH)
-        spec.series.forEachIndexed { index, s ->
-            val pts = sampled[index]
-            if (pts.isEmpty()) return@forEachIndexed
-            val base = theme.seriesColors[s.colorIndex % theme.seriesColors.size]
-
-            if (s.fill) {
-                fillPaint.color = withAlpha(base, 38)
-                fillPaint.pathEffect = null
-                fillArea(canvas, pts, ::sx, ::sy, drawY + drawH)
-            }
-            if (s.style == "marker") {
-                fillPaint.color = withAlpha(base, (255 * s.opacity).toInt())
-                fillPaint.pathEffect = null
-                val r = dp(3f)
-                for ((x, y) in pts) {
-                    if (y == null || !y.isFinite()) continue
-                    canvas.drawCircle(sx(x), sy(y), r, fillPaint)
-                }
-            } else {
-                drawPolyline(canvas, pts, ::sx, ::sy, withAlpha(base, (255 * s.opacity).toInt()), s.width, s.style == "dashed")
-            }
-        }
-        canvas.restoreToCount(seriesSave)
 
         // ---- 7. 坐标轴 ----
         // 参照教材频谱插图（用户给出的参考图）的轴样式：
@@ -590,7 +576,18 @@ class PlotBitmapRenderer(
         //   · 没有曲线经过（纯标记位置）⇒ 退化为整段实线。
         // 颜色仍用 markLine（比轴线暗），保证边界不抢曲线的视觉重心。
         for (line in spec.markLines) {
-            val x = line.x ?: continue
+            if (line.x == null) {
+                val y = line.y ?: continue
+                if (y !in yLo..yHi) continue
+                linePaint.color = theme.markLine
+                linePaint.strokeWidth = dp(MARK_LINE_STROKE_DP)
+                linePaint.pathEffect = null
+                canvas.drawLine(drawX, sy(y), drawX + drawW, sy(y), linePaint)
+                line.label?.let { drawSmartText(canvas, it, drawX + width * .02f, sy(y) - height * .012f, tickSize, theme.subText) }
+                continue
+            }
+            val x = line.x
+            if (x !in xLo..xHi) continue
             val px = sx(x)
             val curveTop = curveTopAt(sampled, x, ::sx, ::sy)
             linePaint.color = theme.markLine
@@ -609,6 +606,37 @@ class PlotBitmapRenderer(
             }
         }
 
+        // Lines above axes; points above all lines, including points located exactly on an axis.
+        val seriesSave = canvas.save()
+        canvas.clipRect(plotBounds)
+        spec.series.forEachIndexed { index, series ->
+            if (series.style != "marker") drawPolyline(canvas, sampled[index], ::sx, ::sy,
+                withAlpha(plotColor(series.color, series.colorIndex), (255 * series.opacity).toInt()), series.width, series.style)
+        }
+        canvas.restoreToCount(seriesSave)
+        val markerSave = canvas.save()
+        // Keep endpoint markers whole; reject out-of-range centers instead of showing folded points.
+        canvas.clipRect(drawX - dp(8f), drawY - dp(8f), drawX + drawW + dp(8f), drawY + drawH + dp(8f))
+        spec.series.forEachIndexed { index, series ->
+            if (series.style == "marker" || series.style == "line_marker") {
+                val color = withAlpha(plotColor(series.color, series.colorIndex), (255 * series.opacity).toInt())
+                sampled[index].forEach { (x, y) ->
+                    if (y != null && y.isFinite() && x in xLo..xHi && y in yLo..yHi)
+                        drawMarker(canvas, sx(x), sy(y), dp(series.markerSize), series.markerShape, color)
+                }
+            }
+        }
+        canvas.restoreToCount(markerSave)
+        labelBounds = plotBounds
+        spec.markAreas.forEach { area -> area.label?.let {
+            drawSmartText(canvas, it, (sx(area.x0) + sx(area.x1)) / 2, drawY + height * .058f, tickSize, theme.subText, true)
+        } }
+        spec.shades.forEach { region -> region.label?.let {
+            val middle = region.points?.map { p -> p.first }?.average() ?: ((region.x0 ?: xLo) + (region.x1 ?: xHi)) / 2
+            drawSmartText(canvas, it, sx(middle), drawY + height * .085f, tickSize, theme.subText, true)
+        } }
+        labelBounds = RectF(0f, 0f, width, height)
+
         // ---- 12. 图例：横排在标题下方、绘图区之外 ----
         // 早先画在绘图区内部左上角，会被曲线压住（左右对称的谱线尤其明显）。
         if (hasLegend) {
@@ -621,11 +649,13 @@ class PlotBitmapRenderer(
                 val itemWidth = swatchW + smartTextWidth(label, tickSize) + width * 0.013f
                 // 排不下就不再画，绝不让图例伸出画布被裁成半截
                 if (xx + itemWidth > plotX + plotW + width * 0.014f) return@forEach
-                val color = theme.seriesColors[s.colorIndex % theme.seriesColors.size]
+                val color = plotColor(s.color, s.colorIndex)
                 linePaint.color = color
                 linePaint.strokeWidth = dp(2f)
+                linePaint.pathEffect = lineEffect(s.style)
+                if (s.style != "marker") canvas.drawLine(xx, legendY - height * 0.008f, xx + swatchW * 0.78f, legendY - height * 0.008f, linePaint)
+                if (s.style == "marker" || s.style == "line_marker") drawMarker(canvas, xx + swatchW * .4f, legendY - height * .008f, dp(2.5f), s.markerShape, color)
                 linePaint.pathEffect = null
-                canvas.drawLine(xx, legendY - height * 0.008f, xx + swatchW * 0.78f, legendY - height * 0.008f, linePaint)
                 // 图例项也要夹取：最后一个图例项贴着右边界时不能画出去
                 val save = canvas.save()
                 labelBounds = RectF(plotX, plotY - height * 0.06f, plotX + plotW + width * 0.014f, plotY)
@@ -737,13 +767,13 @@ class PlotBitmapRenderer(
         sy: (Double) -> Float,
         color: Int,
         width: Float,
-        dashed: Boolean,
+        style: String,
     ) {
         linePaint.color = color
         linePaint.strokeWidth = dp(width)
         linePaint.strokeCap = Paint.Cap.ROUND
         linePaint.strokeJoin = Paint.Join.ROUND
-        linePaint.pathEffect = if (dashed) DashPathEffect(floatArrayOf(dp(6f), dp(4f)), 0f) else null
+        linePaint.pathEffect = lineEffect(style)
 
         val path = Path()
         var started = false
@@ -797,6 +827,68 @@ class PlotBitmapRenderer(
         }
         flush()
         if (hasSegment) canvas.drawPath(path, fillPaint)
+    }
+
+    private fun plotColor(custom: String?, index: Int): Int =
+        custom?.takeIf { it.matches(Regex("#[0-9a-fA-F]{6}")) }?.let { Color.parseColor(it) }
+            ?: theme.seriesColors[Math.floorMod(index, theme.seriesColors.size)]
+
+    private fun lineEffect(style: String): DashPathEffect? = when (style) {
+        "dashed" -> DashPathEffect(floatArrayOf(dp(7f), dp(4f)), 0f)
+        "dotted" -> DashPathEffect(floatArrayOf(dp(1f), dp(4f)), 0f)
+        "dashdot" -> DashPathEffect(floatArrayOf(dp(9f), dp(4f), dp(1f), dp(4f)), 0f)
+        else -> null
+    }
+
+    private fun drawMarker(canvas: Canvas, x: Float, y: Float, radius: Float, shape: String, color: Int) {
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            this.color = color
+            style = if (shape == "open_circle" || shape == "cross") Paint.Style.STROKE else Paint.Style.FILL
+            strokeWidth = dp(1.6f)
+        }
+        when (shape) {
+            "square" -> canvas.drawRect(x - radius, y - radius, x + radius, y + radius, paint)
+            "diamond", "triangle" -> {
+                val path = Path().apply {
+                    moveTo(x, y - radius)
+                    lineTo(x + radius, if (shape == "diamond") y else y + radius)
+                    if (shape == "diamond") lineTo(x, y + radius)
+                    lineTo(x - radius, if (shape == "diamond") y else y + radius)
+                    close()
+                }
+                canvas.drawPath(path, paint)
+            }
+            "cross" -> {
+                canvas.drawLine(x - radius, y - radius, x + radius, y + radius, paint)
+                canvas.drawLine(x - radius, y + radius, x + radius, y - radius, paint)
+            }
+            else -> {
+                if (shape == "open_circle") {
+                    fillPaint.color = theme.background
+                    canvas.drawCircle(x, y, radius, fillPaint)
+                }
+                canvas.drawCircle(x, y, radius, paint)
+            }
+        }
+    }
+
+    private fun drawRegion(canvas: Canvas, path: Path, bounds: RectF, color: Int, opacity: Double, pattern: String) {
+        fillPaint.color = withAlpha(color, (opacity * 255).toInt())
+        fillPaint.pathEffect = null
+        if (pattern == "solid") { canvas.drawPath(path, fillPaint); return }
+        val save = canvas.save()
+        canvas.clipPath(path)
+        linePaint.color = withAlpha(color, (opacity * 255).toInt())
+        linePaint.strokeWidth = dp(1f)
+        linePaint.pathEffect = null
+        val spacing = dp(8f).coerceAtLeast(4f)
+        var x = bounds.left - bounds.height()
+        while (x <= bounds.right) {
+            canvas.drawLine(x, bounds.bottom, x + bounds.height(), bounds.top, linePaint)
+            if (pattern == "crosshatch") canvas.drawLine(x, bounds.top, x + bounds.height(), bounds.bottom, linePaint)
+            x += spacing
+        }
+        canvas.restoreToCount(save)
     }
 
     private fun withAlpha(color: Int, alpha: Int): Int =

@@ -33,12 +33,15 @@ data class Series(
     val label: String = "",
     val expr: String? = null,
     val points: List<Pair<Double, Double>>? = null,
-    /** line | dashed | marker */
+    /** line | dashed | dotted | dashdot | marker | line_marker */
     val style: String = "line",
     val fill: Boolean = false,
     val colorIndex: Int = 0,
     val opacity: Double = 1.0,
     val width: Float = 2f,
+    val color: String? = null,
+    val markerShape: String = "circle",
+    val markerSize: Float = 3f,
 )
 
 data class Axis(
@@ -56,7 +59,18 @@ data class Axis(
 
 data class MarkLine(val x: Double? = null, val y: Double? = null, val label: String? = null)
 
-data class MarkArea(val x0: Double, val x1: Double, val label: String? = null)
+data class MarkArea(val x0: Double, val x1: Double, val label: String? = null,
+    val y0: Double? = null, val y1: Double? = null, val colorIndex: Int = 1,
+    val color: String? = null, val opacity: Double = .12, val pattern: String = "solid")
+
+/** A region between two functions, or a closed polygon in data coordinates. */
+data class ShadeRegion(
+    val x0: Double? = null, val x1: Double? = null,
+    val upper: String = "0", val lower: String = "0",
+    val points: List<Pair<Double, Double>>? = null,
+    val colorIndex: Int = 0, val color: String? = null,
+    val opacity: Double = .18, val pattern: String = "solid", val label: String? = null,
+)
 
 data class PlotSpec(
     val title: String = "",
@@ -68,6 +82,7 @@ data class PlotSpec(
     val markAreas: List<MarkArea> = emptyList(),
     val widthPx: Int = 960,
     val heightPx: Int = 560,
+    val shades: List<ShadeRegion> = emptyList(),
 )
 
 /**

@@ -92,6 +92,39 @@ class SyncEngineTest {
         dbB.close()
     }
 
+    @Test
+    fun `offline reviews from both devices merge without losing events`() = runTest {
+        val word = EnglishEntryEntity(id = "review-word", type = EnglishEntryType.WORD, content = "abide", meaning = "遵守")
+        dbA.englishEntryDao().upsert(word)
+        engineA.sync(cloud, "A"); engineB.sync(cloud, "B")
+        val a = com.example.lixing.data.repository.EnglishEntryRepository(dbA.englishEntryDao(), dbA, Dispatchers.IO)
+        val b = com.example.lixing.data.repository.EnglishEntryRepository(dbB.englishEntryDao(), dbB, Dispatchers.IO)
+        val now = java.time.Instant.parse("2026-09-19T12:00:00Z")
+        a.grade(a.get(word.id)!!, com.example.lixing.domain.english.ReviewGrade.GOOD, "a-review", "a-session", now)
+        b.grade(b.get(word.id)!!, com.example.lixing.domain.english.ReviewGrade.AGAIN, "b-review", "b-session", now.plusSeconds(60))
+        engineA.sync(cloud, "A"); engineB.sync(cloud, "B"); engineA.sync(cloud, "A"); engineB.sync(cloud, "B")
+        assertEquals(2, a.history(word.id).size)
+        assertEquals(2, b.history(word.id).size)
+        assertEquals(a.get(word.id)!!.fsrsStability, b.get(word.id)!!.fsrsStability, .000001)
+        assertEquals(a.get(word.id)!!.reviewDueAt, b.get(word.id)!!.reviewDueAt)
+    }
+
+    @Test
+    fun `schema mismatch blocks incremental rows even after a previous sync`() = runTest {
+        val word = EnglishEntryEntity(id = "version-word", type = EnglishEntryType.WORD, content = "abide", meaning = "initial")
+        dbA.englishEntryDao().upsert(word)
+        engineA.sync(cloud, "A"); engineB.sync(cloud, "B")
+        dbA.englishEntryDao().upsert(dbA.englishEntryDao().get(word.id)!!.copy(meaning = "changed"))
+        engineA.sync(cloud, "A")
+        val json = kotlinx.serialization.json.Json { encodeDefaults = true }
+        val name = SyncFiles.snapshot("A")
+        val snapshot = json.decodeFromString<SyncSnapshot>(cloud.files.getValue(name))
+        cloud.files[name] = json.encodeToString(SyncSnapshot.serializer(), snapshot.copy(databaseVersion = LiXingDatabase.VERSION - 1))
+        val result = engineB.sync(cloud, "B")
+        assertTrue(result.errors.isNotEmpty())
+        assertEquals("initial", dbB.englishEntryDao().get(word.id)!!.meaning)
+    }
+
     private fun buildDatabase(): LiXingDatabase =
         Room.inMemoryDatabaseBuilder(context, LiXingDatabase::class.java)
             .allowMainThreadQueries()

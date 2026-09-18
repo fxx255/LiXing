@@ -1,8 +1,6 @@
 package com.example.lixing.ui.screen.today.dialog
 
 import android.graphics.Bitmap
-import android.graphics.BitmapFactory
-import android.graphics.Matrix
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -41,7 +39,15 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.compose.runtime.saveable.rememberSaveable
+import com.example.lixing.ui.photo.PhotoEdits
+import com.example.lixing.ui.photo.decodeUprightPhoto
+import com.example.lixing.ui.photo.rotatePhotoBitmap
+import com.example.lixing.ui.photo.rotatePhotoAndSave
+import com.example.lixing.ui.photo.savePhotoBitmap
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -105,27 +111,7 @@ fun decodePhotos(raw: String?): List<String> {
 }
 
 /** 降采样解码，maxDim 为目标最大边。 */
-private fun decodeSampled(path: String, maxDim: Int): Bitmap? = runCatching {
-    val opts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-    BitmapFactory.decodeFile(path, opts)
-    var scale = 1
-    while (maxOf(opts.outWidth, opts.outHeight) / scale > maxDim) scale *= 2
-    BitmapFactory.decodeFile(path, BitmapFactory.Options().apply { inSampleSize = scale })
-}.getOrNull()
-
-/**
- * 旋转并原子写回：先写 .tmp 再 rename，避免并发读到半成品；不 recycle，交给 GC。
- */
-private fun rotateAndSave(path: String, degrees: Int): Boolean = runCatching {
-    val src = BitmapFactory.decodeFile(path) ?: return@runCatching false
-    val matrix = Matrix().apply { postRotate(degrees.toFloat()) }
-    val rotated = Bitmap.createBitmap(src, 0, 0, src.width, src.height, matrix, true)
-    val original = File(path)
-    val tmp = File(original.parentFile, original.name + ".tmp")
-    tmp.outputStream().use { out -> rotated.compress(Bitmap.CompressFormat.JPEG, 90, out) }
-    tmp.renameTo(original)
-    true
-}.getOrDefault(false)
+private fun decodeSampled(path: String, maxDim: Int): Bitmap? = decodeUprightPhoto(path, maxDim)
 
 /**
  * 照片条：横向展示多张缩略图，每张可点预览/旋转、可删除。
@@ -184,7 +170,8 @@ fun PhotoThumb(
     var showPreview by remember { mutableStateOf(false) }
     var version by remember { mutableIntStateOf(0) }
 
-    val thumb = remember(path, version) { decodeSampled(path, 240) }
+    val photoRevision by PhotoEdits.revision.collectAsStateWithLifecycle()
+    val thumb = remember(path, version, photoRevision) { decodeSampled(path, 240) }
 
     if (thumb != null) {
         Image(
@@ -219,7 +206,9 @@ private fun PhotoPreviewDialog(
     var version by remember { mutableIntStateOf(0) }
     var rotating by remember { mutableStateOf(false) }
     var showCrop by remember { mutableStateOf(false) }
-    val bitmap = remember(path, version) { decodeSampled(path, 1600) }
+    var error by remember { mutableStateOf<String?>(null) }
+    val photoRevision by PhotoEdits.revision.collectAsStateWithLifecycle()
+    val bitmap = remember(path, version, photoRevision) { decodeSampled(path, 1600) }
 
     if (showCrop) {
         PhotoCropDialog(
@@ -266,6 +255,7 @@ private fun PhotoPreviewDialog(
                     Text("照片加载失败", color = MaterialTheme.colorScheme.onSurface)
                 }
 
+                error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                     if (canCrop) {
                         TextButton(enabled = !rotating, onClick = { showCrop = true }) {
@@ -279,18 +269,19 @@ private fun PhotoPreviewDialog(
                         onClick = {
                             rotating = true
                             scope.launch {
-                                val ok = withContext(Dispatchers.IO) { rotateAndSave(path, 90) }
+                                val ok = withContext(Dispatchers.IO) { runCatching { rotatePhotoAndSave(path) } }
                                 rotating = false
-                                if (ok) {
+                                ok.onSuccess {
+                                    error = null
                                     version++
                                     onPhotoChanged()
-                                }
+                                }.onFailure { error = it.message ?: "旋转失败，请重试" }
                             }
                         },
                     ) {
                         Icon(Icons.Filled.RotateRight, contentDescription = null, modifier = Modifier.size(18.dp))
                         Spacer(Modifier.width(4.dp))
-                        Text(if (rotating) "旋转中…" else "旋转 90°")
+                        Text(if (rotating) "旋转中…" else "顺时针 90°")
                     }
                 }
             }
@@ -352,7 +343,9 @@ fun PhotoCropDialog(
     onUseOriginal: (() -> Unit)? = null,
 ) {
     val scope = rememberCoroutineScope()
-    val preview = remember(path) { decodeSampled(path, 1600) }
+    var quarterTurns by rememberSaveable(path) { mutableIntStateOf(0) }
+    val sourcePreview = remember(path) { decodeSampled(path, 1600) }
+    val preview = remember(sourcePreview, quarterTurns) { sourcePreview?.let { rotatePhotoBitmap(it, quarterTurns) } }
     var viewport by remember { mutableStateOf(IntSize.Zero) }
     var zoom by remember { mutableStateOf(1f) }
     var imageOffset by remember { mutableStateOf(Offset.Zero) }
@@ -361,6 +354,13 @@ fun PhotoCropDialog(
     var saving by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     val viewportMaxSide = cropViewportMaxSide()
+    LaunchedEffect(path) {
+        zoom = 1f
+        imageOffset = Offset.Zero
+        cropRect = centeredCropRect(viewport, selectedRatio.value,
+            preview?.let { it.width.toFloat() / it.height } ?: 1f)
+        error = null
+    }
 
     Dialog(
         onDismissRequest = { if (!saving) onDismiss() },
@@ -376,7 +376,21 @@ fun PhotoCropDialog(
                     .padding(16.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
-                Text("裁剪照片", style = MaterialTheme.typography.titleLarge)
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Text("裁剪照片", style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))
+                    TextButton(enabled = preview != null && !saving, onClick = {
+                        quarterTurns = (quarterTurns + 1) % 4
+                        zoom = 1f
+                        imageOffset = Offset.Zero
+                        val rotatedSize = preview?.let { IntSize(it.height, it.width) } ?: IntSize.Zero
+                        cropRect = centeredCropRect(viewport, selectedRatio.value,
+                            if (rotatedSize.height > 0) rotatedSize.width.toFloat() / rotatedSize.height else 1f)
+                        error = null
+                    }) {
+                        Icon(Icons.Filled.RotateRight, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Text("顺时针 90°")
+                    }
+                }
                 Text(
                     "双指缩放/平移照片；拖动框内移动选框，拖动四角改变大小",
                     style = MaterialTheme.typography.bodySmall,
@@ -421,7 +435,8 @@ fun PhotoCropDialog(
                                     scaleRect(cropRect, previous, size)
                                 }
                             }
-                            .pointerInput(preview, viewport) {
+                            .pointerInput(preview, viewport, saving) {
+                                if (saving) return@pointerInput
                                 val handleRadius = 30.dp.toPx()
                                 val minimumCropSize = 24.dp.toPx()
                                 awaitEachGesture {
@@ -572,7 +587,16 @@ fun PhotoCropDialog(
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
                     TextButton(onClick = onDismiss, enabled = !saving) { Text("取消") }
                     onUseOriginal?.let { useOriginal ->
-                        TextButton(onClick = useOriginal, enabled = !saving) { Text("使用原图") }
+                        TextButton(enabled = !saving, onClick = {
+                            if (quarterTurns == 0) useOriginal() else {
+                                saving = true
+                                scope.launch {
+                                    val result = withContext(Dispatchers.IO) { runCatching { rotatePhotoAndSave(path, quarterTurns) } }
+                                    saving = false
+                                    result.onSuccess { useOriginal() }.onFailure { error = it.message ?: "旋转保存失败" }
+                                }
+                            }
+                        }) { Text(if (quarterTurns == 0) "使用原图" else "使用整张") }
                     }
                     TextButton(
                         enabled = preview != null && viewport != IntSize.Zero && !saving,
@@ -590,6 +614,7 @@ fun PhotoCropDialog(
                                             zoom,
                                             imageOffset,
                                             cropRect,
+                                            quarterTurns,
                                         )
                                     }
                                 }
@@ -892,15 +917,16 @@ private fun resizeCropRect(
     }
 }
 
-private fun cropAndSave(
+internal fun cropAndSave(
     path: String,
     preview: Bitmap,
     viewport: IntSize,
     zoom: Float,
     imageOffset: Offset,
     cropRect: Rect,
+    quarterTurns: Int = 0,
 ) {
-    val source = BitmapFactory.decodeFile(path) ?: error("无法读取原始照片")
+    val source = rotatePhotoBitmap(decodeUprightPhoto(path) ?: error("无法读取原始照片"), quarterTurns)
     val bounds = cropBoundsInSource(
         previewSize = IntSize(preview.width, preview.height),
         sourceSize = IntSize(source.width, source.height),
@@ -911,20 +937,7 @@ private fun cropAndSave(
     )
     val cropped = Bitmap.createBitmap(source, bounds.left, bounds.top, bounds.width, bounds.height)
 
-    val original = File(path)
-    val temporary = File(original.parentFile, ".${original.name}.cropping")
-    try {
-        temporary.outputStream().use { output ->
-            check(cropped.compress(Bitmap.CompressFormat.JPEG, 100, output)) { "无法写入裁剪照片" }
-        }
-        if (!temporary.renameTo(original)) {
-            temporary.copyTo(original, overwrite = true)
-            temporary.delete()
-        }
-    } catch (failure: Throwable) {
-        temporary.delete()
-        throw failure
-    }
+    savePhotoBitmap(path, cropped)
 }
 
 internal data class PixelCrop(val left: Int, val top: Int, val width: Int, val height: Int)

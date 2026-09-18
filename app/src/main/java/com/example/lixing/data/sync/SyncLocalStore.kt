@@ -190,6 +190,13 @@ class SyncLocalStore @Inject constructor(
                             }
                         }
                 }
+                if (grouped.containsKey("english_review_log")) {
+                    val affected = mutableSetOf<String>()
+                    rows.filter { it.table == "english_review_log" }.forEach { row ->
+                        row.columns["entry_id"]?.value?.let { affected += it }
+                    }
+                    affected.forEach { com.example.lixing.data.repository.reconcileEnglishMemory(database.englishEntryDao(), it) }
+                }
                 bumpClockTo(rows.maxOfOrNull { it.clock } ?: 0L)
             } finally {
                 setApplying(false)

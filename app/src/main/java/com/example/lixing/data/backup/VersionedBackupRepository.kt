@@ -284,7 +284,7 @@ class VersionedBackupRepository @Inject constructor(
             "study_plan", "phase", "subject", "time_slot", "task_template",
             "daily_task", "day_record", "focus_session", "check_in_streak",
             "point_ledger", "achievement", "user_profile", "commitment",
-            "meal_record", "english_entry",
+            "meal_record", "english_entry", "english_review_log",
             "assistant_conversation", "assistant_message",
         )
     }
@@ -408,6 +408,15 @@ data class PreferencesPayload(
     val aiAssistantEnabled: Boolean = false, val aiBaseUrl: String = "",
     val aiModel: String = "", val aiGatewayUrl: String = "",
     val aiVisionEnabled: Boolean = false,
+    val englishDailyNewLimit: Int = 20,
+    val englishReviewEnabled: Boolean = true,
+    val englishHapticsEnabled: Boolean = true,
+    val englishAutoSpeak: Boolean = false,
+    val englishBritishVoice: Boolean = false,
+    val englishOnlineDictionary: Boolean = false,
+    val englishButtonX: Float = 0.92f,
+    val englishButtonY: Float = 0.75f,
+
 ) {
     fun toPreferences() = UserPreferences(
         themeSeed = runCatching { ThemeSeed.valueOf(themeSeed) }.getOrDefault(ThemeSeed.DAWN),
@@ -430,6 +439,15 @@ data class PreferencesPayload(
         permissionGuideShown = permissionGuideShown, lastMaterializedDay = lastMaterializedDay,
         aiAssistantEnabled = aiAssistantEnabled, aiBaseUrl = aiBaseUrl.ifBlank { aiGatewayUrl }, aiModel = aiModel,
         aiVisionEnabled = aiVisionEnabled,
+        englishDailyNewLimit = englishDailyNewLimit,
+        englishReviewEnabled = englishReviewEnabled,
+        englishHapticsEnabled = englishHapticsEnabled,
+        englishAutoSpeak = englishAutoSpeak,
+        englishBritishVoice = englishBritishVoice,
+        englishOnlineDictionary = englishOnlineDictionary,
+        englishButtonX = englishButtonX,
+        englishButtonY = englishButtonY,
+
     )
 
     companion object {
@@ -445,6 +463,15 @@ data class PreferencesPayload(
             p.permissionGuideShown, p.lastMaterializedDay,
             p.aiAssistantEnabled, p.aiBaseUrl, p.aiModel,
             aiVisionEnabled = p.aiVisionEnabled,
+            englishDailyNewLimit = p.englishDailyNewLimit,
+            englishReviewEnabled = p.englishReviewEnabled,
+            englishHapticsEnabled = p.englishHapticsEnabled,
+            englishAutoSpeak = p.englishAutoSpeak,
+            englishBritishVoice = p.englishBritishVoice,
+            englishOnlineDictionary = p.englishOnlineDictionary,
+            englishButtonX = p.englishButtonX,
+            englishButtonY = p.englishButtonY,
+
         )
     }
 }

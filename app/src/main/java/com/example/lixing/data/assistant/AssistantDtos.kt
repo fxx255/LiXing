@@ -6,6 +6,7 @@ import com.example.lixing.domain.plot.Axis
 import com.example.lixing.domain.plot.ExprEval
 import com.example.lixing.domain.plot.MarkArea
 import com.example.lixing.domain.plot.MarkLine
+import com.example.lixing.domain.plot.ShadeRegion
 import com.example.lixing.domain.plot.PlotSpec
 import com.example.lixing.domain.plot.Series
 import com.example.lixing.data.repository.EnglishEntryRepository
@@ -284,7 +285,7 @@ object AssistantResponseParser {
     private const val MAX_SERIES = 6
     private const val MAX_POINTS = 5000
     private const val MAX_MARKS = 12
-    private val SERIES_STYLES = setOf("line", "dashed", "marker")
+    private val SERIES_STYLES = setOf("line", "dashed", "dotted", "dashdot", "marker", "line_marker")
 
     /**
      * 解析模型给出的绘图请求（顶层 `plots` 数组，或单个 `plot` 对象）。
@@ -303,16 +304,16 @@ object AssistantResponseParser {
         }
         return items.mapNotNull { element ->
             val obj = element as? JsonObject ?: return@mapNotNull null
-            runCatching { parsePlot(obj) }
+            runCatching { parsePlot(obj, warnings) }
                 .onFailure { warnings += "有一张图表没能生成：${it.message ?: "参数不合法"}" }
                 .getOrNull()
         }
     }
 
-    private fun parsePlot(obj: JsonObject): PlotSpec {
+    private fun parsePlot(obj: JsonObject, warnings: MutableList<String>): PlotSpec {
         val seriesArray = obj["series"] as? JsonArray ?: throw IllegalArgumentException("缺少 series")
-        val series = seriesArray.take(MAX_SERIES).mapNotNull { element ->
-            parsePlotSeries(element as? JsonObject ?: return@mapNotNull null)
+        val series = seriesArray.take(MAX_SERIES).mapIndexedNotNull { index, element ->
+            parsePlotSeries(element as? JsonObject ?: return@mapIndexedNotNull null, index)
         }
         require(series.isNotEmpty()) { "series 为空" }
         return PlotSpec(
@@ -324,8 +325,8 @@ object AssistantResponseParser {
             markLines = (obj["markLines"] as? JsonArray)?.take(MAX_MARKS)
                 ?.mapNotNull { el ->
                     val o = el as? JsonObject ?: return@mapNotNull null
-                    val x = (o["x"] as? JsonPrimitive)?.doubleOrNull
-                    val y = (o["y"] as? JsonPrimitive)?.doubleOrNull
+                    val x = finiteNumber(o, "x")
+                    val y = finiteNumber(o, "y")
                     if (x == null && y == null) {
                         null
                     } else {
@@ -336,19 +337,54 @@ object AssistantResponseParser {
             markAreas = (obj["markAreas"] as? JsonArray)?.take(MAX_MARKS)
                 ?.mapNotNull { el ->
                     val o = el as? JsonObject ?: return@mapNotNull null
-                    val x0 = (o["x0"] as? JsonPrimitive)?.doubleOrNull ?: return@mapNotNull null
-                    val x1 = (o["x1"] as? JsonPrimitive)?.doubleOrNull ?: return@mapNotNull null
+                    val x0 = finiteNumber(o, "x0") ?: return@mapNotNull null
+                    val x1 = finiteNumber(o, "x1") ?: return@mapNotNull null
                     if (x1 <= x0) {
                         null
                     } else {
-                        MarkArea(x0, x1, (o["label"] as? JsonPrimitive)?.contentOrNull?.take(16))
+                        MarkArea(x0, x1, (o["label"] as? JsonPrimitive)?.contentOrNull?.take(16),
+                            y0 = finiteNumber(o, "y0"), y1 = finiteNumber(o, "y1"),
+                            colorIndex = colorIndex(o, 1), color = plotColor(o),
+                            opacity = (finiteNumber(o, "opacity") ?: .12).coerceIn(.03, .6), pattern = fillPattern(o))
                     }
                 }
                 .orEmpty(),
+            shades = (obj["shades"] as? JsonArray)?.take(MAX_MARKS)?.mapNotNull { element ->
+                val region = element as? JsonObject ?: return@mapNotNull null
+                runCatching { parseShade(region) }.onFailure { warnings += "有一处区域阴影未生成：${it.message}" }.getOrNull()
+            }.orEmpty(),
         )
     }
 
-    private fun parsePlotSeries(obj: JsonObject): Series? {
+    private fun finiteNumber(obj: JsonObject, key: String): Double? =
+        (obj[key] as? JsonPrimitive)?.doubleOrNull?.takeIf { it.isFinite() }
+    private fun colorIndex(obj: JsonObject, fallback: Int): Int = (finiteNumber(obj, "colorIndex")?.toInt() ?: fallback).coerceIn(0, 11)
+    private fun plotColor(obj: JsonObject): String? = (obj["color"] as? JsonPrimitive)?.contentOrNull?.takeIf { it.matches(Regex("#[0-9a-fA-F]{6}")) }
+    private fun fillPattern(obj: JsonObject): String = (obj["pattern"] as? JsonPrimitive)?.contentOrNull?.takeIf { it in setOf("solid", "hatched", "crosshatch") } ?: "solid"
+    private fun parseShade(obj: JsonObject): ShadeRegion {
+        val points = (obj["points"] as? JsonArray)?.take(MAX_POINTS)?.map { element ->
+            val pair = element as? JsonArray ?: error("多边形顶点无效")
+            require(pair.size >= 2) { "多边形顶点需要 x、y" }
+            val x = (pair[0] as? JsonPrimitive)?.doubleOrNull?.takeIf { it.isFinite() } ?: error("顶点横坐标无效")
+            val y = (pair[1] as? JsonPrimitive)?.doubleOrNull?.takeIf { it.isFinite() } ?: error("顶点纵坐标无效")
+            x to y
+        }
+        if (points != null) require(points.size >= 3) { "多边形至少需要三个顶点" }
+        val x0 = finiteNumber(obj, "x0")
+        val x1 = finiteNumber(obj, "x1")
+        if (points == null) require(x0 != null && x1 != null && x1 > x0) { "请给出有效的阴影横坐标区间" }
+        fun boundary(key: String): String {
+            val expression = (obj[key] as? JsonPrimitive)?.contentOrNull ?: "0"
+            require(expression.length <= 240 && expression.none { it == ';' || it == '\n' || it == '\r' }) { "阴影边界表达式无效" }
+            ExprEval.compile(expression)
+            return expression
+        }
+        return ShadeRegion(x0, x1, if (points == null) boundary("upper") else "0", if (points == null) boundary("lower") else "0",
+            points, colorIndex(obj, 0), plotColor(obj), (finiteNumber(obj, "opacity") ?: .18).coerceIn(.03, .6), fillPattern(obj),
+            (obj["label"] as? JsonPrimitive)?.contentOrNull?.take(16))
+    }
+
+    private fun parsePlotSeries(obj: JsonObject, index: Int): Series? {
         val expr = (obj["expr"] as? JsonPrimitive)?.contentOrNull?.take(240)?.takeIf { it.isNotBlank() }
         val points = (obj["points"] as? JsonArray)?.take(MAX_POINTS)?.mapNotNull { el ->
             val pair = el as? JsonArray ?: return@mapNotNull null
@@ -370,9 +406,12 @@ object AssistantResponseParser {
             style = (obj["style"] as? JsonPrimitive)?.contentOrNull
                 ?.takeIf { it in SERIES_STYLES } ?: "line",
             fill = (obj["fill"] as? JsonPrimitive)?.booleanOrNull ?: false,
-            colorIndex = (((obj["colorIndex"] as? JsonPrimitive)?.doubleOrNull)?.toInt() ?: 0)
-                .coerceIn(0, 5),
-            opacity = ((obj["opacity"] as? JsonPrimitive)?.doubleOrNull ?: 1.0).coerceIn(0.05, 1.0),
+            colorIndex = colorIndex(obj, index),
+            opacity = (finiteNumber(obj, "opacity") ?: 1.0).coerceIn(0.05, 1.0),
+            width = (finiteNumber(obj, "width") ?: 2.0).coerceIn(.75, 5.0).toFloat(),
+            color = plotColor(obj),
+            markerShape = (obj["markerShape"] as? JsonPrimitive)?.contentOrNull?.takeIf { it in setOf("circle", "open_circle", "square", "diamond", "triangle", "cross") } ?: "circle",
+            markerSize = (finiteNumber(obj, "markerSize") ?: 3.0).coerceIn(2.0, 8.0).toFloat(),
         )
     }
 
@@ -443,13 +482,13 @@ object AssistantResponseParser {
         if (arrayStart < 0) {
             // 也支持单个 `"plot": {...}` 的写法
             val single = salvageActionArray(raw, "plot") { element, _, _ ->
-                (element as? JsonObject)?.let { runCatching { parsePlot(it) }.getOrNull() }
+                (element as? JsonObject)?.let { runCatching { parsePlot(it, warnings) }.getOrNull() }
             }
             return single.take(MAX_PLOTS)
         }
         val objects = salvageActionArray(raw, "plots") { element, _, _ ->
             (element as? JsonObject)?.let { obj ->
-                runCatching { parsePlot(obj) }
+                runCatching { parsePlot(obj, warnings) }
                     .onFailure { warnings += "有一张图表没能生成：${it.message ?: "参数不合法"}" }
                     .getOrNull()
             }

@@ -29,6 +29,7 @@ data class EnglishEditorState(
 class EnglishNotebookViewModel @Inject constructor(
     private val repository: EnglishEntryRepository,
     private val prefsRepository: UserPreferencesRepository,
+    private val dictionary: com.example.lixing.data.dictionary.DictionaryRepository,
 ) : ViewModel() {
     private val _query = MutableStateFlow("")
     val query: StateFlow<String> = _query.asStateFlow()
@@ -48,6 +49,8 @@ class EnglishNotebookViewModel @Inject constructor(
         repository.observe(query, type)
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
+    val preferences = prefsRepository.preferences.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), com.example.lixing.data.prefs.UserPreferences())
+
     /** 今日背诵待办：到期复习 + 还能新学多少（新学受设置里的每日上限约束）。 */
     private val _dueCounts = MutableStateFlow(DueCounts())
     val dueCounts: StateFlow<DueCounts> = _dueCounts.asStateFlow()
@@ -58,8 +61,8 @@ class EnglishNotebookViewModel @Inject constructor(
 
     fun refreshDueCounts() {
         viewModelScope.launch {
-            val limit = prefsRepository.current().englishDailyNewLimit
-            _dueCounts.value = repository.dueCounts(dailyNewLimit = limit)
+            val prefs = prefsRepository.current()
+            _dueCounts.value = repository.dueCounts(dailyNewLimit = prefs.englishDailyNewLimit, dayStart = prefs.dayStartTime)
         }
     }
 
@@ -110,4 +113,7 @@ class EnglishNotebookViewModel @Inject constructor(
     fun consumeMessage() {
         _message.value = null
     }
+
+    suspend fun dictionaryMeaning(word: String): String? = dictionary.lookup(word)?.translation
+        ?.replace("\\n", "\n")?.takeIf { it.isNotBlank() }
 }

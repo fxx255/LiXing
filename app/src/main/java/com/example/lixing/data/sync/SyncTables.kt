@@ -23,6 +23,7 @@ internal val SYNC_TABLE_SPECS: List<SyncTableSpec> = listOf(
     SyncTableSpec("commitment", "id"),
     SyncTableSpec("meal_record", "id", setOf("photo_path")),
     SyncTableSpec("english_entry", "id"),
+    SyncTableSpec("english_review_log", "id"),
     SyncTableSpec("day_record", "date"),
     SyncTableSpec("check_in_streak", "id"),
     SyncTableSpec("user_profile", "id"),

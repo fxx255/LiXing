@@ -211,6 +211,12 @@ class SettingsViewModel @Inject constructor(
 
     // ---------------- 英语背诵 ----------------
 
+    fun setEnglishReviewEnabled(value: Boolean) = viewModelScope.launch { prefsRepository.setEnglishReviewEnabled(value) }
+    fun setEnglishHapticsEnabled(value: Boolean) = viewModelScope.launch { prefsRepository.setEnglishHapticsEnabled(value) }
+    fun setEnglishAutoSpeak(value: Boolean) = viewModelScope.launch { prefsRepository.setEnglishAutoSpeak(value) }
+    fun setEnglishBritishVoice(value: Boolean) = viewModelScope.launch { prefsRepository.setEnglishBritishVoice(value) }
+    fun setEnglishOnlineDictionary(value: Boolean) = viewModelScope.launch { prefsRepository.setEnglishOnlineDictionary(value) }
+
     fun setEnglishDailyNewLimit(count: Int) =
         viewModelScope.launch { prefsRepository.setEnglishDailyNewLimit(count) }
 

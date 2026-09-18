@@ -1,5 +1,7 @@
 package com.example.lixing.ui.screen.english
 
+import kotlinx.coroutines.launch
+
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -76,6 +78,16 @@ fun EnglishNotebookScreen(
     val editor by viewModel.editor.collectAsStateWithLifecycle()
     val message by viewModel.message.collectAsStateWithLifecycle()
     val dueCounts by viewModel.dueCounts.collectAsStateWithLifecycle()
+    val prefs by viewModel.preferences.collectAsStateWithLifecycle()
+    val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+    androidx.compose.runtime.DisposableEffect(lifecycleOwner) {
+        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) viewModel.refreshDueCounts()
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+    LaunchedEffect(prefs.englishDailyNewLimit, prefs.englishReviewEnabled) { viewModel.refreshDueCounts() }
     val snackbar = remember { SnackbarHostState() }
     var pendingDelete by remember { mutableStateOf<EnglishEntryEntity?>(null) }
 
@@ -91,6 +103,7 @@ fun EnglishNotebookScreen(
             state = state,
             onDismiss = viewModel::dismissEditor,
             onSave = viewModel::save,
+            onLookup = viewModel::dictionaryMeaning,
         )
     }
 
@@ -155,7 +168,7 @@ fun EnglishNotebookScreen(
                 }
             }
 
-            item {
+            if (prefs.englishReviewEnabled) item {
                 Surface(
                     color = MaterialTheme.colorScheme.secondaryContainer,
                     shape = LiXingRadius.Card,
@@ -319,11 +332,15 @@ private fun EnglishEntryEditorDialog(
     state: EnglishEditorState,
     onDismiss: () -> Unit,
     onSave: (EnglishEntryType, String, String) -> Unit,
+    onLookup: suspend (String) -> String?,
 ) {
     val existing = state.existing
     var type by remember(existing?.id, state.initialType) { mutableStateOf(state.initialType) }
     var content by remember(existing?.id) { mutableStateOf(existing?.content.orEmpty()) }
     var meaning by remember(existing?.id) { mutableStateOf(existing?.meaning.orEmpty()) }
+    val scope = androidx.compose.runtime.rememberCoroutineScope()
+    var lookingUp by remember { mutableStateOf(false) }
+    var lookupNote by remember { mutableStateOf<String?>(null) }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -376,6 +393,26 @@ private fun EnglishEntryEditorDialog(
                     maxLines = 7,
                     supportingText = { Text("${meaning.length}/${EnglishEntryRepository.MAX_MEANING_LENGTH}") },
                 )
+                if (type != EnglishEntryType.SENTENCE) {
+                    TextButton(enabled = content.isNotBlank() && !lookingUp, onClick = {
+                        val requestedWord = content
+                        val previousMeaning = meaning
+                        lookingUp = true
+                        scope.launch {
+                            try {
+                                val result = onLookup(requestedWord)
+                                if (content == requestedWord && meaning == previousMeaning) {
+                                    if (result != null) meaning = result.take(EnglishEntryRepository.MAX_MEANING_LENGTH)
+                                    lookupNote = if (result != null) "已填入 ECDICT 释义，可自行修改" else "本地词库未收录，请填写自己的释义"
+                                }
+                            } catch (e: Exception) {
+                                if (e is kotlinx.coroutines.CancellationException) throw e
+                                lookupNote = "查词失败，可手动填写释义"
+                            } finally { lookingUp = false }
+                        }
+                    }) { Text(if (lookingUp) "正在查词…" else "填入免费词典释义") }
+                    lookupNote?.let { Text(it, style = MaterialTheme.typography.labelSmall) }
+                }
             }
         },
         confirmButton = {

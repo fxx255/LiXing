@@ -56,6 +56,8 @@ import com.example.lixing.data.local.entity.MealRecordEntity
         CommitmentEntity::class,
         MealRecordEntity::class,
         EnglishEntryEntity::class,
+        com.example.lixing.data.local.entity.EnglishReviewLogEntity::class,
+        com.example.lixing.data.local.entity.DictionaryCacheEntity::class,
         AssistantConversationEntity::class,
         AssistantMessageEntity::class,
     ],
@@ -76,7 +78,7 @@ abstract class LiXingDatabase : RoomDatabase() {
     abstract fun assistantChatDao(): AssistantChatDao
 
     companion object {
-        const val VERSION = 12
+        const val VERSION = 13
         const val NAME = "lixing.db"
     }
 }

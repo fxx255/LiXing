@@ -70,6 +70,14 @@ data class UserPreferences(
     // ---------- 英语背诵 ----------
     /** 每天最多新学多少条（单词/短语）；到期复习不受此限制。 */
     val englishDailyNewLimit: Int = 20,
+    val englishReviewEnabled: Boolean = true,
+    val englishHapticsEnabled: Boolean = true,
+    val englishAutoSpeak: Boolean = false,
+    val englishBritishVoice: Boolean = false,
+    val englishOnlineDictionary: Boolean = false,
+    val englishButtonX: Float = 0.92f,
+    val englishButtonY: Float = 0.75f,
+
 
     // ---------- 应用内更新 ----------
     /** 启动时是否自动检查新版本。手动检查不受此限制。 */
@@ -94,7 +102,7 @@ data class UserPreferences(
     val aiBaseUrl: String = "",
     /** 模型名，如 deepseek-chat。空表示未配置。 */
     val aiModel: String = "",
-    /** 模型是否多模态。关闭时助手照片先经本地 OCR 提取文字。 */
+    /** 模型是否多模态。关闭时助手照片需由配置的拍题识题模型转写为文字。 */
     val aiVisionEnabled: Boolean = false,
     /** 是否启用联网搜索（DeepSeek / MiMo 内置）。默认开启，可在设置页关闭。 */
     val aiWebSearchEnabled: Boolean = true,

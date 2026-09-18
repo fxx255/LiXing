@@ -588,6 +588,22 @@ INSERT INTO `user_profile` (`id`, `nickname`, `total_points`, `level`, `title`, 
         }
     }
 
+    private val MIGRATION_12_13 = object : Migration(12, 13) {
+        override fun migrate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
+            db.execSQL("ALTER TABLE english_entry ADD COLUMN fsrs_stability REAL NOT NULL DEFAULT 0")
+            db.execSQL("ALTER TABLE english_entry ADD COLUMN fsrs_difficulty REAL NOT NULL DEFAULT 0")
+            db.execSQL("ALTER TABLE english_entry ADD COLUMN review_phase TEXT NOT NULL DEFAULT 'NEW'")
+            db.execSQL("ALTER TABLE english_entry ADD COLUMN review_count INTEGER NOT NULL DEFAULT 0")
+            db.execSQL("ALTER TABLE english_entry ADD COLUMN first_learned_at INTEGER")
+            // Keep existing due dates. The first FSRS review converts legacy SM-2 state lazily.
+            db.execSQL("UPDATE english_entry SET first_learned_at = review_last_at WHERE review_last_at IS NOT NULL")
+            db.execSQL("CREATE TABLE IF NOT EXISTS english_review_log (id TEXT NOT NULL PRIMARY KEY, entry_id TEXT NOT NULL, grade TEXT NOT NULL, reviewed_at INTEGER NOT NULL, session_id TEXT NOT NULL, before_state TEXT NOT NULL, after_state TEXT NOT NULL, scheduler_version TEXT NOT NULL, undone INTEGER NOT NULL DEFAULT 0, sync_modified_at INTEGER NOT NULL DEFAULT 0, FOREIGN KEY(entry_id) REFERENCES english_entry(id) ON UPDATE NO ACTION ON DELETE CASCADE)")
+            db.execSQL("CREATE INDEX IF NOT EXISTS index_english_review_log_entry_id ON english_review_log(entry_id)")
+            db.execSQL("CREATE INDEX IF NOT EXISTS index_english_review_log_reviewed_at ON english_review_log(reviewed_at)")
+            db.execSQL("CREATE TABLE IF NOT EXISTS dictionary_cache (word TEXT NOT NULL PRIMARY KEY, payload TEXT NOT NULL, fetchedAt INTEGER NOT NULL)")
+        }
+    }
+
     val ALL: Array<Migration> = arrayOf(
         MIGRATION_1_2,
         MIGRATION_2_3,
@@ -600,5 +616,6 @@ INSERT INTO `user_profile` (`id`, `nickname`, `total_points`, `level`, `title`, 
         MIGRATION_9_10,
         MIGRATION_10_11,
         MIGRATION_11_12,
+        MIGRATION_12_13,
     )
 }

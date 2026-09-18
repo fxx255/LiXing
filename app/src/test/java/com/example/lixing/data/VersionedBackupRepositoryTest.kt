@@ -134,6 +134,32 @@ class VersionedBackupRepositoryTest {
     }
 
     @Test
+    fun `english memory history and review preferences survive backup restore`() = runTest {
+        val context = RuntimeEnvironment.getApplication() as Context
+        val prefs = UserPreferencesRepository(context)
+        prefs.setEnglishDailyNewLimit(0)
+        prefs.setEnglishReviewEnabled(false)
+        prefs.setEnglishButtonPosition(.2f, .4f)
+        val dao = database.englishEntryDao()
+        val word = EnglishEntryEntity(type = EnglishEntryType.WORD, content = "abide", meaning = "遵守")
+        dao.upsert(word)
+        val review = com.example.lixing.data.repository.EnglishEntryRepository(dao, database, Dispatchers.IO)
+        review.grade(word, com.example.lixing.domain.english.ReviewGrade.HARD, "review-id", "session")
+        val before = dao.get(word.id)
+        val version = repository.createLocalVersion()
+        val file = File(version.path).copyTo(File(version.path).resolveSibling("memory_restore_${System.nanoTime()}.lixingbackup"))
+        dao.deleteAll()
+        prefs.setEnglishReviewEnabled(true)
+        repository.restore(InspectedBackup(version.copy(path = file.path), file.path))
+        assertEquals(before?.fsrsStability, dao.get(word.id)?.fsrsStability)
+        assertEquals(before?.reviewDueAt, dao.get(word.id)?.reviewDueAt)
+        assertEquals(1, dao.history(word.id).size)
+        assertEquals(0, prefs.current().englishDailyNewLimit)
+        assertEquals(false, prefs.current().englishReviewEnabled)
+        assertEquals(.2f, prefs.current().englishButtonX)
+    }
+
+    @Test
     fun `version package restores assistant message images`() = runTest {
         val context = RuntimeEnvironment.getApplication() as Context
         val chatRepository = AssistantChatRepository(database.assistantChatDao(), Dispatchers.IO)

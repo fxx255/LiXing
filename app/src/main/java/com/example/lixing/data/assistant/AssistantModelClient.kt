@@ -1121,7 +1121,13 @@ class AssistantModelClient @Inject constructor(
     - 上例先算出 x∈[-5,5] 时 x² 的峰值为 25，再给 y 范围 0~30，完整显示曲线并留少量顶部空间。省略 y.min/max 时客户端会自动求范围；应优先自行计算并显式给出有意义的范围。
     - expr 只支持单变量 x、四则运算、^ 与括号；函数限 sin/cos/tan/exp/ln/log/sqrt/abs/floor/ceil/sign 等，常量用 pi、e；隐式乘法（如 2x）可以
     - 也可以用 "points":[[x,y],...] 直接给数据点（如离散谱线、实测数据）
-    - 可选字段：markLines:[{"x":5,"label":"f_c"}]、markAreas:[{"x0":4,"x1":6,"label":"B"}]、style:"line|dashed|marker"、fill:true
+    - 序列可选 style:"line|dashed|dotted|dashdot|marker|line_marker"，依次为实线、虚线、点线、点划线、散点、折线带点；width:0.75~5，opacity:0.05~1。稠密函数采样通常用线型，marker/line_marker 优先配少量明确的 points。
+    - 颜色可用 colorIndex:0~11（蓝、金、绿、粉、紫、橙、青、黄绿、棕、红、浅蓝、灰）或 color:"#RRGGBB"。未指定时各序列自动分色；同一物理量保持同色，不同曲线同时用颜色与线型区分。深色底图应选明亮可辨识的颜色。
+    - 散点可选 markerShape:"circle|open_circle|square|diamond|triangle|cross"，markerSize:2~8。实心/空心圆可用于区分端点是否取到，曲线和点的图层高于坐标轴。
+    - 标记线 markLines:[{"x":5,"label":"f_c"}]（也支持 y）；矩形带 markAreas:[{"x0":4,"x1":6,"y0":0,"y1":2,"label":"B","colorIndex":1,"opacity":0.15,"pattern":"solid"}]。省略 y0/y1 时覆盖完整绘图区高度。
+    - 区域阴影用独立 shades 数组，不改变曲线数据。例如曲线与 x 轴间面积："shades":[{"x0":0,"x1":2,"upper":"x^2","lower":"0","colorIndex":0,"opacity":0.2,"pattern":"hatched","label":"积分区域"}]。两曲线之间替换 upper/lower（均使用 expr 的安全表达式语法），不要用整条竖带代替曲边区域。
+    - 不规则区域用闭合多边形："shades":[{"points":[[0,0],[2,0],[1,2]],"colorIndex":2,"opacity":0.2,"pattern":"solid"}]。pattern 可为 solid（半透明填充）、hatched（斜线）、crosshatch（交叉斜线）；opacity:0.03~0.6，通常 0.12~0.3。阴影必须对应真实边界与题意，不得遮盖曲线或凭空增加区域；每图最多 12 块。
+    - 旧的 fill:true 仍支持整条曲线到零基线的淡色填充；需要限定区间或两曲线夹区时用 shades。
     - 坐标范围尽量给全（min/max），方便客户端确定刻度；一张图最多 6 条曲线，一次最多 4 张图
     - 图内的 title / label / 标注文字：**可以直接写 LaTeX**（客户端会用公式排版引擎渲染），例如 S_c(f)（写作 ${'$'}S_c(f)${'$'}）、\\frac{N_0}{2}、\\Delta f；不想写 LaTeX 时用纯文本或 Unicode 符号（π、²、≤、f_c）也可以，两种都支持
     - 图内公式请保持简短（标题/轴标签一两项即可），**不要放整段推导**：图里排版空间有限，长公式会被挤小、看不清

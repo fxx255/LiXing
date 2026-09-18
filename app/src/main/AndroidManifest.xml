@@ -27,6 +27,7 @@
 
     <!-- Android 11+ package visibility for the system speech recognition service. -->
     <queries>
+        <intent><action android:name="android.intent.action.TTS_SERVICE" /></intent>
         <intent>
             <action android:name="android.speech.RecognitionService" />
         </intent>

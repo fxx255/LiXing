@@ -1,5 +1,9 @@
 package com.example.lixing.ui.screen.settings
 
+import android.content.pm.PackageManager
+import android.Manifest
+import androidx.core.content.ContextCompat
+
 import android.content.Context
 import android.content.Intent
 import android.location.Geocoder
@@ -685,15 +689,20 @@ private fun EnglishReviewSection(
     viewModel: SettingsViewModel,
     prefs: com.example.lixing.data.prefs.UserPreferences,
 ) {
-    SliderRow(
-        label = "每日新学上限",
-        value = "${prefs.englishDailyNewLimit} 条",
-        subtitle = "每天最多新学这么多单词/短语；到期需要复习的不受此限制",
-        sliderValue = prefs.englishDailyNewLimit.toFloat(),
-        range = 5f..100f,
-        steps = 18,
-        onChange = { viewModel.setEnglishDailyNewLimit(it.toInt()) },
-    )
+    SwitchRow("开启英语背诵", "关闭后保留积累和记忆记录", prefs.englishReviewEnabled, viewModel::setEnglishReviewEnabled)
+    if (prefs.englishReviewEnabled) {
+        SliderRow(
+            label = "每日新学上限", value = "${prefs.englishDailyNewLimit} 条",
+            subtitle = "0 表示只复习；按每日开始时间计数，到期复习不限量",
+            sliderValue = prefs.englishDailyNewLimit.toFloat(), range = 0f..100f, steps = 19,
+            onChange = { viewModel.setEnglishDailyNewLimit(it.toInt()) },
+        )
+        SwitchRow("评分震动", "每次成功评分后轻震一次", prefs.englishHapticsEnabled, viewModel::setEnglishHapticsEnabled)
+        SwitchRow("自动朗读", "展示新单词时播放系统英文发音", prefs.englishAutoSpeak, viewModel::setEnglishAutoSpeak)
+        SwitchRow("使用英式发音", "关闭使用美式发音；取决于系统已安装语音", prefs.englishBritishVoice, viewModel::setEnglishBritishVoice)
+        SwitchRow("免费联网补充", "按需向 Free Dictionary API 查询当前单词；默认仅用本地词库", prefs.englishOnlineDictionary, viewModel::setEnglishOnlineDictionary)
+        Text("复习按记忆表现动态安排。认识：正确回忆；模糊：能回忆但迟疑；忘记：看答案才想起。", style = MaterialTheme.typography.bodySmall)
+    }
 }
 
 /**
@@ -823,6 +832,9 @@ private fun AssistantIdentitySection(
  * 再用 Geocoder 反解出城市级名称。任何一步失败都返回 null，由调用方提示。
  */
 private suspend fun resolveCityName(context: Context): String? = withContext(Dispatchers.IO) {
+    if (ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_COARSE_LOCATION) != PackageManager.PERMISSION_GRANTED &&
+        ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED
+    ) return@withContext null
     val lm = context.getSystemService(Context.LOCATION_SERVICE) as? LocationManager
         ?: return@withContext null
     val enabled = listOf(
@@ -1227,8 +1239,8 @@ private fun AiAssistantSection(viewModel: SettingsViewModel, prefs: com.example.
             val mealVisionId by viewModel.mealVisionProfileId.collectAsStateWithLifecycle()
             VisionProfilePicker(
                 label = "拍题识题模型（多模态）",
-                noneLabel = "不指定（本地 OCR 兜底）",
-                subtitle = "当前模型为纯文本模型时，先由该模型转写照片题目再作答；不指定时用离线本地 OCR。",
+                noneLabel = "不指定",
+                subtitle = "当前模型可看图时直接读取图片；纯文本模型需指定拍题识题模型，先转写照片题目再作答。",
                 profiles = profiles,
                 currentId = questionVisionId,
                 onSelect = viewModel::setQuestionVisionProfile,
@@ -1423,7 +1435,7 @@ private fun AiProfileEditorDialog(
                 )
                 SwitchRow(
                     label = "多模态模型（可看图）",
-                    subtitle = "开启时直接发图；关闭时只发送本地 OCR 文字",
+                    subtitle = "开启后可直接接收图片；关闭后需配置拍题识题模型来读取图片",
                     checked = visionEnabled,
                     onCheckedChange = { visionEnabled = it },
                 )

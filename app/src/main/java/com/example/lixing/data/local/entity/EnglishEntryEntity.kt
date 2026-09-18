@@ -51,6 +51,16 @@ data class EnglishEntryEntity(
     /** 上次复习时间。 */
     @ColumnInfo(name = "review_last_at")
     val reviewLastAt: Instant? = null,
+    @ColumnInfo(name = "fsrs_stability", defaultValue = "0")
+    val fsrsStability: Double = 0.0,
+    @ColumnInfo(name = "fsrs_difficulty", defaultValue = "0")
+    val fsrsDifficulty: Double = 0.0,
+    @ColumnInfo(name = "review_phase", defaultValue = "'NEW'")
+    val reviewPhase: String = "NEW",
+    @ColumnInfo(name = "review_count", defaultValue = "0")
+    val reviewCount: Int = 0,
+    @ColumnInfo(name = "first_learned_at")
+    val firstLearnedAt: Instant? = null,
 ) {
     companion object {
         const val DEFAULT_EASE = 2.5

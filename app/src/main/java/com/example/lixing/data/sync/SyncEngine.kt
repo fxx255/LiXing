@@ -53,32 +53,32 @@ class SyncEngine @Inject constructor(
             var cursor = cursors[peer] ?: 0L
             val hasBaseline = cursor > 0L
 
-            // 1) 基线快照：只有还没接过这个设备的基线时才拉
+            // Validate the peer schema before either snapshot or incremental rows.
             val snapshotName = SyncFiles.snapshot(peer)
-            if (!hasBaseline && files.any { it.name == snapshotName }) {
+            if (files.none { it.name == snapshotName }) {
+                errors += "$peer 尚无完整同步快照，稍后重试"
+                continue
+            }
+            val snapshot = try {
                 val text = transport.read(snapshotName).orEmpty()
                 downloadedBytes += text.toByteArray(Charsets.UTF_8).size
-                runCatching { json.decodeFromString<SyncSnapshot>(text) }
-                    .onSuccess { snapshot ->
-                        when {
-                            snapshot.format != SYNC_FORMAT ->
-                                errors += "$peer 的同步协议版本为 ${snapshot.format}（本机 $SYNC_FORMAT），已跳过"
-
-                            snapshot.databaseVersion != LiXingDatabase.VERSION ->
-                                errors += "$peer 的数据库版本为 ${snapshot.databaseVersion}，" +
-                                    "与本机 ${LiXingDatabase.VERSION} 不一致，已跳过同步"
-
-                            else -> {
-                                val outcome = store.applyRemote(snapshot.rows, peer, localDeviceId)
-                                appliedRows += outcome.appliedRows
-                                appliedTombstones += outcome.appliedTombstones
-                                skippedRows += outcome.skippedRows
-                                errors += outcome.errors
-                                cursor = maxOf(cursor, snapshot.clock, snapshot.rows.maxOfOrNull { it.clock } ?: 0L)
-                            }
-                        }
-                    }
-                    .onFailure { errors += "$peer 的快照无法解析：${it.safeMessage()}" }
+                json.decodeFromString<SyncSnapshot>(text)
+            } catch (e: Exception) {
+                if (e is kotlinx.coroutines.CancellationException) throw e
+                errors += "$peer 的快照无法解析：${e.safeMessage()}"
+                continue
+            }
+            if (snapshot.format != SYNC_FORMAT || snapshot.databaseVersion != LiXingDatabase.VERSION) {
+                errors += "$peer 的数据库或协议版本不同，请将两端更新至同一版本后同步"
+                continue
+            }
+            if (!hasBaseline || snapshot.clock > cursor) {
+                val outcome = store.applyRemote(if (hasBaseline) snapshot.rows.filter { it.clock > cursor } else snapshot.rows, peer, localDeviceId)
+                appliedRows += outcome.appliedRows
+                appliedTombstones += outcome.appliedTombstones
+                skippedRows += outcome.skippedRows
+                errors += outcome.errors
+                cursor = maxOf(cursor, snapshot.clock, snapshot.rows.maxOfOrNull { it.clock } ?: 0L)
             }
 
             // 2) 增量日志：只处理时钟大于游标的部分
@@ -112,7 +112,8 @@ class SyncEngine @Inject constructor(
         val hasSnapshot = files.any { it.name == ownSnapshotName }
         val logSize = files.firstOrNull { it.name == ownLogName }?.sizeBytes ?: 0L
         // 没发过基线（新设备或刚恢复过备份）也要重写快照，否则历史数据永远推不上去
-        val writeSnapshot = !hasSnapshot || logSize > COMPACT_LOG_BYTES || selfCursor < 0L
+        val writeSnapshot = !hasSnapshot || logSize > COMPACT_LOG_BYTES || selfCursor < 0L ||
+            cursors["__database_version__"] != LiXingDatabase.VERSION.toLong()
 
         val changes = store.readChangesSince(if (writeSnapshot) -1L else selfCursor)
         var uploadedBytes = 0
@@ -142,6 +143,7 @@ class SyncEngine @Inject constructor(
         }
 
         store.saveCursor(SELF_CURSOR_KEY, clock)
+        store.saveCursor("__database_version__", LiXingDatabase.VERSION.toLong())
 
         SyncReport(
             pushedRows = changes.count { !it.deleted },

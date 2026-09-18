@@ -1,6 +1,7 @@
 package com.example.lixing.data.prefs
 
 import androidx.datastore.preferences.core.booleanPreferencesKey
+import androidx.datastore.preferences.core.floatPreferencesKey
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
@@ -44,6 +45,14 @@ internal object PreferencesKeys {
     // ---------- 英语背诵 ----------
 /** 每天最多新学多少条单词/短语（复习不限量）。 */
 val ENGLISH_DAILY_NEW_LIMIT = intPreferencesKey("english_daily_new_limit")
+val ENGLISH_REVIEW_ENABLED = booleanPreferencesKey("english_review_enabled")
+val ENGLISH_HAPTICS_ENABLED = booleanPreferencesKey("english_haptics_enabled")
+val ENGLISH_AUTO_SPEAK = booleanPreferencesKey("english_auto_speak")
+val ENGLISH_BRITISH_VOICE = booleanPreferencesKey("english_british_voice")
+val ENGLISH_ONLINE_DICTIONARY = booleanPreferencesKey("english_online_dictionary")
+val ENGLISH_BUTTON_X = floatPreferencesKey("english_button_x")
+val ENGLISH_BUTTON_Y = floatPreferencesKey("english_button_y")
+
 
 // ---------- 应用内更新 ----------
 /** 上一次记录到的本机版本号；启动时发现变大了 = 刚完成一次覆盖安装 → 清理安装包。 */
@@ -78,7 +87,7 @@ val UPDATE_LAST_SEEN_VERSION_CODE = intPreferencesKey("update_last_seen_version_
     val AI_BASE_URL = stringPreferencesKey("ai_base_url")
     /** 模型名，如 deepseek-chat / kimi-latest / glm-4-flash。 */
     val AI_MODEL = stringPreferencesKey("ai_model")
-    /** 接入的模型是否支持图片输入（多模态）。关闭时照片先走本地 OCR。 */
+    /** 接入的模型是否支持图片输入（多模态）。关闭时照片需由配置的拍题识题模型转写。 */
     val AI_VISION_ENABLED = booleanPreferencesKey("ai_vision_enabled")
     /** 是否启用联网搜索（DeepSeek / MiMo 内置）。默认开启。 */
     val AI_WEB_SEARCH_ENABLED = booleanPreferencesKey("ai_web_search_enabled")

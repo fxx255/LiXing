@@ -5,7 +5,12 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.graphics.BitmapFactory
+import com.example.lixing.ui.photo.PhotoEdits
+import com.example.lixing.ui.photo.decodeUprightPhoto
+import com.example.lixing.ui.photo.rotatePhotoAndSave
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import androidx.compose.material.icons.filled.RotateRight
 import android.os.Bundle
 import android.os.SystemClock
 import android.speech.RecognitionListener
@@ -169,14 +174,6 @@ import java.time.Instant
 import java.time.format.DateTimeFormatter
 import java.util.Locale
 import java.util.concurrent.Executors
-
-private val QUICK_PROMPTS = listOf(
-    "分析我最近 7 天的薄弱科目",
-    "帮我把上午的安排调整得更宽松",
-    "用我的英语积累出一组小测验",
-    "把这段话里的好词好句记入英语积累",
-    "我今天的任务是不是太多了？",
-)
 
 private data class PhotoViewerState(val paths: List<String>, val initialIndex: Int)
 
@@ -708,43 +705,15 @@ fun AssistantScreen(
                                 enabled = !state.busy,
                             )
                         }
-                        Row(
-                            modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        ) {
-                            Text(
-                                "快捷：",
-                                style = MaterialTheme.typography.labelMedium,
-                                modifier = Modifier.align(Alignment.CenterVertically),
-                            )
-                            QUICK_PROMPTS.forEach { prompt ->
-                                FilterChip(
-                                    selected = false,
-                                    onClick = {
-                                        viewModel.updateInput(prompt)
-                                        extrasExpanded = false
-                                    },
-                                    label = { Text(prompt) },
-                                )
-                            }
-                        }
                         state.lastContextNote?.let { note ->
                             Text(
-                                // 与输入框上方的「本次将附带」区分开：这条是**上一轮实际**带上的，
-                                // 包含模型按问题自动补充的部分，所以两者不一致是正常的。
+                                // 显示上一轮实际附带的资料，包含模型按问题自动补充的部分。
                                 "上轮实际附带：$note",
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                         }
                     }
-                    // 常驻显示「本次将附带什么」。
-                    //
-                    // 以前只有折叠面板里的「上次附带：…」，用户勾完完全不知道有没有生效
-                    // （真实反馈：「勾选了计划选项，但是没有用，是不是按钮有问题」）——
-                    // 按钮没问题，是**没有任何反馈**。这里把当前勾选状态直接摆在输入框上方，
-                    // 勾一下就能看到它变了。
-                    ContextHintRow(selected = state.contextKinds)
                     if (state.pendingPhotoPaths.isNotEmpty()) {
                         PendingPhotoRow(
                             paths = state.pendingPhotoPaths,
@@ -892,7 +861,7 @@ fun AssistantScreen(
                         ) {
                             Icon(
                                 if (extrasExpanded) Icons.Filled.Close else Icons.Filled.Add,
-                                contentDescription = if (extrasExpanded) "收起附带和快捷提问" else "展开附带和快捷提问",
+                                contentDescription = if (extrasExpanded) "收起更多选项" else "展开更多选项",
                             )
                         }
                         IconButton(
@@ -1163,32 +1132,6 @@ private fun NotEnabledPanel(padding: PaddingValues) {
     }
 }
 
-/**
- * 输入框上方的常驻提示：**本次将附带哪些本机数据**。
- *
- * 为什么要有它：上下文到底有没有附带，以前只有折叠面板里的「上次附带：…」能看出来，
- * 用户勾选后得不到任何反馈 —— 真实反馈就是「勾选了计划选项，但是没有用，
- * 是不是按钮有问题」。按钮没问题，是**缺反馈**。
- *
- * 只列**用户勾选**的那几项：模型按问题自动补充的部分要等发送时才知道，
- * 提前显示会误导（显示了却没带，比不显示更糟）。
- */
-@Composable
-private fun ContextHintRow(selected: Set<AssistantContextKind>) {
-    // 按 enum 声明顺序排列，而不是 Set 的迭代顺序，免得每次重组文字都在跳
-    val labels = AssistantContextKind.entries.filter { it in selected }.map { it.label }
-    val text = if (labels.isEmpty()) {
-        "本次将附带：无（点右侧「+」可勾选要附带的资料）"
-    } else {
-        "本次将附带：" + labels.joinToString("、")
-    }
-    Text(
-        text = text,
-        style = MaterialTheme.typography.labelSmall,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-    )
-}
-
 @Composable
 private fun EmptyHint() {
     Surface(color = MaterialTheme.colorScheme.primaryContainer, shape = LiXingRadius.Card) {
@@ -1275,7 +1218,8 @@ internal fun InlineGeneratedImage(path: String, onClick: () -> Unit) {
     // 恢复历史消息时也可能撞上存储尚未就绪。remember 的 key 带上 attempt，
     // 重试时才会重新尝试解码。
     var decodeAttempt by remember(path) { mutableIntStateOf(0) }
-    val bitmap = remember(path, decodeAttempt) {
+    val photoRevision by PhotoEdits.revision.collectAsStateWithLifecycle()
+    val bitmap = remember(path, decodeAttempt, photoRevision) {
         val file = java.io.File(path)
         // 文件不存在就直接返回 null，不必走一遍解码
         if (!file.exists() || file.length() <= 0L) null else decodeSampledBitmap(path, 1600)
@@ -2168,7 +2112,8 @@ private fun AssistantThumbnail(
     modifier: Modifier,
     onClick: () -> Unit,
 ) {
-    val bitmap = remember(path) { decodeSampledBitmap(path, 320) }
+    val photoRevision by PhotoEdits.revision.collectAsStateWithLifecycle()
+    val bitmap = remember(path, photoRevision) { decodeSampledBitmap(path, 320) }
     if (bitmap != null) {
         Image(
             bitmap = bitmap.asImageBitmap(),
@@ -2190,26 +2135,47 @@ private fun AssistantThumbnail(
 
 @Composable
 internal fun PhotoViewerDialog(paths: List<String>, initialIndex: Int, onDismiss: () -> Unit) {
+    val scope = rememberCoroutineScope()
+    var rotating by remember { mutableStateOf(false) }
+    var rotateError by remember { mutableStateOf<String?>(null) }
     val pagerState = rememberPagerState(
         initialPage = initialIndex.coerceIn(0, (paths.size - 1).coerceAtLeast(0)),
         pageCount = { paths.size },
     )
     Dialog(
-        onDismissRequest = onDismiss,
+        onDismissRequest = { if (!rotating) onDismiss() },
         properties = DialogProperties(usePlatformDefaultWidth = false),
     ) {
         Box(
             modifier = Modifier.fillMaxSize().background(Color.Black),
             contentAlignment = Alignment.Center,
         ) {
-            HorizontalPager(state = pagerState, modifier = Modifier.fillMaxSize()) { page ->
+            HorizontalPager(state = pagerState, modifier = Modifier.fillMaxSize(), userScrollEnabled = !rotating) { page ->
                 ZoomablePhoto(
                     path = paths[page],
                     pageLabel = "照片大图 ${page + 1}",
-                    onTapToClose = onDismiss,
-                    onSwipeDownToClose = onDismiss,
+                    onTapToClose = { if (!rotating) onDismiss() },
+                    onSwipeDownToClose = { if (!rotating) onDismiss() },
                 )
             }
+            TextButton(
+                enabled = !rotating && paths.isNotEmpty(),
+                modifier = Modifier.align(Alignment.TopStart).padding(12.dp),
+                onClick = {
+                    val path = paths.getOrNull(pagerState.currentPage) ?: return@TextButton
+                    rotating = true
+                    rotateError = null
+                    scope.launch {
+                        val result = withContext(Dispatchers.IO) { runCatching { rotatePhotoAndSave(path) } }
+                        rotating = false
+                        result.onFailure { rotateError = it.message ?: "旋转失败，请重试" }
+                    }
+                },
+            ) {
+                Icon(Icons.Filled.RotateRight, contentDescription = null, tint = Color.White)
+                Text(if (rotating) "旋转中…" else "顺时针 90°", color = Color.White)
+            }
+            rotateError?.let { Text(it, color = Color.White, modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 60.dp)) }
             if (paths.size > 1) {
                 Text(
                     text = "${pagerState.currentPage + 1}/${paths.size}",
@@ -2219,6 +2185,7 @@ internal fun PhotoViewerDialog(paths: List<String>, initialIndex: Int, onDismiss
             }
             IconButton(
                 onClick = onDismiss,
+                enabled = !rotating,
                 modifier = Modifier.align(Alignment.TopEnd).padding(12.dp),
             ) {
                 Icon(Icons.Filled.Close, contentDescription = "关闭", tint = Color.White)
@@ -2253,10 +2220,11 @@ private fun ZoomablePhoto(
     // 未放大时的下拉位移（用于「下拉关闭」）。放在 pointerInput 外面：
     // detectTransformGestures 是挂起函数，手势回调里读写局部变量会随重组丢失。
     var dragDown by remember { mutableFloatStateOf(0f) }
-    val bitmap = remember(path) { decodeSampledBitmap(path, 2400) }
+    val photoRevision by PhotoEdits.revision.collectAsStateWithLifecycle()
+    val bitmap = remember(path, photoRevision) { decodeSampledBitmap(path, 2400) }
 
     // 换页时复位，避免上一张的缩放/位移带到下一张
-    LaunchedEffect(path) {
+    LaunchedEffect(path, photoRevision) {
         scale.snapTo(1f)
         offsetX.snapTo(0f)
         offsetY.snapTo(0f)
@@ -2400,14 +2368,8 @@ private fun ZoomablePhoto(
     }
 }
 
-private fun decodeSampledBitmap(path: String, maxDimension: Int): android.graphics.Bitmap? = runCatching {
-    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-    BitmapFactory.decodeFile(path, bounds)
-    if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return@runCatching null
-    var sample = 1
-    while (maxOf(bounds.outWidth, bounds.outHeight) / sample > maxDimension * 2) sample *= 2
-    BitmapFactory.decodeFile(path, BitmapFactory.Options().apply { inSampleSize = sample })
-}.getOrNull()
+private fun decodeSampledBitmap(path: String, maxDimension: Int): android.graphics.Bitmap? =
+    decodeUprightPhoto(path, maxDimension * 2)
 
 /**
  * 挂在产生待确认项的那条 assistant 气泡下面的入口按钮。

@@ -64,6 +64,14 @@ class UserPreferencesRepository @Inject constructor(
             updateAutoEnabled = p[PreferencesKeys.UPDATE_AUTO_ENABLED] ?: true,
             updateWifiOnly = p[PreferencesKeys.UPDATE_WIFI_ONLY] ?: true,
             englishDailyNewLimit = p[PreferencesKeys.ENGLISH_DAILY_NEW_LIMIT] ?: 20,
+            englishReviewEnabled = p[PreferencesKeys.ENGLISH_REVIEW_ENABLED] ?: true,
+            englishHapticsEnabled = p[PreferencesKeys.ENGLISH_HAPTICS_ENABLED] ?: true,
+            englishAutoSpeak = p[PreferencesKeys.ENGLISH_AUTO_SPEAK] ?: false,
+            englishBritishVoice = p[PreferencesKeys.ENGLISH_BRITISH_VOICE] ?: false,
+            englishOnlineDictionary = p[PreferencesKeys.ENGLISH_ONLINE_DICTIONARY] ?: false,
+            englishButtonX = p[PreferencesKeys.ENGLISH_BUTTON_X] ?: 0.92f,
+            englishButtonY = p[PreferencesKeys.ENGLISH_BUTTON_Y] ?: 0.75f,
+
             onboardingDone = p[PreferencesKeys.ONBOARDING_DONE] ?: false,
             permissionGuideShown = p[PreferencesKeys.PERMISSION_GUIDE_SHOWN] ?: false,
             lastMaterializedDay = p[PreferencesKeys.LAST_MATERIALIZED_DAY] ?: 0L,
@@ -176,7 +184,17 @@ class UserPreferencesRepository @Inject constructor(
     // ---------- 英语背诵 ----------
 
     suspend fun setEnglishDailyNewLimit(count: Int) =
-        edit { it[PreferencesKeys.ENGLISH_DAILY_NEW_LIMIT] = count.coerceIn(5, 100) }
+        edit { it[PreferencesKeys.ENGLISH_DAILY_NEW_LIMIT] = count.coerceIn(0, 100) }
+
+    suspend fun setEnglishReviewEnabled(value: Boolean) = edit { it[PreferencesKeys.ENGLISH_REVIEW_ENABLED] = value }
+    suspend fun setEnglishHapticsEnabled(value: Boolean) = edit { it[PreferencesKeys.ENGLISH_HAPTICS_ENABLED] = value }
+    suspend fun setEnglishAutoSpeak(value: Boolean) = edit { it[PreferencesKeys.ENGLISH_AUTO_SPEAK] = value }
+    suspend fun setEnglishBritishVoice(value: Boolean) = edit { it[PreferencesKeys.ENGLISH_BRITISH_VOICE] = value }
+    suspend fun setEnglishOnlineDictionary(value: Boolean) = edit { it[PreferencesKeys.ENGLISH_ONLINE_DICTIONARY] = value }
+    suspend fun setEnglishButtonPosition(x: Float, y: Float) = edit {
+        it[PreferencesKeys.ENGLISH_BUTTON_X] = x.coerceIn(0f, 1f)
+        it[PreferencesKeys.ENGLISH_BUTTON_Y] = y.coerceIn(0f, 1f)
+    }
 
     // ---------- 应用内更新 ----------
 
@@ -297,6 +315,14 @@ class UserPreferencesRepository @Inject constructor(
             out[PreferencesKeys.MAIMEMO_ENABLED] = p.maimemoEnabled
             out[PreferencesKeys.MAIMEMO_AUTO_SYNC] = localMaimemoAutoSync ?: p.maimemoAutoSync
             out[PreferencesKeys.ENGLISH_DAILY_NEW_LIMIT] = p.englishDailyNewLimit
+            out[PreferencesKeys.ENGLISH_REVIEW_ENABLED] = p.englishReviewEnabled
+            out[PreferencesKeys.ENGLISH_HAPTICS_ENABLED] = p.englishHapticsEnabled
+            out[PreferencesKeys.ENGLISH_AUTO_SPEAK] = p.englishAutoSpeak
+            out[PreferencesKeys.ENGLISH_BRITISH_VOICE] = p.englishBritishVoice
+            out[PreferencesKeys.ENGLISH_ONLINE_DICTIONARY] = p.englishOnlineDictionary
+            out[PreferencesKeys.ENGLISH_BUTTON_X] = p.englishButtonX
+            out[PreferencesKeys.ENGLISH_BUTTON_Y] = p.englishButtonY
+
             out[PreferencesKeys.AI_ASSISTANT_ENABLED] = p.aiAssistantEnabled
             out[PreferencesKeys.AI_BASE_URL] = p.aiBaseUrl
             out[PreferencesKeys.AI_MODEL] = p.aiModel
