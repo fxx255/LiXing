@@ -165,9 +165,9 @@ class VersionedBackupRepository @Inject constructor(
                 sqlDb.query("PRAGMA foreign_key_check").use { cursor ->
                     if (cursor.moveToFirst()) error("备份数据外键校验失败")
                 }
+                syncStore.resetAfterRestore()
             }
         }
-        syncStore.resetAfterRestore()
         prefsRepository.replaceAll(payload.preferences.toPreferences())
         source.delete()
         RestoreResult(inspected.version, recovery)

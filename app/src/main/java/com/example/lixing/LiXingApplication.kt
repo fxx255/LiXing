@@ -72,7 +72,7 @@ class LiXingApplication : Application(), Configuration.Provider {
             reminderScheduler.scheduleUpcoming()
         }
 
-        // 多端同步：应用启动后跑第一次同步；之后监听本地变更，操作停止 30 秒后自动同步。
+        // 多端同步：启动、前台定期拉取、本地变更停稳后同步；失败保留待办并退避重试。
         // 循环内部自己检查「已连接 / 自动开关 / 仅 Wi-Fi」，未配置时只是空转轮询。
         syncRepository.startMonitoring(appScope)
 

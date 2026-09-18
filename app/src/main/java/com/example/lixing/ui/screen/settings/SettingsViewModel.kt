@@ -197,17 +197,23 @@ class SettingsViewModel @Inject constructor(
         viewModelScope.launch { syncRepository.connect(folderUrl, account, password) }
     }
 
-    fun disconnectWebDav() = syncRepository.disconnect()
+    fun disconnectWebDav() { viewModelScope.launch { syncRepository.disconnect() } }
 
     fun syncWebDavNow() {
         viewModelScope.launch { syncRepository.syncNow() }
     }
 
     fun setSyncAutoEnabled(enabled: Boolean) =
-        viewModelScope.launch { prefsRepository.setSyncAutoEnabled(enabled) }
+        viewModelScope.launch {
+            prefsRepository.setSyncAutoEnabled(enabled)
+            if (enabled) syncRepository.requestAutoSync()
+        }
 
     fun setSyncWifiOnly(enabled: Boolean) =
-        viewModelScope.launch { prefsRepository.setSyncWifiOnly(enabled) }
+        viewModelScope.launch {
+            prefsRepository.setSyncWifiOnly(enabled)
+            syncRepository.requestAutoSync()
+        }
 
     // ---------------- 英语背诵 ----------------
 

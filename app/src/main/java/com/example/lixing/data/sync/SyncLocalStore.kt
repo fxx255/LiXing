@@ -56,11 +56,13 @@ class SyncLocalStore @Inject constructor(
     /** 置位期间触发器不记时钟、不写墓碑——合并远端数据与恢复备份都靠它。 */
     suspend fun withApplyingGuard(block: suspend () -> Unit) {
         withContext(io) {
-            setApplying(true)
-            try {
-                block()
-            } finally {
-                setApplying(false)
+            database.withTransaction {
+                setApplying(true)
+                try {
+                    block()
+                } finally {
+                    setApplying(false)
+                }
             }
         }
     }
@@ -75,7 +77,7 @@ class SyncLocalStore @Inject constructor(
     // ---------------- 读本端变更 ----------------
 
     /** 读取时钟大于 cursor 的全部变更（含墓碑）。cursor 传 -1 即全量，用于写基线快照。 */
-    suspend fun readChangesSince(cursor: Long): List<SyncRow> = withContext(io) {
+    suspend fun readChangesSince(cursor: Long): List<SyncRow> = database.withTransaction {
         val rows = mutableListOf<SyncRow>()
         SYNC_TABLE_SPECS.forEach { spec -> rows += readRows(spec, cursor) }
         rows += readTombstones(cursor)
@@ -108,6 +110,7 @@ class SyncLocalStore @Inject constructor(
                             clock = c.getLong(clockIndex),
                             deleted = false,
                             columns = columns,
+                            originDeviceId = originOf(spec.name, rowIdOf(c, pkIndex, spec), c.getLong(clockIndex)).orEmpty(),
                         ),
                     )
                 }
@@ -127,6 +130,7 @@ class SyncLocalStore @Inject constructor(
                         rowId = c.getString(1),
                         clock = c.getLong(2),
                         deleted = true,
+                        originDeviceId = originOf(c.getString(0), c.getString(1), c.getLong(2)).orEmpty(),
                     ),
                 )
             }
@@ -158,11 +162,11 @@ class SyncLocalStore @Inject constructor(
                 val grouped = rows.groupBy { it.table }
                 // 删除按子→父，写入按父→子，外键才不会在半途断掉
                 for (spec in SYNC_TABLE_SPECS.asReversed()) {
-                    grouped[spec.name].orEmpty().filter { it.deleted }.forEach { row ->
+                    grouped[spec.name].orEmpty().filter { it.deleted }.forEach { incoming ->
+                        val row = normalizeIncoming(spec, incoming, remoteDeviceId)
                         when (decide(spec, row, localDeviceId, remoteDeviceId)) {
                             SyncMerger.Decision.APPLY_DELETE -> {
-                                deleteRow(spec, row, errors)
-                                appliedTombstones++
+                                if (deleteRow(spec, row, errors)) appliedTombstones++ else skipped++
                             }
                             SyncMerger.Decision.APPLY_UPSERT -> {
                                 // 远端把删掉的行又建回来了
@@ -176,15 +180,15 @@ class SyncLocalStore @Inject constructor(
                 for (spec in SYNC_TABLE_SPECS) {
                     grouped[spec.name].orEmpty().filter { !it.deleted }
                         .sortedBy { it.clock }
-                        .forEach { row ->
+                        .forEach { incoming ->
+                            val row = normalizeIncoming(spec, incoming, remoteDeviceId)
                             when (decide(spec, row, localDeviceId, remoteDeviceId)) {
                                 SyncMerger.Decision.APPLY_UPSERT -> {
                                     if (upsertRow(spec, row, errors)) appliedRows++
                                     else skipped++
                                 }
                                 SyncMerger.Decision.APPLY_DELETE -> {
-                                    deleteRow(spec, row, errors)
-                                    appliedTombstones++
+                                    if (deleteRow(spec, row, errors)) appliedTombstones++ else skipped++
                                 }
                                 SyncMerger.Decision.KEEP_LOCAL -> skipped++
                             }
@@ -232,7 +236,62 @@ class SyncLocalStore @Inject constructor(
             "SELECT `deleted_at` FROM `sync_tombstone` WHERE `table_name` = ? AND `row_id` = ? LIMIT 1",
             arrayOf(spec.name, rowId),
         ).use { c -> if (c.moveToFirst()) c.getLong(0) else null }
-        return SyncMerger.LocalState(rowClock, tombstoneClock)
+        return SyncMerger.LocalState(rowClock, tombstoneClock, originOf(spec.name, rowId, maxOf(rowClock ?: 0, tombstoneClock ?: 0)))
+    }
+
+    private fun originOf(table: String, id: String, clock: Long): String? = db.query(
+        "SELECT `origin` FROM `sync_row_version` WHERE `table_name` = ? AND `row_id` = ? AND `clock` = ?",
+        arrayOf(table, id, clock),
+    ).use { if (it.moveToFirst()) it.getString(0) else null }
+
+    private fun recordOrigin(row: SyncRow) {
+        db.execSQL("INSERT OR REPLACE INTO `sync_row_version` (`table_name`, `row_id`, `clock`, `origin`) VALUES (?, ?, ?, ?)",
+            arrayOf<Any>(row.table, row.rowId, row.clock, row.originDeviceId))
+    }
+
+    /** Keep existing local IDs and photo paths; remember equivalent IDs for later edits/deletions. */
+    private fun localId(table: String, id: String): String = db.query(
+        "SELECT `local_id` FROM `sync_row_alias` WHERE `table_name` = ? AND `remote_id` = ?",
+        arrayOf(table, id),
+    ).use { if (it.moveToFirst()) it.getString(0) else id }
+
+    private fun normalizeIncoming(spec: SyncTableSpec, incoming: SyncRow, peer: String): SyncRow {
+        val columns = incoming.columns.toMutableMap()
+        if (spec.name == "focus_session" || spec.name == "point_ledger") {
+            columns["daily_task_id"]?.value?.let { id ->
+                columns["daily_task_id"] = DbCell("s", localId("daily_task", id))
+            }
+        }
+        if (spec.name == "point_ledger") {
+            columns["dedupe_key"]?.value?.let { key ->
+                val prefix = key.substringBefore(':')
+                if (prefix in setOf("checkin", "over", "missed") && ':' in key) {
+                    columns["dedupe_key"] = DbCell("s", "$prefix:${localId("daily_task", key.substringAfter(':'))}")
+                }
+            }
+        }
+        var id = localId(spec.name, incoming.rowId)
+        if (!incoming.deleted) {
+            val keys = when (spec.name) {
+                "daily_task" -> listOf("date", "template_id")
+                "achievement" -> listOf("code")
+                "meal_record" -> listOf("date", "meal_type")
+                "point_ledger" -> listOf("dedupe_key")
+                else -> emptyList()
+            }
+            if (keys.isNotEmpty() && keys.all { columns[it]?.value != null }) {
+                val equivalent = db.query(
+                    "SELECT `${spec.pkColumn}` FROM `${spec.name}` WHERE ${keys.joinToString(" AND ") { "`$it` = ?" }} LIMIT 1",
+                    keys.map { requireNotNull(columns[it]?.value) }.toTypedArray(),
+                ).use { if (it.moveToFirst()) it.getString(0) else null }
+                if (equivalent != null) id = equivalent
+            }
+        }
+        if (id != incoming.rowId) {
+            db.execSQL("INSERT OR REPLACE INTO `sync_row_alias` (`table_name`, `remote_id`, `local_id`) VALUES (?, ?, ?)",
+                arrayOf(spec.name, incoming.rowId, id))
+        }
+        return incoming.copy(rowId = id, columns = columns, originDeviceId = incoming.originDeviceId.ifBlank { peer })
     }
 
     private fun upsertRow(spec: SyncTableSpec, row: SyncRow, errors: MutableList<String>): Boolean {
@@ -253,6 +312,8 @@ class SyncLocalStore @Inject constructor(
                 arrayOf(pk),
             )
             if (updated == 0) {
+                // meal_record.photo_path is NOT NULL without a SQL default. Its local file is deliberately not transferred.
+                if (spec.name == "meal_record") values.put("photo_path", "")
                 db.insert(spec.name, SQLiteDatabase.CONFLICT_ABORT, values)
             }
             db.delete(
@@ -260,6 +321,7 @@ class SyncLocalStore @Inject constructor(
                 "`table_name` = ? AND `row_id` = ?",
                 arrayOf(spec.name, row.rowId),
             )
+            recordOrigin(row)
             true
         } catch (e: SQLException) {
             // 唯一索引冲突、外键缺失等：跳过这一行，不让它拖垮整次同步
@@ -268,17 +330,20 @@ class SyncLocalStore @Inject constructor(
         }
     }
 
-    private fun deleteRow(spec: SyncTableSpec, row: SyncRow, errors: MutableList<String>) {
+    private fun deleteRow(spec: SyncTableSpec, row: SyncRow, errors: MutableList<String>): Boolean {
         val pk = spec.pkValue(row.rowId)
         try {
             db.delete(spec.name, "`${spec.pkColumn}` = ?", arrayOf(pk))
         } catch (e: SQLException) {
             errors += "${spec.name}/${row.rowId} 删除失败：${e.message?.take(80) ?: e::class.java.simpleName}"
+            return false
         }
         db.execSQL(
             "INSERT OR REPLACE INTO `sync_tombstone` (`table_name`, `row_id`, `deleted_at`) VALUES (?, ?, ?)",
             arrayOf(spec.name, row.rowId, row.clock),
         )
+        recordOrigin(row)
+        return true
     }
 
     // ---------------- 对端游标 ----------------
@@ -306,8 +371,16 @@ class SyncLocalStore @Inject constructor(
      * 恢复备份之后调用：整库被替换过，旧的游标与时钟都不再有意义。
      * 游标归零 → 下次同步会重新拉对端基线、并重新发布本端基线。
      */
-    suspend fun resetAfterRestore() = withContext(io) {
-        forgetPeers()
-        saveCursor(SELF_CURSOR_KEY, -1L)
+    suspend fun resetAfterRestore() = database.withTransaction {
+            db.execSQL("DELETE FROM `sync_peer`")
+            db.execSQL("DELETE FROM `sync_tombstone`")
+            db.execSQL("DELETE FROM `sync_row_version`")
+            db.execSQL("DELETE FROM `sync_row_alias`")
+            val highest = SYNC_TABLE_SPECS.maxOf { spec ->
+                db.query("SELECT COALESCE(MAX(`$SYNC_CLOCK_COLUMN`), 0) FROM `${spec.name}`")
+                    .use { it.moveToFirst(); it.getLong(0) }
+            }
+            bumpClockTo(highest)
+            db.execSQL("INSERT OR REPLACE INTO `sync_peer` (`peer_id`, `cursor`) VALUES (?, -1)", arrayOf(SELF_CURSOR_KEY))
     }
 }

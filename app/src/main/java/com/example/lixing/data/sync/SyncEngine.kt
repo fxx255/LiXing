@@ -37,128 +37,150 @@ class SyncEngine @Inject constructor(
     /** 测试与内部复用：显式指定本端设备 id，模拟不同设备。 */
     internal suspend fun sync(transport: SyncTransport, localDeviceId: String): SyncReport =
         withContext(io) {
+            // Re-read historical baselines once after fixing the old "skip failed row, advance cursor" bug.
+            if (store.cursors()[REPAIR_CURSOR_KEY] != REPAIR_REVISION) {
+                store.forgetPeers()
+                store.saveCursor(REPAIR_CURSOR_KEY, REPAIR_REVISION)
+            }
             val files = runCatching { transport.list() }
+                .onFailure { if (it is kotlinx.coroutines.CancellationException) throw it }
                 .onFailure { return@withContext SyncReport(errors = listOf("读取远端文件失败：${it.safeMessage()}")) }
                 .getOrDefault(emptyList())
-        val peers = SyncFiles.deviceIds(files).filter { it != localDeviceId }.sorted()
-        val cursors = store.cursors().toMutableMap()
+            val peers = SyncFiles.deviceIds(files).filter { it != localDeviceId }.sorted()
+            val cursors = store.cursors().toMutableMap()
 
-        val errors = mutableListOf<String>()
-        var downloadedBytes = 0
-        var appliedRows = 0
-        var appliedTombstones = 0
-        var skippedRows = 0
+            val errors = mutableListOf<String>()
+            var downloadedBytes = 0
+            var appliedRows = 0
+            var appliedTombstones = 0
+            var skippedRows = 0
 
-        for (peer in peers) {
-            var cursor = cursors[peer] ?: 0L
-            val hasBaseline = cursor > 0L
+            for (peer in peers) {
+                try {
+                    var cursor = cursors[peer] ?: 0L
+                    val hasBaseline = cursor > 0L
 
-            // Validate the peer schema before either snapshot or incremental rows.
-            val snapshotName = SyncFiles.snapshot(peer)
-            if (files.none { it.name == snapshotName }) {
-                errors += "$peer 尚无完整同步快照，稍后重试"
-                continue
-            }
-            val snapshot = try {
-                val text = transport.read(snapshotName).orEmpty()
-                downloadedBytes += text.toByteArray(Charsets.UTF_8).size
-                json.decodeFromString<SyncSnapshot>(text)
-            } catch (e: Exception) {
-                if (e is kotlinx.coroutines.CancellationException) throw e
-                errors += "$peer 的快照无法解析：${e.safeMessage()}"
-                continue
-            }
-            if (snapshot.format != SYNC_FORMAT || snapshot.databaseVersion != LiXingDatabase.VERSION) {
-                errors += "$peer 的数据库或协议版本不同，请将两端更新至同一版本后同步"
-                continue
-            }
-            if (!hasBaseline || snapshot.clock > cursor) {
-                val outcome = store.applyRemote(if (hasBaseline) snapshot.rows.filter { it.clock > cursor } else snapshot.rows, peer, localDeviceId)
-                appliedRows += outcome.appliedRows
-                appliedTombstones += outcome.appliedTombstones
-                skippedRows += outcome.skippedRows
-                errors += outcome.errors
-                cursor = maxOf(cursor, snapshot.clock, snapshot.rows.maxOfOrNull { it.clock } ?: 0L)
-            }
+                    // Validate the peer schema before either snapshot or incremental rows.
+                    val snapshotName = SyncFiles.snapshot(peer)
+                    if (files.none { it.name == snapshotName }) {
+                        errors += "$peer 尚无完整同步快照，稍后重试"
+                        continue
+                    }
+                    val snapshot = try {
+                        val text = transport.read(snapshotName).orEmpty()
+                        downloadedBytes += text.toByteArray(Charsets.UTF_8).size
+                        json.decodeFromString<SyncSnapshot>(text)
+                    } catch (e: Exception) {
+                        if (e is kotlinx.coroutines.CancellationException) throw e
+                        errors += "$peer 的快照无法解析：${e.safeMessage()}"
+                        continue
+                    }
+                    if (snapshot.format != SYNC_FORMAT || snapshot.databaseVersion != LiXingDatabase.VERSION) {
+                        errors += "$peer 的数据库或协议版本不同，请将两端更新至同一版本后同步"
+                        continue
+                    }
+                    if (snapshot.deviceId != peer) {
+                        errors += "$peer 的快照设备标识不匹配"
+                        continue
+                    }
+                    if (!hasBaseline || snapshot.clock > cursor) {
+                        val outcome = store.applyRemote(if (hasBaseline) snapshot.rows.filter { it.clock > cursor } else snapshot.rows, peer, localDeviceId)
+                        appliedRows += outcome.appliedRows
+                        appliedTombstones += outcome.appliedTombstones
+                        skippedRows += outcome.skippedRows
+                        errors += outcome.errors
+                        if (outcome.errors.isNotEmpty()) continue
+                        cursor = maxOf(cursor, snapshot.clock, snapshot.rows.maxOfOrNull { it.clock } ?: 0L)
+                    }
 
-            // 2) 增量日志：只处理时钟大于游标的部分
-            val logName = SyncFiles.log(peer)
-            if (files.any { it.name == logName }) {
-                val text = transport.read(logName).orEmpty()
-                downloadedBytes += text.toByteArray(Charsets.UTF_8).size
-                val rows = parseLog(text, errors)
-                val pending = rows.filter { it.clock > cursor }
-                if (pending.isNotEmpty()) {
-                    val outcome = store.applyRemote(pending, peer, localDeviceId)
-                    appliedRows += outcome.appliedRows
-                    appliedTombstones += outcome.appliedTombstones
-                    skippedRows += outcome.skippedRows
-                    errors += outcome.errors
-                    cursor = maxOf(cursor, pending.maxOf { it.clock })
+                    // 2) 增量日志：只处理时钟大于游标的部分
+                    val logName = SyncFiles.log(peer)
+                    if (files.any { it.name == logName }) {
+                        val text = transport.read(logName).orEmpty()
+                        downloadedBytes += text.toByteArray(Charsets.UTF_8).size
+                        val parseErrors = mutableListOf<String>()
+                        val rows = parseLog(text, parseErrors)
+                        errors += parseErrors
+                        val pending = rows.filter { it.clock > cursor }
+                        if (pending.isNotEmpty()) {
+                            val outcome = store.applyRemote(pending, peer, localDeviceId)
+                            appliedRows += outcome.appliedRows
+                            appliedTombstones += outcome.appliedTombstones
+                            skippedRows += outcome.skippedRows
+                            errors += outcome.errors
+                            if (outcome.errors.isNotEmpty()) continue
+                            cursor = maxOf(cursor, pending.maxOf { it.clock })
+                        }
+                        if (parseErrors.isNotEmpty()) continue
+                    }
+
+                    if (cursor != (cursors[peer] ?: 0L)) {
+                        store.saveCursor(peer, cursor)
+                        cursors[peer] = cursor
+                    }
+                } catch (e: Exception) {
+                    if (e is kotlinx.coroutines.CancellationException) throw e
+                    errors += "$peer 同步未完成：${e.safeMessage()}"
                 }
             }
 
-            if (cursor != (cursors[peer] ?: 0L)) {
-                store.saveCursor(peer, cursor)
-                cursors[peer] = cursor
+            // 3) 推本端：没有快照 / 日志膨胀时重写快照并截断日志，否则只追加增量
+            val selfCursor = cursors[SELF_CURSOR_KEY] ?: -1L
+            val clock = store.clock()
+            val ownSnapshotName = SyncFiles.snapshot(localDeviceId)
+            val ownLogName = SyncFiles.log(localDeviceId)
+            val hasSnapshot = files.any { it.name == ownSnapshotName }
+            val logSize = files.firstOrNull { it.name == ownLogName }?.sizeBytes ?: 0L
+            // 没发过基线（新设备或刚恢复过备份）也要重写快照，否则历史数据永远推不上去
+            val writeSnapshot = !hasSnapshot || logSize > COMPACT_LOG_BYTES || selfCursor < 0L ||
+                cursors["__database_version__"] != LiXingDatabase.VERSION.toLong()
+
+            val changes = store.readChangesSince(if (writeSnapshot) -1L else selfCursor)
+                .map { it.copy(originDeviceId = it.originDeviceId.ifBlank { localDeviceId }) }
+            var uploadedBytes = 0
+            var snapshotWritten = false
+            var logCompacted = false
+
+            if (writeSnapshot) {
+                val snapshot = SyncSnapshot(
+                    databaseVersion = LiXingDatabase.VERSION,
+                    deviceId = localDeviceId,
+                    clock = clock,
+                    createdAtEpochMillis = System.currentTimeMillis(),
+                    rows = changes,
+                )
+                val text = json.encodeToString(snapshot)
+                transport.write(ownSnapshotName, text)
+                uploadedBytes += text.toByteArray(Charsets.UTF_8).size
+                if (hasSnapshot) {
+                    transport.write(ownLogName, "")
+                    logCompacted = true
+                }
+                snapshotWritten = true
+            } else if (changes.isNotEmpty()) {
+                val lines = changes.map { json.encodeToString(it) }
+                transport.append(ownLogName, lines)
+                uploadedBytes += lines.sumOf { it.toByteArray(Charsets.UTF_8).size }
             }
-        }
 
-        // 3) 推本端：没有快照 / 日志膨胀时重写快照并截断日志，否则只追加增量
-        val selfCursor = cursors[SELF_CURSOR_KEY] ?: -1L
-        val clock = store.clock()
-        val ownSnapshotName = SyncFiles.snapshot(localDeviceId)
-        val ownLogName = SyncFiles.log(localDeviceId)
-        val hasSnapshot = files.any { it.name == ownSnapshotName }
-        val logSize = files.firstOrNull { it.name == ownLogName }?.sizeBytes ?: 0L
-        // 没发过基线（新设备或刚恢复过备份）也要重写快照，否则历史数据永远推不上去
-        val writeSnapshot = !hasSnapshot || logSize > COMPACT_LOG_BYTES || selfCursor < 0L ||
-            cursors["__database_version__"] != LiXingDatabase.VERSION.toLong()
+            store.saveCursor(SELF_CURSOR_KEY, clock)
+            store.saveCursor("__database_version__", LiXingDatabase.VERSION.toLong())
 
-        val changes = store.readChangesSince(if (writeSnapshot) -1L else selfCursor)
-        var uploadedBytes = 0
-        var snapshotWritten = false
-        var logCompacted = false
-
-        if (writeSnapshot) {
-            val snapshot = SyncSnapshot(
-                databaseVersion = LiXingDatabase.VERSION,
-                deviceId = localDeviceId,
-                clock = clock,
-                createdAtEpochMillis = System.currentTimeMillis(),
-                rows = changes,
+            SyncReport(
+                pushedRows = changes.count { !it.deleted },
+                pushedTombstones = changes.count { it.deleted },
+                appliedRows = appliedRows,
+                appliedTombstones = appliedTombstones,
+                skippedRows = skippedRows,
+                uploadedBytes = uploadedBytes,
+                downloadedBytes = downloadedBytes,
+                snapshotWritten = snapshotWritten,
+                logCompacted = logCompacted,
+                peers = peers,
+                errors = errors,
+                publishedClock = clock,
             )
-            val text = json.encodeToString(snapshot)
-            transport.write(ownSnapshotName, text)
-            uploadedBytes += text.toByteArray(Charsets.UTF_8).size
-            if (hasSnapshot) {
-                transport.write(ownLogName, "")
-                logCompacted = true
-            }
-            snapshotWritten = true
-        } else if (changes.isNotEmpty()) {
-            val lines = changes.map { json.encodeToString(it) }
-            transport.append(ownLogName, lines)
-            uploadedBytes += lines.sumOf { it.toByteArray(Charsets.UTF_8).size }
         }
-
-        store.saveCursor(SELF_CURSOR_KEY, clock)
-        store.saveCursor("__database_version__", LiXingDatabase.VERSION.toLong())
-
-        SyncReport(
-            pushedRows = changes.count { !it.deleted },
-            pushedTombstones = changes.count { it.deleted },
-            appliedRows = appliedRows,
-            appliedTombstones = appliedTombstones,
-            skippedRows = skippedRows,
-            uploadedBytes = uploadedBytes,
-            downloadedBytes = downloadedBytes,
-            snapshotWritten = snapshotWritten,
-            logCompacted = logCompacted,
-            peers = peers,
-            errors = errors,
-        )
-    }
 
     private fun parseLog(text: String, errors: MutableList<String>): List<SyncRow> =
         text.lineSequence()
@@ -177,5 +199,7 @@ class SyncEngine @Inject constructor(
     companion object {
         /** 日志超过这个体积就重写快照并截断，避免无限膨胀。 */
         const val COMPACT_LOG_BYTES = 512L * 1024
+        internal const val REPAIR_CURSOR_KEY = "__sync_repair_revision__"
+        internal const val REPAIR_REVISION = 1L
     }
 }

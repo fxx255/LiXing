@@ -47,6 +47,8 @@ object TaskMaterializer {
             if (!TemplateEligibility.isEligible(template, slot, phase, date, planStart)) continue
 
             result += DailyTaskEntity(
+                // Same plan template and date must identify the same task on every device.
+                id = java.util.UUID.nameUUIDFromBytes("lixing:daily:${date.toEpochDay()}:${template.id}".toByteArray(Charsets.UTF_8)).toString(),
                 date = date,
                 templateId = template.id,
                 subjectId = subject.id,

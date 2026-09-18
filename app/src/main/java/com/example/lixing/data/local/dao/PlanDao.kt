@@ -21,10 +21,13 @@ interface PlanDao {
 
     // ---------------- StudyPlan ----------------
 
-    @Query("SELECT * FROM study_plan WHERE is_active = 1 LIMIT 1")
+    // Concurrent devices may initially contribute more than one active plan.
+    // A deterministic order keeps every device on the same plan without deleting any history.
+
+    @Query("SELECT * FROM study_plan WHERE is_active = 1 ORDER BY sync_modified_at DESC, id DESC LIMIT 1")
     fun observeActivePlan(): Flow<StudyPlanEntity?>
 
-    @Query("SELECT * FROM study_plan WHERE is_active = 1 LIMIT 1")
+    @Query("SELECT * FROM study_plan WHERE is_active = 1 ORDER BY sync_modified_at DESC, id DESC LIMIT 1")
     suspend fun getActivePlan(): StudyPlanEntity?
 
     @Query("SELECT * FROM study_plan ORDER BY created_at DESC")

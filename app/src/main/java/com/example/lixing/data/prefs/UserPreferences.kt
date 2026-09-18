@@ -62,7 +62,7 @@ data class UserPreferences(
     val backupKeepCount: Int = 7,
 
     // ---------- 多端同步 ----------
-    /** 是否启用自动同步（应用启动后、操作停止 30 秒后触发）。手动同步不受此限制。 */
+    /** 是否启用自动同步（启动、前台定期拉取、操作停止 30 秒后触发）。手动同步不受此限制。 */
     val syncAutoEnabled: Boolean = true,
     /** 自动同步是否仅限 Wi-Fi 等非计费网络。手动同步不受限。 */
     val syncWifiOnly: Boolean = true,

@@ -599,7 +599,7 @@ private fun WebDavSyncSection(
         } else {
             SwitchRow(
                 label = "自动同步",
-                subtitle = "应用启动后、以及操作停止 30 秒后自动同步",
+                subtitle = "打开应用时、操作停止 30 秒后同步；前台每 2 分钟拉取其他设备的改动，失败自动重试",
                 checked = prefs.syncAutoEnabled,
                 onCheckedChange = viewModel::setSyncAutoEnabled,
             )
@@ -622,7 +622,7 @@ private fun WebDavSyncSection(
                     .atZone(java.time.ZoneId.systemDefault())
                     .format(java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm"))
                 Text(
-                    "上次同步：$time · 本次流量见下方统计",
+                    "上次完整同步：$time · 本次流量见下方统计",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -631,6 +631,7 @@ private fun WebDavSyncSection(
             state.lastReport?.let { report ->
                 Text(
                     "上次同步：收到 ${report.appliedRows + report.appliedTombstones} 项，" +
+                        "发现 ${report.peers.size} 台其他设备，" +
                         "推送 ${report.pushedRows + report.pushedTombstones} 项，" +
                         "上传 ${formatFileSize(report.uploadedBytes.toLong())}，" +
                         "下载 ${formatFileSize(report.downloadedBytes.toLong())}",

@@ -8,7 +8,6 @@ import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import dagger.hilt.android.qualifiers.ApplicationContext
-import kotlinx.coroutines.flow.first
 import java.util.UUID
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -27,11 +26,10 @@ class SyncIdentity @Inject constructor(
 ) {
 
     suspend fun deviceId(): String {
-        val stored = context.syncIdentityStore.data.first()[KEY_DEVICE_ID]
-        if (!stored.isNullOrBlank()) return stored
-        val generated = UUID.randomUUID().toString()
-        context.syncIdentityStore.edit { it[KEY_DEVICE_ID] = generated }
-        return generated
+        val prefs = context.syncIdentityStore.edit {
+            if (it[KEY_DEVICE_ID].isNullOrBlank()) it[KEY_DEVICE_ID] = UUID.randomUUID().toString()
+        }
+        return requireNotNull(prefs[KEY_DEVICE_ID])
     }
 
     /** 设备名只用于 UI 展示，不参与任何比较。 */

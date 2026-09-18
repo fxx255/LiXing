@@ -46,6 +46,18 @@ class MainActivity : ComponentActivity() {
     @Inject
     lateinit var appUpdateController: com.example.lixing.data.update.AppUpdateController
 
+    @Inject lateinit var syncRepository: com.example.lixing.data.sync.SyncRepository
+
+    override fun onStart() {
+        super.onStart()
+        syncRepository.onForeground()
+    }
+
+    override fun onStop() {
+        syncRepository.onBackground()
+        super.onStop()
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)

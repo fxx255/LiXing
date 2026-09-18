@@ -35,6 +35,8 @@ data class SyncRow(
     val clock: Long,
     val deleted: Boolean = false,
     val columns: Map<String, DbCell> = emptyMap(),
+    /** Original writer, retained when another device republishes this row. Blank = legacy envelope. */
+    val originDeviceId: String = "",
 )
 
 /** 基线快照：新设备首次接入时直接建基线，不必重放几千条日志。 */
@@ -71,6 +73,7 @@ data class SyncReport(
     val logCompacted: Boolean = false,
     val peers: List<String> = emptyList(),
     val errors: List<String> = emptyList(),
+    val publishedClock: Long = -1L,
 ) {
     val isSuccess: Boolean get() = errors.isEmpty()
     val changedRows: Int get() = appliedRows + appliedTombstones

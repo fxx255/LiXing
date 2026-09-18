@@ -182,6 +182,7 @@ class SyncRepositoryTest {
         assertTrue("消息要提示告警", badState.message.orEmpty().contains("告警"))
         assertTrue("上传统计不回退", badState.totalUploadedBytes >= goodState.totalUploadedBytes)
         assertFalse(badState.busy)
+        assertEquals("失败不能更新最近一次完整同步时间", goodState.lastSyncAtMillis, badState.lastSyncAtMillis)
     }
 
     // ---------------- 自动同步 ----------------

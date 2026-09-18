@@ -14,6 +14,7 @@ object SyncMerger {
     data class LocalState(
         val rowClock: Long? = null,
         val tombstoneClock: Long? = null,
+        val originDeviceId: String? = null,
     ) {
         val exists: Boolean get() = rowClock != null
         val isDeleted: Boolean get() = !exists && tombstoneClock != null
@@ -51,9 +52,15 @@ object SyncMerger {
         localDeviceId: String,
         remoteDeviceId: String,
     ): Decision {
+        if (!local.exists && local.tombstoneClock == null) {
+            return if (remote.deleted) Decision.APPLY_DELETE else Decision.APPLY_UPSERT
+        }
         // 远端不比本端新 → 保留本端。
         // （时钟相同且设备 ID 也相同只可能是自身日志回放，一样按"不覆盖"处理。）
-        val cmp = compare(remote.clock, remoteDeviceId, local.effectiveClock, localDeviceId)
+        val cmp = compare(
+            remote.clock, remote.originDeviceId.ifBlank { remoteDeviceId },
+            local.effectiveClock, local.originDeviceId?.takeIf { it.isNotBlank() } ?: localDeviceId,
+        )
         if (cmp <= 0) return Decision.KEEP_LOCAL
         return if (remote.deleted) Decision.APPLY_DELETE else Decision.APPLY_UPSERT
     }

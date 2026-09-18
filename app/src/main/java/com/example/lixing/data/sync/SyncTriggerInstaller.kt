@@ -27,14 +27,25 @@ class SyncTriggerInstaller @Inject constructor() {
         db.execSQL("CREATE TABLE IF NOT EXISTS `sync_clock` (`id` INTEGER PRIMARY KEY NOT NULL, `value` INTEGER NOT NULL)")
         db.execSQL("CREATE TABLE IF NOT EXISTS `sync_tombstone` (`table_name` TEXT NOT NULL, `row_id` TEXT NOT NULL, `deleted_at` INTEGER NOT NULL, PRIMARY KEY (`table_name`, `row_id`))")
         db.execSQL("CREATE TABLE IF NOT EXISTS `sync_peer` (`peer_id` TEXT PRIMARY KEY NOT NULL, `cursor` INTEGER NOT NULL)")
+        db.execSQL("CREATE TABLE IF NOT EXISTS `sync_row_version` (`table_name` TEXT NOT NULL, `row_id` TEXT NOT NULL, `clock` INTEGER NOT NULL, `origin` TEXT NOT NULL, PRIMARY KEY (`table_name`, `row_id`))")
+        db.execSQL("CREATE TABLE IF NOT EXISTS `sync_row_alias` (`table_name` TEXT NOT NULL, `remote_id` TEXT NOT NULL, `local_id` TEXT NOT NULL, PRIMARY KEY (`table_name`, `remote_id`))")
         db.execSQL("INSERT OR IGNORE INTO `sync_clock` (`id`, `value`) VALUES (1, 1)")
         db.execSQL("INSERT OR IGNORE INTO `sync_clock` (`id`, `value`) VALUES (2, 0)")
-        if (installed(db)) return
+        // A killed restore must not leave ordinary writes permanently excluded from sync.
+        db.execSQL("UPDATE `sync_clock` SET `value` = 0 WHERE `id` = 2")
+        val revision = db.query("SELECT `value` FROM `sync_clock` WHERE `id` = 3")
+            .use { if (it.moveToFirst()) it.getInt(0) else 0 }
+        if (revision == TRIGGER_REVISION && installed(db)) return
         SYNC_TABLE_SPECS.forEach { spec ->
+            listOf("ai", "au", "ad").forEach { kind -> db.execSQL("DROP TRIGGER IF EXISTS `sync_${kind}_${spec.name}`") }
             db.execSQL(insertTrigger(spec))
-            db.execSQL(updateTrigger(spec))
+            val columns = db.query("PRAGMA table_info(`${spec.name}`)").use { c ->
+                buildList { while (c.moveToNext()) c.getString(1).let { if (it != SYNC_CLOCK_COLUMN) add(it) } }
+            }
+            db.execSQL(updateTrigger(spec, columns))
             db.execSQL(deleteTrigger(spec))
         }
+        db.execSQL("INSERT OR REPLACE INTO `sync_clock` (`id`, `value`) VALUES (3, $TRIGGER_REVISION)")
     }
 
     /** 每次开库都建一遍没必要，已齐就直接跳过。 */
@@ -49,6 +60,8 @@ class SyncTriggerInstaller @Inject constructor() {
         CREATE TRIGGER IF NOT EXISTS `sync_ai_${spec.name}`
         AFTER INSERT ON `${spec.name}`
         BEGIN
+            DELETE FROM `sync_row_version` WHERE `table_name` = '${spec.name}' AND `row_id` = CAST(NEW.`${spec.pkColumn}` AS TEXT)
+                AND (SELECT `value` FROM `sync_clock` WHERE `id` = 2) = 0;
             UPDATE `sync_clock` SET `value` = `value` + 1
                 WHERE `id` = 1 AND (SELECT `value` FROM `sync_clock` WHERE `id` = 2) = 0;
             DELETE FROM `sync_tombstone`
@@ -62,19 +75,18 @@ class SyncTriggerInstaller @Inject constructor() {
         END
     """.trimIndent()
 
-    private fun updateTrigger(spec: SyncTableSpec): String = """
+    private fun updateTrigger(spec: SyncTableSpec, columns: List<String>): String = """
         CREATE TRIGGER IF NOT EXISTS `sync_au_${spec.name}`
-        AFTER UPDATE ON `${spec.name}`
+        AFTER UPDATE OF ${columns.joinToString { "`$it`" }} ON `${spec.name}`
+        WHEN (SELECT `value` FROM `sync_clock` WHERE `id` = 2) = 0
+            AND (${columns.joinToString(" OR ") { "OLD.`$it` IS NOT NEW.`$it`" }} OR OLD.`$SYNC_CLOCK_COLUMN` != NEW.`$SYNC_CLOCK_COLUMN`)
         BEGIN
+            DELETE FROM `sync_row_version` WHERE `table_name` = '${spec.name}' AND `row_id` = CAST(NEW.`${spec.pkColumn}` AS TEXT);
             UPDATE `sync_clock` SET `value` = `value` + 1
-                WHERE `id` = 1
-                  AND (SELECT `value` FROM `sync_clock` WHERE `id` = 2) = 0
-                  AND OLD.`$SYNC_CLOCK_COLUMN` = NEW.`$SYNC_CLOCK_COLUMN`;
+                WHERE `id` = 1;
             UPDATE `${spec.name}` SET `$SYNC_CLOCK_COLUMN` =
                     (SELECT `value` FROM `sync_clock` WHERE `id` = 1)
-                WHERE `${spec.pkColumn}` = OLD.`${spec.pkColumn}`
-                  AND (SELECT `value` FROM `sync_clock` WHERE `id` = 2) = 0
-                  AND OLD.`$SYNC_CLOCK_COLUMN` = NEW.`$SYNC_CLOCK_COLUMN`;
+                WHERE `${spec.pkColumn}` = NEW.`${spec.pkColumn}`;
         END
     """.trimIndent()
 
@@ -82,6 +94,8 @@ class SyncTriggerInstaller @Inject constructor() {
         CREATE TRIGGER IF NOT EXISTS `sync_ad_${spec.name}`
         AFTER DELETE ON `${spec.name}`
         BEGIN
+            DELETE FROM `sync_row_version` WHERE `table_name` = '${spec.name}' AND `row_id` = CAST(OLD.`${spec.pkColumn}` AS TEXT)
+                AND (SELECT `value` FROM `sync_clock` WHERE `id` = 2) = 0;
             UPDATE `sync_clock` SET `value` = `value` + 1
                 WHERE `id` = 1 AND (SELECT `value` FROM `sync_clock` WHERE `id` = 2) = 0;
             INSERT OR REPLACE INTO `sync_tombstone` (`table_name`, `row_id`, `deleted_at`)
@@ -96,5 +110,6 @@ class SyncTriggerInstaller @Inject constructor() {
         /** sync_clock 行含义：1 = Lamport 计数器，2 = 正在应用远端/恢复备份的标志位。 */
         const val CLOCK_ROW_ID = 1
         const val APPLYING_ROW_ID = 2
+        private const val TRIGGER_REVISION = 2
     }
 }
