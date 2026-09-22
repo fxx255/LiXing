@@ -110,6 +110,17 @@ fun LiXingNavHost(
         secondLevel(Routes.ASSISTANT) {
             AssistantScreen(onBack = { navController.popBackStack() })
         }
+        // 通知点进来时直达「那次生成所在的会话」。
+        secondLevelWithLongArg(
+            route = Routes.ASSISTANT_CONVERSATION,
+            argName = "conversationId",
+        ) { conversationId ->
+            AssistantScreen(
+                onBack = { navController.popBackStack() },
+                // 打开指定会话；空/占位值按「不指定」处理，退回默认行为。
+                initialConversationId = conversationId.takeIf { it.isNotBlank() && it != "-1" },
+            )
+        }
         secondLevel(Routes.PERMISSION_GUIDE) { PlaceholderScreen("权限引导") }
         composable(Routes.ONBOARDING) {
             OnboardingScreen(

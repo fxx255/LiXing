@@ -19,6 +19,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.example.lixing.assistant.AssistantKeepAliveService
 import com.example.lixing.data.cloud.BaiduNetdiskRepository
 import com.example.lixing.data.prefs.UserPreferences
 import com.example.lixing.data.update.AppUpdateController
@@ -58,9 +59,33 @@ class MainActivity : ComponentActivity() {
         super.onStop()
     }
 
+    /**
+     * 通知点进来时要处理的**一次性导航请求**。
+     *
+     * 为什么不能只存一个 route 字符串：
+     * 1. **同一 route 连续点两次不会触发**：Compose 的 `LaunchedEffect(route)`
+     *    只在值**变化**时重跑，两次都是 `assistant` 时第二次什么都不会发生；
+     * 2. **会话 id 被丢掉**：目标是「回到那次生成所在的会话」，
+     *    只导航到助手页仍会停在默认会话上。
+     *
+     * 所以用一个带自增 [NotificationNavigation.id] 的事件：
+     * id 每次都不同 ⇒ 即使 route 相同也会重新触发；并带上 conversationId。
+     */
+    data class NotificationNavigation(
+        val id: Long,
+        val route: String,
+        val conversationId: String?,
+    )
+
+    private val notificationNavigation =
+        androidx.compose.runtime.mutableStateOf<NotificationNavigation?>(null)
+    private val notificationNavId = java.util.concurrent.atomic.AtomicLong(0)
+
     override fun onCreate(savedInstanceState: Bundle?) {
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
+        // 冷启动场景：activity 是新建的，直接从 intent 取通知目标。
+        notificationNavigation.value = navigationFromIntent(intent)
         setContent {
             val prefs by prefsRepository.preferences.collectAsStateWithLifecycle(
                 initialValue = UserPreferences(),
@@ -76,6 +101,9 @@ class MainActivity : ComponentActivity() {
                     start = if (prefs.onboardingDone || hasPlan) Routes.TODAY else Routes.ONBOARDING
                 }
             }
+            // 可观察的一次性导航事件：onNewIntent（应用在后台时点通知）
+            // 也会更新它，即使是同一条 route 也能重新触发。
+            val navigation by notificationNavigation
 
             LiXingTheme(
                 seed = prefs.themeSeed,
@@ -85,12 +113,46 @@ class MainActivity : ComponentActivity() {
                     modifier = Modifier.fillMaxSize(),
                     color = MaterialTheme.colorScheme.background,
                 ) {
-                    start?.let { LiXingApp(startDestination = it) }
+                    start?.let {
+                        LiXingApp(
+                            startDestination = it,
+                            // 通知点进来时直达对应页面与会话。
+                            notificationNavigation = navigation,
+                        )
+                    }
                     UpdateDialogHost()
                 }
             }
         }
         handleBaiduOAuthIntent(intent)
+    }
+
+    /**
+     * onNewIntent：应用已在后台时点通知走这里。
+     *
+     * 必须更新 [notificationNavigation]，否则 `setIntent` 之后 Compose 里读到的
+     * 仍是旧值 —— 用户点了通知却停在原页面。
+     */
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleBaiduOAuthIntent(intent)
+        navigationFromIntent(intent)?.let { notificationNavigation.value = it }
+    }
+
+    /**
+     * 从 intent 解析通知目标；没有就返回 null。
+     *
+     * 只接受白名单路由（助手页），避免外部 intent 把应用导航到任意页面。
+     */
+    private fun navigationFromIntent(intent: Intent?): NotificationNavigation? {
+        val raw = intent?.getStringExtra(AssistantKeepAliveService.EXTRA_ROUTE) ?: return null
+        val route = raw.takeIf { it == Routes.ASSISTANT } ?: return null
+        return NotificationNavigation(
+            id = notificationNavId.incrementAndGet(),
+            route = route,
+            conversationId = intent.getStringExtra(AssistantKeepAliveService.EXTRA_CONVERSATION_ID),
+        )
     }
 
     /**
@@ -140,12 +202,6 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         com.example.lixing.ui.util.ScreenOrientationGuard.releaseAfterExternalCapture(this)
-    }
-
-    override fun onNewIntent(intent: Intent) {
-        super.onNewIntent(intent)
-        setIntent(intent)
-        handleBaiduOAuthIntent(intent)
     }
 
     private fun handleBaiduOAuthIntent(intent: Intent?) {

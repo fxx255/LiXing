@@ -604,6 +604,60 @@ INSERT INTO `user_profile` (`id`, `nickname`, `total_points`, `level`, `title`, 
         }
     }
 
+    /**
+     * v13 → v14：新增**在途生成请求**表 `assistant_request`。
+     *
+     * 解决的是「切后台/被查杀后回答凭空消失、也没有重试入口」：请求状态以前只活在
+     * ViewModel 内存里，进程一没就什么都不剩。落库后重启能识别出「确实遗留」的请求，
+     * 显示恢复入口，而不是自动重发。
+     *
+     * 非破坏性：纯建表 + 建索引，老数据（历史消息、待确认信封）原样保留。
+     * 外键指向 `assistant_conversation`：删除会话级联清理其请求记录，
+     * 避免迟到的写入把已删除的会话又建回来。
+     *
+     * 本表**不进入多端同步表清单**，也不进入版本化备份的导出清单 ——
+     * 进行中的碎片、重试快照与诊断属于本机运行态，跨端搬运只会造成重复执行。
+     */
+    private val MIGRATION_13_14 = object : Migration(13, 14) {
+        override fun migrate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
+            db.execSQL(
+                "CREATE TABLE IF NOT EXISTS `assistant_request` (" +
+                    "`request_id` TEXT NOT NULL, " +
+                    "`conversation_id` TEXT NOT NULL, " +
+                    "`user_message_id` TEXT NOT NULL, " +
+                    "`answer_message_id` TEXT NOT NULL, " +
+                    "`attempt_id` TEXT NOT NULL, " +
+                    "`status` TEXT NOT NULL, " +
+                    "`confirmed_text` TEXT NOT NULL DEFAULT '', " +
+                    "`partial_text` TEXT NOT NULL DEFAULT '', " +
+                    "`figure_slots` TEXT NOT NULL DEFAULT '', " +
+                    "`user_text` TEXT NOT NULL DEFAULT '', " +
+                    "`attachment_paths` TEXT NOT NULL DEFAULT '', " +
+                    "`snapshot_json` TEXT NOT NULL DEFAULT '', " +
+                    "`failure_kind` TEXT NOT NULL DEFAULT '', " +
+                    "`failure_message` TEXT NOT NULL DEFAULT '', " +
+                    "`rounds` INTEGER NOT NULL DEFAULT 0, " +
+                    "`created_at` INTEGER NOT NULL, " +
+                    "`updated_at` INTEGER NOT NULL, " +
+                    "PRIMARY KEY(`request_id`), " +
+                    "FOREIGN KEY(`conversation_id`) REFERENCES `assistant_conversation`(`id`) " +
+                    "ON UPDATE NO ACTION ON DELETE CASCADE)",
+            )
+            db.execSQL(
+                "CREATE INDEX IF NOT EXISTS `index_assistant_request_conversation_id` " +
+                    "ON `assistant_request`(`conversation_id`)",
+            )
+            db.execSQL(
+                "CREATE INDEX IF NOT EXISTS `index_assistant_request_status` " +
+                    "ON `assistant_request`(`status`)",
+            )
+            db.execSQL(
+                "CREATE INDEX IF NOT EXISTS `index_assistant_request_updated_at` " +
+                    "ON `assistant_request`(`updated_at`)",
+            )
+        }
+    }
+
     val ALL: Array<Migration> = arrayOf(
         MIGRATION_1_2,
         MIGRATION_2_3,
@@ -617,5 +671,6 @@ INSERT INTO `user_profile` (`id`, `nickname`, `total_points`, `level`, `title`, 
         MIGRATION_10_11,
         MIGRATION_11_12,
         MIGRATION_12_13,
+        MIGRATION_13_14,
     )
 }

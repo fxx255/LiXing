@@ -31,6 +31,26 @@ data class AiModelProfile(
 
 data class AiProfileCredentials(val baseUrl: String, val model: String, val apiKey: String)
 
+/**
+ * 一次调用内**同时**解析出的安全身份与凭证。
+ *
+ * 为什么必须是同一个动作：分别调 `activeProfile()` 与 `load()` 中间用户可能
+ * 切换档案，导致「A 档案的模型 + B 档案的密钥」这种混钥请求。这里在
+ * 存储层的同一把锁里取齐，调用方拿到的是一份自洽的身份+凭证。
+ */
+data class AiResolvedIdentity(
+    val profileId: String,
+    val baseUrl: String,
+    val model: String,
+    val apiKey: String,
+    val visionEnabled: Boolean,
+    val searchProtocol: AiSearchProtocol,
+    val reasoningEffort: AiReasoningEffort,
+)
+
+/** 协议标识：只含主机+路径，不含查询串与凭证，用于诊断与重试校验。 */
+fun safeEndpointIdentityOf(baseUrl: String): String = endpointIdentityOf(baseUrl)
+
 /** 联网搜索协议：模型配置里可自行选择，默认 OpenAI Responses API。 */
 enum class AiSearchProtocol {
     /** OpenAI Responses API，服务端执行搜索。 */
@@ -239,6 +259,47 @@ class AiCredentialStore @Inject constructor(
     @Synchronized
     fun credentialsFor(id: String): AiProfileCredentials? =
         storedProfiles().firstOrNull { it.id == id }?.let { AiProfileCredentials(it.baseUrl, it.model, it.apiKey) }
+
+    /**
+     * **同一次锁内**解析活动档案的安全身份与凭证（或回退到旧式偏好配置的 key）。
+     *
+     * 没有任何档案时 baseUrl/model 来自偏好，密钥仍从加密存储取 —— 与
+     * [AssistantModelClient] 早先的取值顺序一致，只是把两次读取合并成了一次。
+     */
+    @Synchronized
+    fun resolveActiveIdentity(fallbackBaseUrl: String, fallbackModel: String): AiResolvedIdentity? {
+        val profile = activeStoredProfile(storedProfiles())
+        val baseUrl = (profile?.baseUrl ?: fallbackBaseUrl).trim()
+        val model = (profile?.model ?: fallbackModel).trim()
+        val apiKey = (profile?.apiKey ?: decrypt(KEY_TOKEN)).orEmpty()
+        if (baseUrl.isEmpty() || model.isEmpty() || apiKey.isBlank()) return null
+        return AiResolvedIdentity(
+            profileId = profile?.id.orEmpty(),
+            baseUrl = baseUrl,
+            model = model,
+            apiKey = apiKey,
+            visionEnabled = profile?.visionEnabled ?: false,
+            searchProtocol = profile?.searchProtocol ?: AiSearchProtocol.RESPONSES,
+            reasoningEffort = profile?.reasoningEffort ?: AiReasoningEffort.LOW,
+        )
+    }
+
+    /** 按档案 id 解析该档案的**完整身份+凭证**（含 vision 能力与联网协议）。 */
+    @Synchronized
+    fun resolveIdentityFor(id: String): AiResolvedIdentity? =
+        storedProfiles().firstOrNull { it.id == id }
+            ?.takeIf { it.apiKey.isNotBlank() }
+            ?.let {
+                AiResolvedIdentity(
+                    profileId = it.id,
+                    baseUrl = it.baseUrl,
+                    model = it.model,
+                    apiKey = it.apiKey,
+                    visionEnabled = it.visionEnabled,
+                    searchProtocol = it.searchProtocol,
+                    reasoningEffort = it.reasoningEffort,
+                )
+            }
 
     private fun resolveVisionProfile(id: String?): String? {
         if (id.isNullOrBlank()) return null

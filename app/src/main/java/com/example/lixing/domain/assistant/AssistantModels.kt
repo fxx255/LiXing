@@ -30,6 +30,16 @@ data class AssistantMessage(
      * 不落库、不进备份。
      */
     val imageBase64s: List<String> = emptyList(),
+    /**
+     * 这条消息在 `assistant_message` 表里的 id。
+     *
+     * 为什么界面上也要带它：流式增量必须更新**固定的回答位置**。以前只能按列表下标
+     * 定位，而下标会被「加载历史会话、追加新消息、删除会话」随时改变 ——
+     * 一旦错位，正文就会写进别的气泡，甚至覆盖用户的问题。
+     *
+     * 尚未落库的消息为 null（例如刚插入界面、还没写库的乐观占位）。
+     */
+    val id: String? = null,
 )
 
 /**

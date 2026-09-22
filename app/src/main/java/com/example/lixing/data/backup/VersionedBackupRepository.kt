@@ -359,7 +359,13 @@ data class BackupData(
             table.copy(rows = table.rows.map { row ->
                 val raw = row[index].value ?: return@map row
                 row.toMutableList().apply {
-                    val mapped = transform(raw, table.name != "meal_record")
+                    // Assistant figure anchors address slots, including missing images.
+                    // Map them individually so a failed photo copy cannot renumber later figures.
+                    val mapped = if (table.name == "assistant_message") {
+                        BackupFormat.encodePhotoPaths(BackupFormat.decodePhotoPaths(raw, preserveSlots = true).map { path ->
+                            if (path.isBlank()) "" else transform(path, false).orEmpty()
+                        })
+                    } else transform(raw, table.name != "meal_record")
                     this[index] = DbCell("s", if (table.name == "assistant_message") mapped.orEmpty() else mapped)
                 }
             })
@@ -492,9 +498,9 @@ object BackupFormat {
         }
         return digest.digest().joinToString("") { "%02x".format(it) }
     }
-    fun decodePhotoPaths(raw: String): List<String> = runCatching {
+    fun decodePhotoPaths(raw: String, preserveSlots: Boolean = false): List<String> = runCatching {
         photoJson.decodeFromString<List<String>>(raw)
-    }.getOrDefault(listOf(raw)).filter { it.isNotBlank() }
+    }.getOrDefault(listOf(raw)).let { if (preserveSlots) it else it.filter(String::isNotBlank) }
     fun encodePhotoPaths(paths: List<String>): String? =
         paths.takeIf { it.isNotEmpty() }?.let { photoJson.encodeToString(it) }
 }

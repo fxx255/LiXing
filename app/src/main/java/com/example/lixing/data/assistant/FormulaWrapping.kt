@@ -55,7 +55,7 @@ internal fun wrapLongFormulas(
                 continue
             }
             block.append('\n').append(rest.substring(0, close))
-            out += splitFormulaBlocks(block.toString().trim(), maxWidthPx, measure)
+            out += splitFormulaBlocks(trimSegment(block.toString()), maxWidthPx, measure)
             block.setLength(0)
             inDisplay = false
             rest = rest.substring(close + 2)
@@ -74,7 +74,7 @@ internal fun wrapLongFormulas(
             // before unmistakable Chinese prose outside TeX groups; never change its math.
             val prose = if (prefix.isNotBlank()) topLevelProseStart(body) else -1
             if (prose >= 0) {
-                out += wrapInlineLine(prefix + DISPLAY_DELIMITER + body.substring(0, prose).trimEnd() +
+                out += wrapInlineLine(prefix + DISPLAY_DELIMITER + trimSegment(body.substring(0, prose)) +
                     DISPLAY_DELIMITER + " " + body.substring(prose), maxWidthPx, measure)
                 index++
                 continue
@@ -88,7 +88,7 @@ internal fun wrapLongFormulas(
         index++
     }
     if (inDisplay && block.toString().isNotBlank()) {
-        out += splitFormulaBlocks(block.toString().trim(), maxWidthPx, measure)
+        out += splitFormulaBlocks(trimSegment(block.toString()), maxWidthPx, measure)
     }
     return out.joinToString("\n")
 }
@@ -210,7 +210,7 @@ private fun wrapInlineLine(line: String, maxWidthPx: Int, measure: (String) -> I
 
 /** 优先级依次为：对齐换行 → 逗号分号 → 关系符 → 加减号。 */
 internal fun splitFormula(latex: String, maxWidthPx: Int, measure: (String) -> Int): List<String> {
-    val value = latex.trim()
+    val value = trimSegment(latex)
     if (value.isEmpty()) return emptyList()
     if (measure(value) <= maxWidthPx) return listOf(value)
     // 拆成独立显示块时消费掉行分隔符，不能把 \\ 留在上一段末尾或下一段开头。
@@ -220,7 +220,7 @@ internal fun splitFormula(latex: String, maxWidthPx: Int, measure: (String) -> I
         val rows = rowBreaks.map { cut ->
             value.substring(start, cut).also { start = cut + 2 }
         } + value.substring(start)
-        return rows.filter { it.isNotBlank() }.flatMap { splitFormula(it, maxWidthPx, measure) }
+        return rows.filter { it.isNotBlank() }.flatMap { splitFormula(trimSegment(it), maxWidthPx, measure) }
     }
     // 整体是一个 array/aligned 这类「行式」环境且放不下：
     // 先按行解包成独立的块级公式（去掉环境包裹与对齐符 &），
@@ -256,7 +256,7 @@ internal fun unwrapEnvironmentRows(latex: String): List<String>? {
     val match = ENVIRONMENT_LINE_RE.find(latex) ?: return null
     val env = match.groupValues[1]
     if (env !in UNWRAPPABLE_ENVS) return null
-    val rawBody = match.groupValues[2].trim()
+    val rawBody = trimSegment(match.groupValues[2])
     val body = if (env == "array") stripLeadingGroup(rawBody) else rawBody
     if (body.isEmpty() || body.contains("\\begin{") || body.contains("\\hline")) return null
     val (rows, skippedRowBreak) = splitTopLevelRows(body)
@@ -265,8 +265,8 @@ internal fun unwrapEnvironmentRows(latex: String): List<String>? {
     if (skippedRowBreak) return null
     if (rows.size < 2) return null
     if (rows.any { it.count { c -> c == '&' } > 1 }) return null
-    val cleaned = rows.map { it.replace("&", " ").trim().replace(Regex(" {2,}"), " ") }.filter { it.isNotEmpty() }
-    return cleaned.ifEmpty { null }
+    val cleaned = rows.map { trimSegment(it.replace("&", " ")).replace(Regex(" {2,}"), " ") }.filter { it.isNotEmpty() }
+    return cleaned.map(::trimSegment).filter { it.isNotEmpty() }.ifEmpty { null }
 }
 
 /** 匹配「整段就是一个数学环境」：\begin{x}…\end{x}，允许跨行。 */
@@ -290,7 +290,7 @@ private fun stripLeadingGroup(body: String): String {
             '{' -> depth++
             '}' -> {
                 depth--
-                if (depth == 0) return body.substring(index + 1).trim()
+                if (depth == 0) return trimSegment(body.substring(index + 1))
             }
         }
     }
@@ -342,7 +342,7 @@ private fun splitTopLevelRows(body: String): Pair<List<String>, Boolean> {
     }
     rows += current.toString()
     return Pair(
-        rows.map { it.trim() }.filter { it.isNotEmpty() },
+        rows.map { trimSegment(it) }.filter { it.isNotEmpty() },
         skippedRowBreak,
     )
 }
@@ -367,8 +367,37 @@ private fun greedySplit(latex: String, priority: Int, maxWidthPx: Int, measure: 
             last.append(segment)
         }
     }
-    val result = merged.map { it.toString().trim() }.filter { it.isNotEmpty() }
+    val result = merged.map { trimSegment(it.toString()) }.filter { it.isNotEmpty() }
     return result.ifEmpty { listOf(latex) }
+}
+
+/**
+ * 裁掉首尾空白，但**绝不在尾部留下孤立反斜杠**。
+ *
+ * `\ `（反斜杠 + 空格）是一个完整的 LaTeX 间距命令：模型在 `\Rightarrow` 前后
+ * 高频写成 `\ \Rightarrow\ `。拆分点在 `\Rightarrow` 上，于是上一段以 `\ ` 收尾。
+ * 若用 `String.trim()`，尾部的空格被裁掉、反斜杠却留下来 ⇒ 段尾变成孤立 `\`。
+ *
+ * JLatexMath 单独喂这个字符串时可能容忍 EOF 前的孤立反斜杠，但 Markwon 的
+ * `JLatexMathBlockParser` 每行都会补一个 LF（`addLine`），块源码尾部实际是
+ * `…\<LF>` —— 反斜杠后面跟着一个真实换行，会被当成**控制序列的开始**而报错。
+ * 这正是「单条公式 build 通过、走真实 Markwon 却渲染失败」的成因。
+ *
+ * 因此这里要么把 `\ ` 整体保留（合法间距命令），要么连反斜杠一起去掉，
+ * **绝不留下半个命令**。
+ */
+internal fun trimSegment(segment: String): String {
+    var start = 0
+    var end = segment.length
+    while (start < end && segment[start].isWhitespace()) start++
+    while (end > start && segment[end - 1].isWhitespace()) {
+        // 只有奇数个连续反斜杠才会转义空白；偶数个是完整的行分隔符。
+        var slashStart = end - 1
+        while (slashStart > start && segment[slashStart - 1] == '\\') slashStart--
+        if ((end - 1 - slashStart) % 2 == 1) end--
+        end--
+    }
+    return segment.substring(start, end)
 }
 
 private fun splitPoints(latex: String, priority: Int): List<Int> {

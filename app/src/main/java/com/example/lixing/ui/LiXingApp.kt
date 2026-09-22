@@ -28,11 +28,40 @@ import com.example.lixing.ui.navigation.TopLevelDestination
 fun LiXingApp(
     startDestination: String = Routes.TODAY,
     navController: NavHostController = rememberNavController(),
+    /**
+     * 从通知点进来时要直达的**一次性导航事件**。
+     *
+     * 为什么用「事件 + 自增 id」而不是一个 route 字符串：
+     * - 同一 route 连续点两次，`LaunchedEffect(route)` 不会重跑（值没变）；
+     * - 目标还要带上**具体会话 id**，否则只到助手页、仍停在默认会话。
+     *
+     * 由 [com.example.lixing.MainActivity] 解析 intent 后传进来，在这里消费一次。
+     */
+    notificationNavigation: com.example.lixing.MainActivity.NotificationNavigation? = null,
 ) {
     val backStackEntry by navController.currentBackStackEntryAsState()
     val currentDestination = backStackEntry?.destination
     val topLevelRoutes = TopLevelDestination.entries.map { it.route }.toSet()
     val showBottomBar = currentDestination?.route in topLevelRoutes
+
+    // 通知点进来的导航：**按事件 id 触发**。
+    // 用 id 而不是 route 作为 key：连续两次点击同一条 route 时，
+    // route 值没变、LaunchedEffect 不会重跑，用户会以为「点了没反应」。
+    androidx.compose.runtime.LaunchedEffect(notificationNavigation?.id) {
+        val navigation = notificationNavigation ?: return@LaunchedEffect
+        if (navigation.route == Routes.TODAY) return@LaunchedEffect
+        runCatching {
+            // 带会话 id 时走带参路由，助手页据此打开对应会话。
+            val target = if (navigation.route == Routes.ASSISTANT && !navigation.conversationId.isNullOrBlank()) {
+                Routes.assistantConversation(navigation.conversationId!!)
+            } else {
+                navigation.route
+            }
+            navController.navigate(target) {
+                launchSingleTop = true
+            }
+        }
+    }
 
     Scaffold(
         bottomBar = {

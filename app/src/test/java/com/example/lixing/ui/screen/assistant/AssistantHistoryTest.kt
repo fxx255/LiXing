@@ -1,5 +1,6 @@
 package com.example.lixing.ui.screen.assistant
 
+import com.example.lixing.data.assistant.buildModelHistory
 import com.example.lixing.domain.assistant.AssistantMessage
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue

@@ -74,4 +74,10 @@ object DatabaseModule {
 
     @Provides
     fun provideAssistantChatDao(db: LiXingDatabase): AssistantChatDao = db.assistantChatDao()
+
+    /** 在途请求记录（schema 14 新增，只服务本机，不参与同步与备份）。 */
+    @Provides
+    fun provideAssistantRequestDao(
+        db: LiXingDatabase,
+    ): com.example.lixing.data.local.dao.AssistantRequestDao = db.assistantRequestDao()
 }

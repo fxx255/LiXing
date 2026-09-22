@@ -1,6 +1,7 @@
 package com.example.lixing.ui.screen.assistant
 
 import com.example.lixing.data.assistant.AssistantResponseParser
+import com.example.lixing.data.assistant.mergeAssistantContinuation
 import com.example.lixing.data.assistant.normalizeAssistantMarkdown
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put

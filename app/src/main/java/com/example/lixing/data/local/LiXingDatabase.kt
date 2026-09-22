@@ -60,6 +60,7 @@ import com.example.lixing.data.local.entity.MealRecordEntity
         com.example.lixing.data.local.entity.DictionaryCacheEntity::class,
         AssistantConversationEntity::class,
         AssistantMessageEntity::class,
+        com.example.lixing.data.local.entity.AssistantRequestEntity::class,
     ],
     version = LiXingDatabase.VERSION,
     exportSchema = true,
@@ -77,8 +78,10 @@ abstract class LiXingDatabase : RoomDatabase() {
     abstract fun englishEntryDao(): EnglishEntryDao
     abstract fun assistantChatDao(): AssistantChatDao
 
+    abstract fun assistantRequestDao(): com.example.lixing.data.local.dao.AssistantRequestDao
+
     companion object {
-        const val VERSION = 13
+        const val VERSION = 14
         const val NAME = "lixing.db"
     }
 }

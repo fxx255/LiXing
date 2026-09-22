@@ -5,6 +5,7 @@ import com.example.lixing.data.local.entity.TimeSlotEntity
 import com.example.lixing.data.repository.PlanRepository
 import com.example.lixing.data.repository.TaskRepository
 import com.example.lixing.domain.model.TaskStatus
+import kotlinx.coroutines.CancellationException
 import java.time.LocalDate
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -19,6 +20,18 @@ data class PlanApplyResult(
 /**
  * 把用户确认过的 AI 计划建议落到数据库。
  *
+ * 业务校验**不是异常**：[PlanChangeApplier.applyOne] 里所有「引用的对象不存在、
+ * 任务不属于今天、请假额度用完」之类，都作为 `PlanApplyResult(success=false)`
+ * 返回，让界面逐条提示、其余条照常生效。这条分工不能改。
+ *
+ * 但 `apply` 用 `runCatching` 把**所有**异常都吞成"应用失败"，这会让两种必须
+ * 穿透的情况被吃掉：
+ * - 意外数据库异常（正在 Room 事务里 ⇒ 事务必须整体回滚，而不是"其中一条失败"）；
+ * - `CancellationException`（协程取消 ⇒ 必须原样向上传播）。
+ *
+ * 因此这里额外提供 [applyStrict]：直接调用逐条应用，**不捕获任何异常**。
+ * 校验失败照常返回 `success=false` 的结果；意外异常与取消直接抛出。
+ *
  * 边界（硬规则）：
  * - 只处理白名单动作，其它类型一律拒绝；
  * - 引用的时段 / 科目 / 模板 / 任务必须真实存在；
@@ -26,7 +39,7 @@ data class PlanApplyResult(
  * - 不删除任何数据，不触碰积分、成就与历史记录。
  */
 @Singleton
-class PlanChangeApplier @Inject constructor(
+open class PlanChangeApplier @Inject constructor(
     private val planRepository: PlanRepository,
     private val taskRepository: TaskRepository,
 ) {
@@ -38,8 +51,26 @@ class PlanChangeApplier @Inject constructor(
     ): List<PlanApplyResult> =
         actions.map { action ->
             runCatching { applyOne(action, today, dayOffLimit) }
-                .getOrElse { PlanApplyResult(action, false, it.message ?: "应用失败") }
+                .getOrElse { e ->
+                    if (e is CancellationException) throw e
+                    // 取消之外：保持历史行为（整体兼容旧调用方），业务/意外失败都作为一条失败。
+                    PlanApplyResult(action, false, e.message ?: "应用失败")
+                }
         }
+
+    /**
+     * **严格模式**：用于「整个确认批次在一个 Room 事务里执行」的路径。
+     *
+     * 语义：
+     * - 每条的正常业务校验 ⇒ 返回 `PlanApplyResult(success=false)`（逐条反馈，其余生效）；
+     * - 意外异常（IO/DB 等）⇒ **抛出**，由外层 `withTransaction` 回滚整批；
+     * - `CancellationException` ⇒ 抛出，回滚整批并让取消语义生效。
+     */
+    open suspend fun applyStrict(
+        actions: List<PlanAction>,
+        today: LocalDate,
+        dayOffLimit: Int = Int.MAX_VALUE,
+    ): List<PlanApplyResult> = actions.map { action -> applyOne(action, today, dayOffLimit) }
 
     private suspend fun applyOne(
         action: PlanAction,

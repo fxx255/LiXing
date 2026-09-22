@@ -8,6 +8,8 @@ import com.example.lixing.domain.plot.MarkArea
 import com.example.lixing.domain.plot.MarkLine
 import com.example.lixing.domain.plot.ShadeRegion
 import com.example.lixing.domain.plot.PlotSpec
+import com.example.lixing.domain.diagram.DiagramParser
+import com.example.lixing.domain.diagram.DiagramSpec
 import com.example.lixing.domain.plot.Series
 import com.example.lixing.data.repository.EnglishEntryRepository
 import com.example.lixing.domain.english.EnglishEntryType
@@ -53,6 +55,17 @@ data class ParsedAssistantReply(
     /** 模型要求绘制的图表：结构化参数，由客户端本地渲染成图后挂到这条消息上。 */
     val plots: List<PlotSpec> = emptyList(),
     /**
+     * 模型要求绘制的**结构化框图**（通信原理框图等）：只给拓扑，坐标由本地布局器算。
+     *
+     * 与 [plots] 是两个独立通道：曲线图继续走 ExprEval + 绘图器，
+     * 框图走 DiagramLayout + DiagramRenderer。两者最终都渲染成 PNG，
+     * 并按 plots 在前、diagrams 在后的顺序共同占用 `[[FIGURE:n]]` 编号。
+     */
+    val diagrams: List<DiagramSpec> = emptyList(),
+    /** Preserve failed slots so figure anchors never shift to a different image. */
+    val plotSlots: List<PlotSpec?> = plots,
+    val diagramSlots: List<DiagramSpec?> = diagrams,
+    /**
      * 本轮服务商返回的原始思考内容（reasoning 通道）。
      *
      * 仅用于临时诊断；不能据此从思考内容提取正文，即使其中含有示例 JSON。
@@ -75,6 +88,13 @@ data class ParsedAssistantReply(
      * （那种情况下 JSON 本身都不完整，不该据以持久化）。
      */
     val rawPlanActionsJson: String? = null,
+    /**
+     * 模型给出的 `english_actions` 数组原始 JSON；同样只在**确实解析出动作**时留。
+     *
+     * 用途与 [rawPlanActionsJson] 相同：把英语方案也持久化，
+     * 让用户「还没点确认就锁屏 / 切走」再回来时方案不丢。
+     */
+    val rawEnglishActionsJson: String? = null,
 )
 
 /**
@@ -96,6 +116,21 @@ data class PendingPlanReviewPayload(
     val selected: List<Boolean> = emptyList(),
     /** 是否已确认应用过。保留这个标记是为了让按钮**置灰**而不是凭空消失。 */
     val applied: Boolean = false,
+    /**
+     * 模型给出的 `english_actions` 数组原始 JSON（英语积累变更）。
+     *
+     * 为什么和 plan 放在同一个信封里：两者来自**同一次回答**，清理/恢复/应用
+     * 都必须以「这一批」为单位。早先英语方案只活在内存里，
+     * 用户还没确认就锁屏/切走，英语变更就凭空消失了
+     * （与计划方案当年遇到的是同一个问题）。
+     *
+     * 默认空串：旧信封（只有 plan）解码后这里为空，保持向后兼容。
+     */
+    val englishActionsJson: String = "",
+    /** 英语变更各条的勾选状态。 */
+    val englishSelected: List<Boolean> = emptyList(),
+    /** 英语这一批是否已经应用过（幂等标记，与 plan 的 `applied` 独立）。 */
+    val englishApplied: Boolean = false,
 )
 
 private val pendingReviewJson = Json { ignoreUnknownKeys = true }
@@ -197,8 +232,14 @@ private fun isLatexNCommand(raw: String, start: Int): Boolean {
     return word.isNotEmpty() && word.toString() in LATEX_N_COMMANDS
 }
 
-/** `\n` 开头的常见 LaTeX 命令（不含纯换行语义）。 */
-private val LATEX_N_COMMANDS = setOf(
+/**
+ * `\n` 开头的常见 LaTeX 命令（不含纯换行语义）。
+ *
+ * **唯一一份**：完整响应的 [sanitizeJsonEscapes] 与流式
+ * [IncrementalReplyDecoder] 共用它。两层如果各留一份表，一旦改动不同步，
+ * 就会出现「流式显示的公式」与「最终正文里的公式」不一致的诡异现象。
+ */
+internal val LATEX_N_COMMANDS = setOf(
     "nabla", "ne", "neq", "neg", "not", "notin", "nu", "nmid", "natural",
     "newline", "nearrow", "nwarrow", "nrightarrow", "nleftarrow",
     "nRightarrow", "nLeftarrow", "nvdash", "nsubseteq", "nsupseteq",
@@ -266,17 +307,27 @@ object AssistantResponseParser {
         val rawPlanActionsJson = actionsArray
             ?.takeIf { it.isNotEmpty() && actions.isNotEmpty() }
             ?.toString()
-        val englishActions = (root["english_actions"] as? JsonArray)
+        val englishArray = root["english_actions"] as? JsonArray
+        val englishActions = englishArray
             ?.mapIndexedNotNull { index, element -> parseEnglishAction(element, index, warnings) }
             .orEmpty()
+        // 英语变更同样留原始串：持久化信封后在重开页面时复用同一套解析+校验。
+        val rawEnglishActionsJson = englishArray
+            ?.takeIf { it.isNotEmpty() && englishActions.isNotEmpty() }
+            ?.toString()
         val plots = parsePlots(root, warnings)
+        val diagrams = DiagramParser.parseSlots(root["diagrams"] as? JsonArray, warnings)
 
         return ParsedAssistantReply(
             reply = reply.ifEmpty { trimmed },
             actions = actions,
             warnings = warnings,
             englishActions = englishActions,
-            plots = plots,
+            rawEnglishActionsJson = rawEnglishActionsJson,
+            plots = plots.filterNotNull(),
+            diagrams = diagrams.filterNotNull(),
+            plotSlots = plots,
+            diagramSlots = diagrams,
             rawPlanActionsJson = rawPlanActionsJson,
         )
     }
@@ -294,7 +345,7 @@ object AssistantResponseParser {
      * 求值器 [ExprEval]；这里先试编译一次，把写坏的表达式挡在渲染之前。
      * 单张图不合法就丢掉它并记警告，不影响正文和其它图。
      */
-    private fun parsePlots(root: JsonObject, warnings: MutableList<String>): List<PlotSpec> {
+    private fun parsePlots(root: JsonObject, warnings: MutableList<String>): List<PlotSpec?> {
         val array = root["plots"] as? JsonArray
         val single = root["plot"] as? JsonObject
         val items: List<JsonElement> = when {
@@ -302,8 +353,11 @@ object AssistantResponseParser {
             single != null -> listOf(single)
             else -> return emptyList()
         }
-        return items.mapNotNull { element ->
-            val obj = element as? JsonObject ?: return@mapNotNull null
+        return items.map { element ->
+            val obj = element as? JsonObject ?: run {
+                warnings += "有一张图表不是对象，已忽略"
+                return@map null
+            }
             runCatching { parsePlot(obj, warnings) }
                 .onFailure { warnings += "有一张图表没能生成：${it.message ?: "参数不合法"}" }
                 .getOrNull()
@@ -461,12 +515,18 @@ object AssistantResponseParser {
             parseEnglishAction(element, index, warns)
         }
         val plots = salvagePlots(normalized, warnings)
+        val diagrams = DiagramParser.parseSlots(salvageFigureArray(normalized, "diagrams"), warnings)
         return ParsedAssistantReply(
             reply = reply,
             actions = actions,
             warnings = warnings,
             englishActions = englishActions,
-            plots = plots,
+            // 截断抢救路径**刻意不留**原始动作 JSON：JSON 本身都不完整，
+            // 不该据以持久化待确认方案（与 rawPlanActionsJson 的处理一致）。
+            plots = plots.filterNotNull(),
+            diagrams = diagrams.filterNotNull(),
+            plotSlots = plots,
+            diagramSlots = diagrams,
         )
     }
 
@@ -477,7 +537,7 @@ object AssistantResponseParser {
      * 复用 [salvageActionArray] 的逐字符扫描（跳过字符串字面量）拿到已闭合的 `{...}`，
      * 再走与正常路径相同的 [parsePlot] 校验，坏的那张丢掉并记警告。
      */
-    private fun salvagePlots(raw: String, warnings: MutableList<String>): List<PlotSpec> {
+    private fun salvagePlots(raw: String, warnings: MutableList<String>): List<PlotSpec?> {
         val arrayStart = raw.indexOf("\"plots\"")
         if (arrayStart < 0) {
             // 也支持单个 `"plot": {...}` 的写法
@@ -486,18 +546,56 @@ object AssistantResponseParser {
             }
             return single.take(MAX_PLOTS)
         }
-        val objects = salvageActionArray(raw, "plots") { element, _, _ ->
-            (element as? JsonObject)?.let { obj ->
-                runCatching { parsePlot(obj, warnings) }
-                    .onFailure { warnings += "有一张图表没能生成：${it.message ?: "参数不合法"}" }
-                    .getOrNull()
+        val array = salvageFigureArray(raw, "plots") ?: return emptyList()
+        return parsePlots(JsonObject(mapOf("plots" to array)), warnings)
+    }
+
+    /**
+     * 从截断文本里抢救已完整闭合的 diagram 对象。
+     *
+     * 与 [salvagePlots] 同一套扫描：被截断时通常只有最后一项不完整，
+     * 前面的照样能用。坏的那张丢掉并记警告，不影响正文与其它图。
+     */
+    private fun salvageFigureArray(raw: String, key: String): JsonArray? {
+        val keyIndex = raw.indexOf("\"$key\"")
+        if (keyIndex < 0) return null
+        val colon = raw.indexOf(':', keyIndex + key.length + 2)
+        if (colon < 0) return null
+        val open = (colon + 1 until raw.length).firstOrNull { !raw[it].isWhitespace() } ?: return null
+        if (raw[open] != '[') return null
+        val elements = mutableListOf<JsonElement>()
+        var depth = 1
+        var string = false
+        var escaped = false
+        var start = open + 1
+        fun add(end: Int) {
+            val text = raw.substring(start, end).trim()
+            if (text.isNotEmpty()) elements += runCatching {
+                json.parseToJsonElement(sanitizeJsonEscapes(text))
+            }.getOrDefault(kotlinx.serialization.json.JsonNull)
+        }
+        for (i in open + 1 until raw.length) {
+            val c = raw[i]
+            if (string) {
+                when {
+                    escaped -> escaped = false
+                    c == '\\' -> escaped = true
+                    c == '"' -> string = false
+                }
+                continue
+            }
+            when (c) {
+                '"' -> string = true
+                '[', '{' -> depth++
+                ']', '}' -> {
+                    depth--
+                    if (depth == 0) { add(i); return JsonArray(elements) }
+                }
+                ',' -> if (depth == 1) { add(i); start = i + 1 }
             }
         }
-        // 数组本身已闭合时优先走正常路径，避免多一次扫描带来的偏差
-        parseJsonObject(raw)?.let { root ->
-            parsePlots(root, warnings).takeIf { it.isNotEmpty() }?.let { return it }
-        }
-        return objects.take(MAX_PLOTS)
+        if (!string && depth == 1) add(raw.length)
+        return JsonArray(elements)
     }
 
     /**
@@ -605,6 +703,20 @@ object AssistantResponseParser {
             ?: return emptyList()
         val warnings = mutableListOf<String>()
         return array.mapIndexedNotNull { index, element -> parseAction(element, index, warnings) }
+    }
+
+    /**
+     * 从 `english_actions` 数组的原始 JSON 还原英语变更列表。
+     *
+     * 用途与 [parseActionsJson] 对称：恢复落库的英语待确认方案。
+     * 复用逐条解析路径，坏条目被跳过而不是把整批丢掉。
+     */
+    internal fun parseEnglishActionsJson(raw: String): List<EnglishEntryAction> {
+        if (raw.isBlank()) return emptyList()
+        val array = runCatching { Json.parseToJsonElement(raw).jsonArray }.getOrNull()
+            ?: return emptyList()
+        val warnings = mutableListOf<String>()
+        return array.mapIndexedNotNull { index, element -> parseEnglishAction(element, index, warnings) }
     }
 
     private fun parseUpdateTimeSlot(obj: JsonObject): PlanAction? {

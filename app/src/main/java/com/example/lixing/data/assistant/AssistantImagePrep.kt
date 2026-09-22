@@ -13,8 +13,16 @@ object AssistantImagePrep {
     /**
      * 降采样 + 缩放到最大边 [maxDim]，再按 [quality] 压成 JPEG base64。
      * 读取失败返回 null。
+     *
+     * ⚠️ 先做**显式存在性检查**再交给 `BitmapFactory`：`decodeFile` 对不存在的
+     * 路径本应返回 null，但某些运行环境（Robolectric 的假实现就是一个）会返回
+     * 一张合成位图 —— 于是「附件已丢失」会被悄悄编码成一张假图发给模型，
+     * 用户拿到的是基于不存在内容的回答。这里无论如何都先自己确认文件可用。
      */
-    fun encodeForVision(photoPath: String, maxDim: Int = 2048, quality: Int = 95): String? = runCatching {
+    fun encodeForVision(photoPath: String, maxDim: Int = 2048, quality: Int = 95): String? {
+        val file = java.io.File(photoPath)
+        if (!file.isFile || file.length() <= 0L) return null
+        return runCatching {
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         BitmapFactory.decodeFile(photoPath, bounds)
         if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return@runCatching null
@@ -47,7 +55,8 @@ object AssistantImagePrep {
             if (scaled !== oriented) scaled.recycle()
             oriented.recycle()
         }
-    }.getOrNull()
+        }.getOrNull()
+    }
 
     private fun applyExifOrientation(source: Bitmap, photoPath: String): Bitmap {
         val orientation = runCatching {

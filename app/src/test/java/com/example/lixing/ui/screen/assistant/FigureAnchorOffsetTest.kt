@@ -1,5 +1,6 @@
 package com.example.lixing.ui.screen.assistant
 
+import com.example.lixing.data.assistant.offsetFigureAnchors
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
@@ -9,8 +10,12 @@ import org.junit.Test
  * 背景：长推导撞上输出上限会自动续写。第 1 轮模型输出正文 + plots 若干张；
  * 第 2 轮模型只续写文字，它并不知道前面已有几张图，如果之后再画图，锚点仍从
  * `[[FIGURE:1]]` 起编号。若不平移，`[[FIGURE:1]]` 会错误地指向第 1 轮的第一张图。
- * 平移规则必须与 [splitFigureSegments] 的锚点解析保持一致（大小写不敏感、
+ * 平移规则必须与 `splitFigureSegments` 的锚点解析保持一致（大小写不敏感、
  * 允许行内留白、**单独成行**）。
+ *
+ * ⚠️ 这里测的 [offsetFigureAnchors] 就是**生成管理器实际调用的那一份**
+ * （`com.example.lixing.data.assistant`）：以前界面与管理器各有一份实现，
+ * 旧测试只覆盖界面那份，管理器那份（行为还不一样）完全没有测试保护。
  */
 class FigureAnchorOffsetTest {
 

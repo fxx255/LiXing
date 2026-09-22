@@ -36,8 +36,16 @@ import javax.inject.Singleton
 class AssistantModelException(
     val kind: Kind,
     message: String,
+    /**
+     * 是否允许回退到「离线 Chat Completions」路径。
+     *
+     * **默认 false**：绝大多数错误（401/403/429、超时、断流、服务端失败）
+     * 换协议重发都会重复计费，甚至把两次响应的正文混在一起。
+     * 只有「联网搜索这一层明确不可用」这类兼容性信号才置 true。
+     */
+    val isSearchFallbackAllowed: Boolean = false,
 ) : Exception(message) {
-    enum class Kind { NOT_CONFIGURED, UNAUTHORIZED, NETWORK, SERVER, INVALID_RESPONSE }
+    enum class Kind { NOT_CONFIGURED, CONFIG_INVALID, UNAUTHORIZED, NETWORK, SERVER, INVALID_RESPONSE }
 }
 
 /** Incremental output emitted by providers that support Chat Completions streaming. */
@@ -115,25 +123,38 @@ class AssistantModelClient @Inject constructor(
         imageBase64s: List<String> = emptyList(),
         webSearchEnabled: Boolean = false,
         forceWebSearch: Boolean = false,
+        /** 每次**真实 HTTP 调用**上报一次本次 usage（缺失上报 null）。 */
+        onUsage: (UsageSample?) -> Unit = {},
+        /**
+         * 重试/续写用的**不可变请求策略**：钉下档案 id、安全端点身份与推理档位。
+         * null 表示走当前活动档案（新提交）。整轮 HTTP（含恢复/回退）只用
+         * 这里解析出的那一份配置，中途绝不重读活动档案。
+         */
+        policy: AssistantRequestPolicy? = null,
         onEvent: suspend (AssistantStreamEvent) -> Unit,
     ): ParsedAssistantReply = withContext(io) {
-        val configured = requireConfigured()
+        val configured = resolveConfigured(policy)
         val prefs = prefsRepository.current()
         val userProfile = AssistantUserProfile(prefs.assistantNickname, prefs.assistantCity)
         val searchProtocol = effectiveSearchProtocol(configured.baseUrl, configured.searchProtocol)
+        // 全局联网开关用**本轮生效值**（重试时来自快照，不是当前设置）。
         val webSearchOn = webSearchEnabled &&
-            prefs.aiWebSearchEnabled &&
+            configured.effectiveWebSearchEnabled &&
             searchProtocol != AiSearchProtocol.OFF
         var searchNote: String? = null
         if (webSearchOn && searchProtocol == AiSearchProtocol.RESPONSES) {
             try {
                 return@withContext chatDeepSeekNativeResponses(
-                    configured, messages, context, imageBase64s, userProfile, forceWebSearch, onEvent,
+                    configured, messages, context, imageBase64s, userProfile, forceWebSearch, onUsage, onEvent,
                 )
             } catch (e: CancellationException) {
                 throw e
-            } catch (e: Exception) {
-                Log.w("AssistantModel", "Responses native search failed, fallback to normal chat", e)
+            } catch (e: AssistantModelException) {
+                // ⚠️ **真实的服务端/鉴权/网络错误不降级**：换协议重发会
+                // ①重复计费 ②把两次响应的正文混在一起。这里只允许
+                // 「联网搜索这一层不可用」的明确信号回退。
+                if (!e.isSearchFallbackAllowed) throw e
+                Log.w("AssistantModel", "联网搜索不可用，改用离线回答", e)
                 searchNote = "联网搜索未生效，已改用离线回答（${e.message ?: "未知原因"}）"
             }
         }
@@ -153,7 +174,7 @@ class AssistantModelClient @Inject constructor(
             .post(payload.toString().toRequestBody(mediaType))
             .build()
 
-        val firstOutput = executeStreaming(request, onEvent)
+        val firstOutput = executeStreaming(request, onEvent, onUsage)
         val output = if (firstOutput.answer.isBlank() && firstOutput.reasoning.isNotBlank()) {
             onEvent(AssistantStreamEvent.ReasoningDelta("\n\n…首轮思考较长，正在续写最终答案…\n"))
             try {
@@ -163,6 +184,7 @@ class AssistantModelClient @Inject constructor(
                     context = context,
                     imageBase64s = imageBase64s,
                     previous = firstOutput,
+                    onUsage = onUsage,
                     onEvent = onEvent,
                 )
             } catch (error: CancellationException) {
@@ -246,7 +268,7 @@ class AssistantModelClient @Inject constructor(
             .get()
             .build()
         val response = try {
-            client.newCall(request).execute()
+            OkHttpCancellation.execute(client, request)
         } catch (e: IOException) {
             throw AssistantModelException(AssistantModelException.Kind.NETWORK, "无法获取模型列表：${e.message}")
         }
@@ -271,10 +293,10 @@ class AssistantModelClient @Inject constructor(
      * 这是一次廉价的小请求（max_tokens 100）；任何失败都回退为空集，
      * 由用户手动勾选的内容兜底，绝不阻塞主对话。
      */
-    suspend fun chooseContext(userPrompt: String): Set<AssistantContextKind> =
+    suspend fun chooseContext(userPrompt: String, policy: AssistantRequestPolicy? = null): Set<AssistantContextKind> =
         withContext(io) {
             try {
-                val configured = requireConfigured()
+                val configured = resolveConfigured(policy)
                 val baseUrl = configured.baseUrl
                 val model = configured.model
                 val apiKey = configured.apiKey
@@ -293,6 +315,9 @@ class AssistantModelClient @Inject constructor(
                     .post(payload.toString().toRequestBody(mediaType))
                     .build()
                 parseContextKinds(executeForContent(request))
+            } catch (e: CancellationException) {
+                // 取消必须继续传播：不能把「用户取消」吞成「没有自动选择上下文」。
+                throw e
             } catch (e: Exception) {
                 Log.w("AssistantModel", "chooseContext failed, fallback to manual only", e)
                 emptySet()
@@ -330,7 +355,7 @@ class AssistantModelClient @Inject constructor(
             .header("Authorization", "Bearer $apiKey")
             .post(payload.toString().toRequestBody(mediaType))
             .build()
-        client.newCall(request).execute().use { response ->
+        OkHttpCancellation.execute(client, request).use { response ->
             when {
                 response.isSuccessful -> "连接成功，模型「$model」工作正常"
                 response.code == 401 || response.code == 403 ->
@@ -426,6 +451,7 @@ class AssistantModelClient @Inject constructor(
             apiKey = targetKey,
             searchProtocol = protocol ?: active?.searchProtocol ?: AiSearchProtocol.RESPONSES,
             reasoningEffort = active?.reasoningEffort ?: AiReasoningEffort.LOW,
+            effectiveWebSearchEnabled = prefs.aiWebSearchEnabled,
         )
     }
 
@@ -471,7 +497,7 @@ class AssistantModelClient @Inject constructor(
         val code: Int
         val body: String
         try {
-            client.newCall(request).execute().use { resp ->
+            OkHttpCancellation.execute(client, request).use { resp ->
                 code = resp.code
                 body = resp.body?.string().orEmpty()
             }
@@ -576,7 +602,7 @@ class AssistantModelClient @Inject constructor(
             .header("Authorization", "Bearer ${credentials.apiKey}")
             .post(payload.toString().toRequestBody(mediaType))
             .build()
-        val response = client.newCall(request).execute()
+        val response = OkHttpCancellation.execute(client, request)
         val body = response.use { it.body?.string().orEmpty() }
         if (!response.isSuccessful) {
             throw AssistantModelException(
@@ -619,6 +645,75 @@ class AssistantModelClient @Inject constructor(
             apiKey = apiKey,
             searchProtocol = profile?.searchProtocol ?: AiSearchProtocol.RESPONSES,
             reasoningEffort = profile?.reasoningEffort ?: AiReasoningEffort.LOW,
+            effectiveWebSearchEnabled = prefs.aiWebSearchEnabled,
+        )
+    }
+
+    /**
+     * **一次解析出整轮 HTTP 使用的不可变配置**：身份与凭证取自存储层的同一把锁
+     * （不会混钥），并在进入网络前完成校验 —— 配置缺失/档案被删时直接
+     * CONFIG_INVALID，不会发出一个发往意外端点的请求。
+     *
+     * 重试路径必须用 [policy]（快照钉下的档案/身份/设置），
+     * 新提交路径传 null 走当前活动档案。
+     */
+    private suspend fun resolveConfigured(policy: AssistantRequestPolicy?): ConfiguredModel {
+        val prefs = prefsRepository.current()
+        if (!prefs.aiAssistantEnabled) {
+            throw AssistantModelException(
+                AssistantModelException.Kind.NOT_CONFIGURED,
+                "AI 助手未配置：请在设置页开启并填写接口地址、模型名与 API 密钥",
+            )
+        }
+        val identity = if (policy == null) {
+            credentialStore.resolveActiveIdentity(prefs.aiBaseUrl, prefs.aiModel)
+        } else {
+            if (policy.primaryProfileId.isBlank()) {
+                credentialStore.resolveActiveIdentity(prefs.aiBaseUrl, prefs.aiModel)
+            } else {
+                credentialStore.resolveIdentityFor(policy.primaryProfileId)
+            }
+        }
+        if (identity == null) {
+            throw AssistantModelException(
+                AssistantModelException.Kind.NOT_CONFIGURED,
+                if (policy?.primaryProfileId?.isNotBlank() == true) {
+                    "提交时使用的模型配置已被删除或缺少密钥，请重新选择后再试"
+                } else {
+                    "AI 助手未配置：请在设置页开启并填写接口地址、模型名与 API 密钥"
+                },
+            )
+        }
+        if (policy != null) {
+            // 端点与模型都要校验：同一个档案 id 换了模型/地址都不允许静默通过。
+            val currentEndpoint = safeEndpointIdentityOf(identity.baseUrl)
+            if (policy.endpointIdentity.isNotBlank() && currentEndpoint != policy.endpointIdentity) {
+                throw AssistantModelException(
+                    AssistantModelException.Kind.NOT_CONFIGURED,
+                    "模型端点已改变（要求 ${policy.endpointIdentity}，当前 $currentEndpoint），请重新发送而不是重试",
+                )
+            }
+            if (policy.model.isNotBlank() && identity.model != policy.model) {
+                throw AssistantModelException(
+                    AssistantModelException.Kind.NOT_CONFIGURED,
+                    "模型已改变（要求 ${policy.model}，当前 ${identity.model}），请重新发送而不是重试",
+                )
+            }
+        }
+        // 推理档位与联网协议以**策略**（快照）为权威；当前开关只决定助手是否可用。
+        val effort = policy?.reasoningEffort?.takeIf { it.isNotBlank() }?.let { named ->
+            runCatching { AiReasoningEffort.valueOf(named) }.getOrNull()
+        } ?: identity.reasoningEffort
+        val protocol = policy?.searchProtocol?.takeIf { it.isNotBlank() }?.let { named ->
+            runCatching { AiSearchProtocol.valueOf(named.uppercase()) }.getOrNull()
+        } ?: identity.searchProtocol
+        return ConfiguredModel(
+            baseUrl = identity.baseUrl,
+            model = identity.model,
+            apiKey = identity.apiKey,
+            searchProtocol = protocol,
+            reasoningEffort = effort,
+            effectiveWebSearchEnabled = policy?.effectiveWebSearchEnabled ?: prefs.aiWebSearchEnabled,
         )
     }
 
@@ -628,7 +723,12 @@ class AssistantModelClient @Inject constructor(
         val apiKey: String,
         val searchProtocol: AiSearchProtocol,
         val reasoningEffort: AiReasoningEffort,
-    )
+        /** 全局联网开关的**本轮生效值**（重试时来自快照，不读当前开关）。 */
+        val effectiveWebSearchEnabled: Boolean,
+    ) {
+        /** 安全端点身份（主机+路径），用于诊断归集与重试校验。 */
+        val endpointIdentity: String get() = safeEndpointIdentityOf(baseUrl)
+    }
 
     private fun buildChatPayload(
         configured: ConfiguredModel,
@@ -663,26 +763,29 @@ class AssistantModelClient @Inject constructor(
             }
         }
         put("messages", buildJsonArray {
-            add(buildJsonObject { put("role", "system"); put("content", buildSystemPrompt(userProfile)) })
-            add(buildJsonObject {
-                put("role", "system")
-                put("content", reasoningInstruction(configured.reasoningEffort))
-            })
-            if (context.isNotBlank()) {
-                add(buildJsonObject {
-                    put("role", "user")
-                    put("content", "以下是用户勾选的本机学习数据（只读上下文）：\n\n$context")
-                })
-                add(buildJsonObject { put("role", "assistant"); put("content", "好的，我已了解这些上下文。") })
-            }
+            // ── 顺序（实施文档第五节）────────────────────────────────────────
+            //   [稳定前缀]  固定协议 → 稳定用户资料/推理设定
+            //   [稳定历史]  既有历史（**不含**当前这一轮）
+            //   [易变尾部]  当前时间 → 最新只读本机数据
+            //   [当前问题]  必须**最后一条**，且带它自己的图片
+            //
+            // 为什么必须最后：早先的实现先把 messages 全量铺开（里面已经含当前问题），
+            // 再把时间/本机数据追加到末尾，于是请求的最后一条是上下文（甚至是一条
+            // "好的，我已了解这些上下文。" 的 assistant 消息）—— 模型看到的
+            // 「最后说的话」不是用户的提问，回答自然跑偏。
+            val segments = AssistantPromptAssembler.assemble(
+                protocol = SYSTEM_PROMPT,
+                user = userProfile,
+                reasoningEffort = configured.reasoningEffort,
+                history = messages,
+                context = context,
+            )
+            add(buildJsonObject { put("role", "system"); put("content", segments.stableSystem) })
+            // 稳定历史：排除最后一条 user（它是当前问题，稍后单独放）。
+            val currentTurnIndex = messages.indexOfLast { it.role == "user" }
             messages.forEachIndexed { index, message ->
-                // 当前轮用调用方直接给出的图；历史消息用回溯填充的图。
-                // 接口是无状态的，不重发历史图片的话，追问时模型就看不到之前拍的题/文章。
-                val images = if (index == messages.lastIndex && message.role == "user" && imageBase64s.isNotEmpty()) {
-                    imageBase64s
-                } else {
-                    message.imageBase64s
-                }
+                if (index == currentTurnIndex) return@forEachIndexed
+                val images = message.imageBase64s
                 add(buildJsonObject {
                     put("role", message.role)
                     if (images.isNotEmpty()) {
@@ -700,6 +803,41 @@ class AssistantModelClient @Inject constructor(
                     }
                 })
             }
+            // ── 易变尾部 ──────────────────────────────────────────────────────
+            // 当前时间：靠近当前问题，且明确标注不能覆盖系统规则。
+            add(buildJsonObject { put("role", "system"); put("content", segments.volatileSystem) })
+            if (context.isNotBlank()) {
+                // 只读数据挂在**它自己的 user 消息**里，且**不追加 assistant 回应**：
+                // 追加回应会让最后一条变成 assistant，当前问题就不在最末了。
+                add(
+                    buildJsonObject {
+                        put("role", "user")
+                        put("content", "以下是用户勾选的本机学习数据（只读上下文）：\n\n$context")
+                    },
+                )
+            }
+            // ── 当前问题（必须是最后一条）────────────────────────────────────
+            val current = currentTurnIndex.takeIf { it >= 0 }?.let { messages[it] }
+            if (current != null) {
+                // 当前轮的图片由调用方直接给出（历史图片走 message.imageBase64s）。
+                val images = if (imageBase64s.isNotEmpty()) imageBase64s else current.imageBase64s
+                add(buildJsonObject {
+                    put("role", "user")
+                    if (images.isNotEmpty()) {
+                        put("content", buildJsonArray {
+                            add(buildJsonObject { put("type", "text"); put("text", current.content) })
+                            images.forEach { base64 ->
+                                add(buildJsonObject {
+                                    put("type", "image_url")
+                                    put("image_url", buildJsonObject { put("url", "data:image/jpeg;base64,$base64") })
+                                })
+                            }
+                        })
+                    } else {
+                        put("content", current.content)
+                    }
+                })
+            }
         })
     }
 
@@ -708,6 +846,8 @@ class AssistantModelClient @Inject constructor(
         val reasoning: String,
         val finishReason: String?,
         val citations: List<Citation>,
+        /** 本次 HTTP 请求归一化后的 usage；null = 供应商未提供。 */
+        val usage: UsageSample? = null,
     )
 
     internal data class Citation(val title: String, val url: String)
@@ -719,8 +859,10 @@ class AssistantModelClient @Inject constructor(
         context: String,
         imageBase64s: List<String>,
         previous: StreamOutput,
+        onUsage: (UsageSample?) -> Unit,
         onEvent: suspend (AssistantStreamEvent) -> Unit,
     ): StreamOutput {
+        currentCoroutineContext().ensureActive()
         // Keep the original picture with the original question, not the recovery instruction.
         val recoveryMessages = messages.mapIndexed { index, message ->
             if (index == messages.lastIndex && message.role == "user" && imageBase64s.isNotEmpty()) {
@@ -752,26 +894,43 @@ class AssistantModelClient @Inject constructor(
             .post(payload.toString().toRequestBody(mediaType))
             .build()
         val recovered = try {
-            executeStreaming(request, onEvent)
+            executeStreaming(request, onEvent, onUsage)
         } catch (error: AssistantModelException) {
-            // Older compatible endpoints may cap max_tokens at 8192. Retry that budget only
-            // when the endpoint rejects the request, not on auth/network failures.
-            if (error.kind != AssistantModelException.Kind.SERVER || !error.message.orEmpty().contains("HTTP 400")) throw error
+            // 只有**明确点名输出预算过大**的 400 才降预算重发一次；
+            // 泛化的 invalid_request_error 重发是白花一次计费请求。
+            if (error.kind != AssistantModelException.Kind.SERVER) throw error
+            val body = error.message.orEmpty()
+            if (!body.contains("HTTP 400") || !isOutputBudgetRejected(body)) throw error
             val compatible = JsonObject(payload + ("max_tokens" to JsonPrimitive(MAX_OUTPUT_TOKENS)))
-            executeStreaming(request.newBuilder().post(compatible.toString().toRequestBody(mediaType)).build(), onEvent)
+            executeStreaming(
+                request.newBuilder().post(compatible.toString().toRequestBody(mediaType)).build(),
+                onEvent,
+                onUsage,
+            )
         }
         return recovered.copy(
             reasoning = (previous.reasoning + recovered.reasoning).takeLast(MAX_REASONING_CAPTURE_CHARS),
             citations = previous.citations + recovered.citations,
+            // 恢复是**另一次 HTTP 请求**，它有自己的 usage：按本次请求记录，不相加。
+            usage = recovered.usage,
         )
     }
 
     private suspend fun executeStreaming(
         request: Request,
         onEvent: suspend (AssistantStreamEvent) -> Unit,
+        /**
+         * 每次**真实 HTTP 调用**上报一次：拿到 usage 就上报样本，
+         * 供应商没给该字段就上报 `null`（计为「未知」，不是「0 命中」）。
+         * 绝不能因为 null 就跳过 —— 那样「缺字段的调用」根本不计入统计。
+         */
+        onUsage: (UsageSample?) -> Unit = {},
     ): StreamOutput {
+        val usageAccumulator = UsageAccumulator("chat-completions")
+        try {
+        // 取消必须能立刻打断阻塞读：注册在 execute 之前，覆盖整个 response.use。
         val response = try {
-            client.newCall(request).execute()
+            OkHttpCancellation.execute(client, request)
         } catch (e: IOException) {
             throw AssistantModelException(
                 AssistantModelException.Kind.NETWORK,
@@ -797,26 +956,40 @@ class AssistantModelClient @Inject constructor(
             val citations = mutableListOf<Citation>()
             var finishReason: String? = null
             var sawSse = false
+            var sawTerminal = false
             val raw = StringBuilder()
+            // 同一请求的累计 usage 只能统计一次：这里保留最后一次有效上报，绝不累加。
             val source = body.source()
-            while (!source.exhausted()) {
-                currentCoroutineContext().ensureActive()
-                val line = source.readUtf8Line() ?: break
-                if (!line.startsWith("data:")) {
-                    if (line.isNotBlank()) raw.append(line)
-                    continue
+            source.readSseEvents(onRawLine = { raw.append(it) }) { sse ->
+                val data = sse.data
+                if (!sawSse && data.isNotBlank()) sawSse = true
+                if (data == "[DONE]") {
+                    sawTerminal = true
+                    // 明确终止：不再等 EOF（阻塞读会一直挂着）。
+                    return@readSseEvents false
                 }
+                if (data.isBlank()) return@readSseEvents true
+                val chunk = runCatching { json.parseToJsonElement(data) as? JsonObject }.getOrNull()
+                    ?: return@readSseEvents true
                 sawSse = true
-                val data = line.removePrefix("data:").trim()
-                if (data == "[DONE]") break
-                if (data.isEmpty()) continue
-                val chunk = runCatching { json.parseToJsonElement(data) as? JsonObject }.getOrNull() ?: continue
+                // usage-only 末块（choices 为空）也要处理：先于 choices 解析。
+                usageAccumulator.accept(AssistantUsageParser.parse(chunk, "chat-completions"))
                 citations += extractCitations(chunk["citations"])
-                val choice = (chunk["choices"] as? JsonArray)?.firstOrNull() as? JsonObject ?: continue
-                finishReason = (choice["finish_reason"] as? JsonPrimitive)?.contentOrNull ?: finishReason
-                val message = (choice["delta"] as? JsonObject) ?: (choice["message"] as? JsonObject) ?: continue
+                val choice = (chunk["choices"] as? JsonArray)?.firstOrNull() as? JsonObject
+                    ?: return@readSseEvents true
+                val reason = (choice["finish_reason"] as? JsonPrimitive)?.contentOrNull
+                if (reason != null) {
+                    finishReason = reason
+                    // 有 finish_reason 就是一次合法的收尾（长度上限或被内容过滤都算）。
+                    sawTerminal = true
+                    // 保留后续 usage-only 末块（choices 为空），直到 [DONE] 或 EOF。
+                }
+                val message = (choice["delta"] as? JsonObject) ?: (choice["message"] as? JsonObject)
+                    ?: return@readSseEvents true
                 citations += extractCitations(message["annotations"])
                 citations += extractCitations(message["citations"])
+                // 有的网关把 usage 挂在 choice 上。
+                usageAccumulator.accept(AssistantUsageParser.parse(choice, "chat-completions"))
                 extractText(
                     message["reasoning_content"] ?: message["reasoning"] ?: message["reasoning_details"],
                 ).takeIf { it.isNotEmpty() }?.let {
@@ -827,6 +1000,7 @@ class AssistantModelClient @Inject constructor(
                     answer.append(it)
                     onEvent(AssistantStreamEvent.AnswerDelta(it))
                 }
+                true
             }
             if (!sawSse) {
                 val root = runCatching { json.parseToJsonElement(raw.toString()) as? JsonObject }.getOrNull()
@@ -837,6 +1011,7 @@ class AssistantModelClient @Inject constructor(
                 citations += extractCitations(message?.get("annotations"))
                 citations += extractCitations(message?.get("citations"))
                 finishReason = (choice?.get("finish_reason") as? JsonPrimitive)?.contentOrNull
+                usageAccumulator.accept(AssistantUsageParser.parse(root, "chat-completions"))
                 val reasoningText = extractText(
                     message?.get("reasoning_content") ?: message?.get("reasoning") ?: message?.get("reasoning_details"),
                 )
@@ -849,8 +1024,28 @@ class AssistantModelClient @Inject constructor(
                     answer.append(answerText)
                     onEvent(AssistantStreamEvent.AnswerDelta(answerText))
                 }
+                sawTerminal = true
+            } else if (!sawTerminal) {
+                // 即使已有部分正文，没有终止事件的 EOF 仍是断流，不能保存为完整回答。
+                throw AssistantModelException(
+                    AssistantModelException.Kind.NETWORK,
+                    "流式响应没有正常结束（未收到终止标记），已按中断处理",
+                )
             }
-            return StreamOutput(answer.toString(), reasoning.toString(), finishReason, citations)
+            // usage 上报：**每次真实 HTTP 调用都要上报一次**。
+            // 供应商没给 usage 字段时上报 null（「未知」），不能跳过 ——
+            // 跳过会让「缺字段的调用」从统计里凭空消失，覆盖率随之虚高。
+            val usage = usageAccumulator.result()
+            return StreamOutput(
+                answer.toString(),
+                reasoning.toString(),
+                finishReason,
+                citations,
+                usage,
+            )
+        }
+        } finally {
+            onUsage(usageAccumulator.result())
         }
     }
 
@@ -870,9 +1065,9 @@ class AssistantModelClient @Inject constructor(
         }
 
     /** 从 OpenAI 兼容响应里取出 choices[0].message.content。 */
-    private fun executeForContent(request: Request): String {
+    private suspend fun executeForContent(request: Request): String {
         val response = try {
-            client.newCall(request).execute()
+            OkHttpCancellation.execute(client, request)
         } catch (e: IOException) {
             throw AssistantModelException(
                 AssistantModelException.Kind.NETWORK,
@@ -921,8 +1116,40 @@ class AssistantModelClient @Inject constructor(
         imageBase64s: List<String>,
         userProfile: AssistantUserProfile,
         forceWebSearch: Boolean,
+        onUsage: (UsageSample?) -> Unit,
         onEvent: suspend (AssistantStreamEvent) -> Unit,
     ): ParsedAssistantReply {
+        // 先尝试**真正的逐片流式**：Responses 端点支持 stream 时，
+        // response.output_text.delta 会随生成逐片到达，用户能在结束前看到正文。
+        //
+        // 回退条件被刻意收得很窄（见 [StreamUnsupportedSignal] 的抛出点）：
+        // 只有「端点明确拒绝 stream 参数」或「端点根本没按 SSE 回、且尚未产出任何正文」
+        // 才回退。401/403/429、超时、response.failed、已产生正文后的断流
+        // 都是**真实错误**，直接中断，绝不换协议重发（那会重复计费并混合两部分正文）。
+        val streamed = try {
+            executeResponsesStreaming(
+                configured, messages, context, imageBase64s, userProfile, forceWebSearch, onUsage, onEvent,
+            )
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: StreamUnsupportedSignal) {
+            null
+        } catch (e: StreamNonSseSignal) {
+            // 端点回了 HTTP 200 + JSON（忽略了 stream 参数）：**就地解析**，
+            // 不再发第二次请求。早先这里把已经拿到的 200 JSON 丢掉重发一次，
+            // 等于白花一次计费请求。
+            return finalizeResponsesReply(
+                e.parsed, e.usage, messages, usedStreaming = false,
+                extraWarning = "联网搜索走了 Responses 完整响应读取（该端点未启用流式），本次正文在生成结束后才展示",
+            )
+        }
+        if (streamed != null) {
+            return finalizeResponsesReply(
+                streamed.output, streamed.usage, messages, usedStreaming = true,
+            )
+        }
+        // 走到这里说明流式请求被端点**明确拒绝**（StreamUnsupportedSignal）：
+        // 才允许再发一次非流式请求。
         val payload = buildDeepSeekResponsesPayload(
             configured, messages, context, imageBase64s, userProfile, forceWebSearch,
         )
@@ -931,8 +1158,11 @@ class AssistantModelClient @Inject constructor(
             .header("Authorization", "Bearer ${configured.apiKey}")
             .post(payload.toString().toRequestBody(mediaType))
             .build()
+        var sample: UsageSample? = null
+        currentCoroutineContext().ensureActive()
+        try {
         val response = try {
-            client.newCall(request).execute()
+            OkHttpCancellation.execute(client, request)
         } catch (e: IOException) {
             throw AssistantModelException(
                 AssistantModelException.Kind.NETWORK,
@@ -949,54 +1179,331 @@ class AssistantModelClient @Inject constructor(
                 }
                 throw AssistantModelException(kind, "DeepSeek 返回 HTTP ${resp.code}：${text.take(240).ifEmpty { "无返回内容" }}")
             }
+            val usage = runCatching {
+                val root = json.parseToJsonElement(text) as? JsonObject
+                (root?.get("usage") as? JsonObject)?.let {
+                    AssistantUsageParser.parseUsageObject(it, "responses")
+                }
+            }.getOrNull()
+            sample = usage
             val output = parseDeepSeekResponses(text)
-            val answer = output.text.trim()
-            if (answer.isEmpty()) {
+            finalizeResponsesReply(
+                output, usage, messages, usedStreaming = false,
+                extraWarning = "联网搜索走了 Responses 完整响应读取（该端点未启用流式），本次正文在生成结束后才展示",
+            )
+        }
+        } finally {
+            onUsage(sample)
+        }
+    }
+
+    /** Responses 流式路径中「端点不支持」的信号，用于静默回退完整读取。 */
+    private class StreamUnsupportedSignal(message: String) : Exception(message)
+
+    /**
+     * 端点返回了 HTTP 200 但**不是 SSE**（忽略了 `stream` 参数）。
+     *
+     * 携带**已经解析好的**输出，调用方就地使用 —— 不再发第二次请求。
+     */
+    private class StreamNonSseSignal(
+        val parsed: DeepSeekResponsesOutput,
+        val usage: UsageSample?,
+        message: String,
+    ) : Exception(message)
+
+    private data class ResponsesStreamResult(
+        val output: DeepSeekResponsesOutput,
+        val usage: UsageSample?,
+    )
+
+    /**
+     * Responses API 的真实流式读取。
+     *
+     * 只解析**实际事件**（SSE `event:`/`data:` 对），把
+     * `response.output_text.delta` 作为增量正文、`response.reasoning_summary_text.delta`
+     * 作为增量推理分别上报；`response.output_text.annotation.added` 收集来源；
+     * `response.completed` 里取最终 usage。
+     *
+     * 抛 [StreamUnsupportedSignal] 表示「这个端点不支持流式」，由调用方回退。
+     */
+    private suspend fun executeResponsesStreaming(
+        configured: ConfiguredModel,
+        messages: List<AssistantMessage>,
+        context: String,
+        imageBase64s: List<String>,
+        userProfile: AssistantUserProfile,
+        forceWebSearch: Boolean,
+        onUsage: (UsageSample?) -> Unit,
+        onEvent: suspend (AssistantStreamEvent) -> Unit,
+    ): ResponsesStreamResult {
+        val payload = JsonObject(
+            buildDeepSeekResponsesPayload(
+                configured, messages, context, imageBase64s, userProfile, forceWebSearch,
+            ) + ("stream" to JsonPrimitive(true)),
+        )
+        val request = Request.Builder()
+            .url(deepSeekResponsesUrl(configured.baseUrl))
+            .header("Authorization", "Bearer ${configured.apiKey}")
+            .post(payload.toString().toRequestBody(mediaType))
+            .build()
+        val usageAccumulator = UsageAccumulator("responses")
+        currentCoroutineContext().ensureActive()
+        try {
+        val response = try {
+            OkHttpCancellation.execute(client, request)
+        } catch (e: IOException) {
+            throw AssistantModelException(
+                AssistantModelException.Kind.NETWORK,
+                "网络错误：${e.message ?: "无法连接 DeepSeek 接口"}",
+            )
+        }
+        return response.use { resp ->
+            if (!resp.isSuccessful) {
+                val body = resp.body?.string().orEmpty()
+                // 401/403/429 是**鉴权或限流**问题，换一种协议再发一次毫无意义，
+                // 而且会重复计费。只有明确的「不支持该参数/工具」才允许回退。
+                if (resp.code == 401 || resp.code == 403) {
+                    throw AssistantModelException(
+                        AssistantModelException.Kind.UNAUTHORIZED,
+                        "API 密钥被拒绝（HTTP ${resp.code}）",
+                    )
+                }
+                if (resp.code == 429) {
+                    throw AssistantModelException(
+                        AssistantModelException.Kind.SERVER,
+                        "请求被限流（HTTP 429）：${body.take(200).ifEmpty { "请稍后重试" }}",
+                    )
+                }
+                if (isStreamUnsupportedResponse(resp.code, body)) {
+                    throw StreamUnsupportedSignal("HTTP ${resp.code}: ${body.take(160)}")
+                }
+                // 其余 4xx/5xx 都是**真实错误**，直接中断，不再换协议重发。
                 throw AssistantModelException(
-                    AssistantModelException.Kind.INVALID_RESPONSE,
-                    "DeepSeek 未返回有效内容",
+                    AssistantModelException.Kind.SERVER,
+                    "DeepSeek 返回 HTTP ${resp.code}：${body.take(240).ifEmpty { "无返回内容" }}",
                 )
             }
-            output.thinking.takeIf { it.isNotBlank() }?.let {
-                onEvent(AssistantStreamEvent.ReasoningDelta(it))
-            }
-            onEvent(AssistantStreamEvent.AnswerDelta(answer))
-            val parsed = try {
-                val userPrompt = messages.lastOrNull { it.role == "user" }?.content.orEmpty()
-                guardMissingEnglishActions(
-                    guardMissingPlanActions(AssistantResponseParser.parse(answer, normalizeMarkdown = false), userPrompt),
-                    userPrompt,
-                )
-            } catch (e: Exception) {
-                throw AssistantModelException(
-                    AssistantModelException.Kind.INVALID_RESPONSE,
-                    "无法解析模型返回：${e.message ?: "未知错误"}",
-                )
-            }
-            val distinctCitations = output.citations.distinctBy(Citation::url)
-            val noted = if (output.searched) {
-                parsed
-            } else {
-                parsed.copy(
-                    warnings = parsed.warnings +
-                        "已按联网模式请求，但服务端没有返回任何搜索记录或来源（接口可能忽略了 web_search 工具），本次实际是离线回答",
-                )
-            }
-            if (distinctCitations.isEmpty()) {
-                noted
-            } else {
-                noted.copy(
-                    reply = buildString {
-                        append(noted.reply)
-                        append("\n\n### 来源\n")
-                        distinctCitations.forEach { citation ->
-                            append("- [")
-                            append(citation.title.replace("[", "").replace("]", "").ifBlank { citation.url })
-                            append("](").append(citation.url).append(")\n")
+            val body = resp.body ?: throw AssistantModelException(
+                AssistantModelException.Kind.INVALID_RESPONSE,
+                "DeepSeek 没有返回响应体",
+            )
+            val contentType = resp.header("Content-Type").orEmpty()
+            val text = StringBuilder()
+            val thinking = StringBuilder()
+            val citations = mutableListOf<Citation>()
+            var searched = false
+            var sawEvent = false
+            var sawCompleted = false
+            var streamError: String? = null
+            var failedTerminal = false
+            // 非 SSE 的 200 响应体：原样留存，供就地解析（不重发请求）。
+            val rawStreamBody = StringBuilder()
+            val source = body.source()
+            source.readSseEvents(onRawLine = { rawStreamBody.append(it) }) { sse ->
+                val data = sse.data
+                if (data.isEmpty() || data == "[DONE]") return@readSseEvents true
+                val chunk = runCatching { json.parseToJsonElement(data) as? JsonObject }.getOrNull()
+                    ?: return@readSseEvents true
+                sawEvent = true
+                // JSON 里没有 type 时，用 SSE 的 event 名当类型。
+                val type = (chunk["type"] as? JsonPrimitive)?.contentOrNull ?: sse.name.orEmpty()
+                when (type) {
+                    "response.output_text.delta" -> {
+                        val delta = (chunk["delta"] as? JsonPrimitive)?.contentOrNull.orEmpty()
+                        if (delta.isNotEmpty()) {
+                            text.append(delta)
+                            onEvent(AssistantStreamEvent.AnswerDelta(delta))
                         }
-                    }.trim(),
+                    }
+                    "response.reasoning_summary_text.delta", "response.reasoning_text.delta" -> {
+                        val delta = (chunk["delta"] as? JsonPrimitive)?.contentOrNull.orEmpty()
+                        if (delta.isNotEmpty()) {
+                            thinking.appendTail(delta, MAX_REASONING_CAPTURE_CHARS)
+                            onEvent(AssistantStreamEvent.ReasoningDelta(delta))
+                        }
+                    }
+                    "response.output_text.annotation.added" -> {
+                        extractDeepSeekCitations(chunk["annotation"], citations)
+                        searched = true
+                    }
+                    "response.web_search_call.searching", "response.web_search_call.completed" -> searched = true
+                    "response.completed" -> {
+                        sawCompleted = true
+                        val respObj = chunk["response"] as? JsonObject
+                        usageAccumulator.accept(
+                            (respObj?.get("usage") as? JsonObject)?.let {
+                                AssistantUsageParser.parseUsageObject(it, "responses")
+                            },
+                        )
+                        // completed 里带有完整的 output：用它补齐 citations 与 searched 标记，
+                        // 但**正文以增量累积为准**（两者应一致，增量已实时展示过）。
+                        respObj?.let { final ->
+                            val parsed = parseDeepSeekResponses(final.toString())
+                            citations += parsed.citations
+                            if (parsed.searched) searched = true
+                            if (text.isEmpty() && parsed.text.isNotEmpty()) {
+                                text.append(parsed.text)
+                                onEvent(AssistantStreamEvent.AnswerDelta(parsed.text))
+                            }
+                            if (thinking.isEmpty() && parsed.thinking.isNotEmpty()) {
+                                thinking.appendTail(parsed.thinking, MAX_REASONING_CAPTURE_CHARS)
+                                onEvent(AssistantStreamEvent.ReasoningDelta(parsed.thinking))
+                            }
+                        }
+                        // 成功终态已收齐（usage 也在上面取过）：不再等 EOF。
+                        return@readSseEvents false
+                    }
+                    "response.failed", "error" -> {
+                        failedTerminal = true
+                        streamError = (chunk["message"] as? JsonPrimitive)?.contentOrNull
+                            ?: ((chunk["error"] as? JsonObject)?.get("message") as? JsonPrimitive)?.contentOrNull
+                            ?: "服务端报告失败"
+                    }
+                    // 明确的不完整终态：同样不得重发，按失败处理。
+                    "response.incomplete" -> {
+                        failedTerminal = true
+                        streamError = "服务端返回了不完整的结果（response.incomplete）"
+                    }
+                    else -> Unit
+                }
+                // 失败/不完整终态已是明确结论：停止读取（keep-open 连接不能等 EOF），
+                // 错误由下面的既有失败路径抛出，绝不重发。
+                !failedTerminal
+            }
+            // 兼容路径判据：Content-Type 明确是 JSON 且不是 event-stream。
+            // 只有在这种「端点根本没按 SSE 回」的情况下才允许就地解析，
+            // 且必须**尚未产生任何正文**（否则会丢掉已经展示给用户的内容）。
+            val looksJson = contentType.contains("application/json", ignoreCase = true) &&
+                !contentType.contains("event-stream", ignoreCase = true)
+            // response.failed / error：这是服务端明确的失败终态，**不得**协议回退重发。
+            streamError?.let {
+                throw AssistantModelException(AssistantModelException.Kind.SERVER, "联网搜索请求失败：$it")
+            }
+            // 端点忽略 stream 参数、直接回完整 JSON：**就地解析**这份 200 响应体，
+            // 绝不丢弃后重发（那会白花一次计费请求）。
+            // 只有在**没有任何正文**时才允许这样做。
+            if (looksJson && !sawEvent && text.isEmpty() && thinking.isEmpty()) {
+                val jsonText = rawStreamBody.toString()
+                val usage = runCatching {
+                    val root = json.parseToJsonElement(jsonText) as? JsonObject
+                    (root?.get("usage") as? JsonObject)?.let {
+                        AssistantUsageParser.parseUsageObject(it, "responses")
+                    }
+                }.getOrNull()
+                usageAccumulator.accept(usage)
+                val parsed = parseDeepSeekResponses(jsonText)
+                throw StreamNonSseSignal(
+                    parsed = parsed,
+                    usage = usage,
+                    message = "端点未按 SSE 返回（Content-Type=$contentType）",
                 )
             }
+            // 有 event 但从未出现 completed：EOF 属于**断流**，不能当成功保存。
+            if (sawEvent && !sawCompleted && !failedTerminal) {
+                throw AssistantModelException(
+                    AssistantModelException.Kind.NETWORK,
+                    "流式响应没有正常结束（未收到 response.completed），已按中断处理",
+                )
+            }
+            if (!sawEvent && text.isEmpty() && thinking.isEmpty()) {
+                // 既没有事件、也没有正文、也不是明确 JSON：空响应。
+                throw AssistantModelException(
+                    AssistantModelException.Kind.INVALID_RESPONSE,
+                    "DeepSeek 返回了空响应体",
+                )
+            }
+            ResponsesStreamResult(
+                DeepSeekResponsesOutput(
+                    text = text.toString(),
+                    thinking = thinking.toString(),
+                    citations = citations,
+                    searched = searched || citations.isNotEmpty(),
+                ),
+                usageAccumulator.result(),
+            )
+        }
+        } finally {
+            onUsage(usageAccumulator.result())
+        }
+    }
+
+    /**
+     * 这个 4xx 是否**明确表示端点不接受 stream**。
+     *
+     * 判据必须窄：只有响应体里出现「不支持/未知参数 `stream`」这类**明确措辞**
+     * 才算。早先的实现把所有非 401/403 的 4xx 都当成「不支持流式」并重发一次，
+     * 于是限流(429)、参数错误、内容策略拒绝都会**多花一次计费请求**。
+     */
+    /**
+     * 这个 4xx 是否**明确表示端点不接受 `stream` 参数**。
+     *
+     * 回退（换协议重发一次）的代价是**多一次计费请求**，而且如果第一次其实
+     * 已经开始输出，两次响应的正文还会被混在一起。所以判据必须很窄 ——
+     * 只有响应体**明确点名 `stream` 参数**才算：
+     *
+     * - ✅ `Unknown parameter: 'stream'` / `unsupported parameter: stream`
+     *   / `stream is not supported` / API 文档式的「不支持 stream」；
+     * - ❌ 泛化的 `invalid_request_error`、`unsupported`、`unknown parameter`
+     *   —— 这些是 OpenAI 兼容端点的**通用错误外壳**，出现在几乎所有 400 上
+     *   （提示词非法、参数类型错、内容策略拒绝……）。早先只要正文里同时出现
+     *   "stream" 和 "invalid_request_error" 就回退，于是**任意 400 都会重发一次**。
+     */
+    private fun isStreamUnsupportedResponse(code: Int, body: String): Boolean =
+        isStreamParameterRejected(code, body)
+
+
+    /** Responses 路径共用的收尾：正文、来源与联网说明。 */
+    private fun finalizeResponsesReply(
+        output: DeepSeekResponsesOutput,
+        usage: UsageSample?,
+        messages: List<AssistantMessage>,
+        usedStreaming: Boolean,
+        extraWarning: String? = null,
+    ): ParsedAssistantReply {
+        val answer = output.text.trim()
+        if (answer.isEmpty()) {
+            throw AssistantModelException(
+                AssistantModelException.Kind.INVALID_RESPONSE,
+                "DeepSeek 未返回有效内容",
+            )
+        }
+        val parsed = try {
+            val userPrompt = messages.lastOrNull { it.role == "user" }?.content.orEmpty()
+            guardMissingEnglishActions(
+                guardMissingPlanActions(AssistantResponseParser.parse(answer, normalizeMarkdown = false), userPrompt),
+                userPrompt,
+            )
+        } catch (e: Exception) {
+            throw AssistantModelException(
+                AssistantModelException.Kind.INVALID_RESPONSE,
+                "无法解析模型返回：${e.message ?: "未知错误"}",
+            )
+        }
+        val warnings = buildList {
+            if (!output.searched) {
+                add(
+                    "已按联网模式请求，但服务端没有返回任何搜索记录或来源" +
+                        "（接口可能忽略了 web_search 工具），本次实际是离线回答",
+                )
+            }
+            if (extraWarning != null) add(extraWarning)
+        }
+        val noted = if (warnings.isEmpty()) parsed else parsed.copy(warnings = parsed.warnings + warnings)
+        val distinctCitations = output.citations.distinctBy(Citation::url)
+        return if (distinctCitations.isEmpty()) {
+            noted
+        } else {
+            noted.copy(
+                reply = buildString {
+                    append(noted.reply)
+                    append("\n\n### 来源\n")
+                    distinctCitations.forEach { citation ->
+                        append("- [")
+                        append(citation.title.replace("[", "").replace("]", "").ifBlank { citation.url })
+                        append("](").append(citation.url).append(")\n")
+                    }
+                }.trim(),
+            )
         }
     }
 
@@ -1010,27 +1517,28 @@ class AssistantModelClient @Inject constructor(
     ): JsonObject = buildJsonObject {
         put("model", configured.model)
         put("max_output_tokens", MAX_OUTPUT_TOKENS)
-        put("instructions", buildString {
-            append(buildSystemPrompt(userProfile))
-            append("\n\n").append(reasoningInstruction(configured.reasoningEffort))
-        })
+        // 与 Chat Completions 保持同一分段顺序：instructions 只放稳定前缀
+        // （固定协议 + 稳定用户资料 + 推理设定），时间与只读数据挪到 input 尾部。
+        val segments = AssistantPromptAssembler.assemble(
+            protocol = SYSTEM_PROMPT,
+            user = userProfile,
+            reasoningEffort = configured.reasoningEffort,
+            history = messages,
+            context = context,
+        )
+        put("instructions", segments.stableSystem)
         put("tools", buildJsonArray { add(buildJsonObject { put("type", "web_search") }) })
         // 用户明确开启搜索时强制调用：默认 auto 时模型可能完全不用这个工具。
         if (forceWebSearch) {
             put("tool_choice", buildJsonObject { put("type", "web_search") })
         }
         put("input", buildJsonArray {
-            if (context.isNotBlank()) {
-                add(buildJsonObject { put("role", "user"); put("content", "以下是你需要依据的本机学习数据（只读）：\n\n$context") })
-                add(buildJsonObject { put("role", "assistant"); put("content", "好的，我已了解这些上下文。") })
-            }
+            // 与 Chat Completions 完全相同的顺序约束：
+            // 稳定历史（**不含**当前轮）→ 易变时间/只读数据 → **当前问题最后**。
+            val currentTurnIndex = messages.indexOfLast { it.role == "user" }
             messages.forEachIndexed { index, message ->
-                // 同 Chat Completions：当前轮用现给的图，历史轮用回溯填充的图
-                val images = if (index == messages.lastIndex && message.role == "user" && imageBase64s.isNotEmpty()) {
-                    imageBase64s
-                } else {
-                    message.imageBase64s
-                }
+                if (index == currentTurnIndex) return@forEachIndexed
+                val images = message.imageBase64s
                 add(buildJsonObject {
                     put("role", message.role)
                     if (images.isNotEmpty()) {
@@ -1048,13 +1556,51 @@ class AssistantModelClient @Inject constructor(
                     }
                 })
             }
+            // 易变尾部：当前时间永远靠近当前问题；只读数据紧随其后。
+            add(buildJsonObject { put("role", "system"); put("content", segments.volatileSystem) })
+            if (context.isNotBlank()) {
+                // 不追加 assistant 回应：那会让最后一条不是当前问题。
+                add(
+                    buildJsonObject {
+                        put("role", "user")
+                        put("content", "以下是用户勾选的本机学习数据（只读上下文）：\n\n$context")
+                    },
+                )
+            }
+            // 当前问题必须最后。
+            val current = currentTurnIndex.takeIf { it >= 0 }?.let { messages[it] }
+            if (current != null) {
+                val images = if (imageBase64s.isNotEmpty()) imageBase64s else current.imageBase64s
+                add(buildJsonObject {
+                    put("role", "user")
+                    if (images.isNotEmpty()) {
+                        put("content", buildJsonArray {
+                            add(buildJsonObject { put("type", "input_text"); put("text", current.content) })
+                            images.forEach { base64 ->
+                                add(buildJsonObject {
+                                    put("type", "input_image")
+                                    put("image_url", "data:image/jpeg;base64,$base64")
+                                })
+                            }
+                        })
+                    } else {
+                        put("content", current.content)
+                    }
+                })
+            }
         })
     }
 
     /**
-     * 系统提示词 = 通用协议 + 用户个性化（可空，逐条注入）+ 当前时间。
-     * 时间永远注入：让「今天/本周/昼夜问候」有唯一基准；个性化条目没填就不出现。
+     * 旧版系统提示词（协议 + 时间 + 用户个性化）。
+     *
+     * **已不再用于组装请求**：它把时间夹在协议和用户偏好之间，一分钟一变就会
+     * 截断后续全部稳定前缀。请求改用 [AssistantPromptAssembler] 分段组装
+     * （稳定协议/资料在前，时间与只读数据挪到易变尾部）。
+     *
+     * 保留此函数只为兼容可能存在的历史调用点与测试比对，勿在新代码中使用。
      */
+    @Deprecated("改用 AssistantPromptAssembler.assemble 的分段组装")
     private fun buildSystemPrompt(user: AssistantUserProfile): String = buildString {
         append(SYSTEM_PROMPT)
         val nickname = user.nickname.trim()
@@ -1151,9 +1697,21 @@ class AssistantModelClient @Inject constructor(
     - **图表要插在正文里，不能堆在最后**：正文中提到某张图时，就在那句话的下一行单独写一个锚点 `[[FIGURE:1]]`（序号从 1 开始，对应 plots 数组的第几项），客户端会把这个位置替换成图。例如：「由图可见主瓣宽度为 2/T。\n[[FIGURE:1]]\n接下来分析旁瓣……」正文里不要写「见下图」再让图出现在文末。
     - 每张图最多插入一次锚点；某张图如果在正文中没有对应讲解位置，可以不放锚点（客户端会把它排在末尾）
     - 没有画图需求时不要输出 plots；正文里也不要再重复粘贴公式图像的描述
+14. 需要画**框图**时（通信原理框图、系统组成图、信号流程图：调制/解调、编码/译码、滤波/抽样、放大器级联、分支与合流等），在顶层加一个 diagrams 数组，每项一张图，**客户端本地排版并绘制**；你只给拓扑，**不要给坐标、不要用 ASCII 画框**（禁止在代码块里用 ──→、│、┌──┐ 这类字符拼框图——手机窄屏上会换行散乱、完全读不出来）：
+     {"title":"相干解调框图","nodes":[{"id":"in","label":"接收信号 ${'$'}s(t)${'$'}","shape":"io"},{"id":"mix","label":"乘法器","shape":"mixer","glyph":"×"},{"id":"lpf","label":"低通滤波器","shape":"block"},{"id":"out","label":"${'$'}m_o(t)${'$'}","shape":"io"},{"id":"carrier","label":"本地载波 ${'$'}\\sin(2\\pi f_c t)${'$'}","shape":"io","row":1}],"edges":[{"from":"in","to":"mix"},{"from":"mix","to":"lpf"},{"from":"lpf","to":"out"},{"from":"carrier","to":"mix","toPort":"bottom"}]}
+     - shape：block（矩形功能框，默认）、mixer（圆形乘法器/相加器，glyph 写 × 或 +）、sum（求和点）、io（无框文字：输入/输出/说明）、junction（连线交点）
+     - 位置用 row / column 提示：**row 0 = 主链，1 = 主链下方一行**（本地载波这类支路就设 row:1）；column 显式指定次序（越大越靠右），不写则由连线自动推导
+     - 连线端口 fromPort / toPort：left / right / top / bottom / auto。**从下方接进某个框**写 "toPort":"bottom"（本地载波 → 乘法器下方，箭头向上）；不写时按相对位置自动选
+     - 连线可带 label（如短标注）与 dashed:true（虚线，表示可选/反馈）
+     - 节点可带 subLabel 作为框内第二行小字（型号、参数）
+     - 标签里**可以直接写中文，也可以写 LaTeX**（写成 ${'$'}...${'$'}），客户端用公式排版引擎渲染；公式里的 \frac 必须带花括号（\frac{B}{2}，不要写 \frac B2）
+     - 规模限制：一张图最多 24 个节点、40 条连线，一次最多 4 张图；标签 60 字以内、标题 40 字以内
+     - **节点 id 必须唯一、连线的 from/to 必须指向已定义的 id**，否则整张图会被丢弃；写之前先自查一遍
+     - 分支与合流都能表达：同一个 from 写多条 edge 即分支，多条 edge 指向同一个 to 即合流
+     - diagrams 与 plots **共用** [[FIGURE:n]] 编号：**plots 的图在前，diagrams 的图在后**。例如本轮 1 张曲线图 + 1 张框图，正文里分别写 [[FIGURE:1]] 与 [[FIGURE:2]]
 
 输出格式（必须是可以直接 JSON.parse 的单个对象，不要 Markdown 代码块）：
-{"reply": "给用户看的正文", "plan_actions": [ ... ], "english_actions": [ ... ]}
+{"reply": "给用户看的正文", "plan_actions": [ ... ], "english_actions": [ ... ], "plots": [ ... ], "diagrams": [ ... ]}
 
 plan_actions 支持的类型：
 - {"kind":"UPDATE_TIME_SLOT","slotId":数字,"startTime":"HH:mm"可省,"endTime":"HH:mm"可省,"requiredTaskCount":数字可省(0~20,0=该时段任务全部都要完成),"reason":"简短原因"}，时间与该时段「至少完成几项」至少给一个
@@ -1251,6 +1809,65 @@ internal fun modelsUrl(baseUrl: String): String {
 
 /** 该端点是不是小米 MiMo：目前只有它的 Chat Completions 支持在 tools 里声明 web_search。 */
 internal fun isMiMoEndpoint(baseUrl: String): Boolean = "mimo" in baseUrl.lowercase()
+
+/**
+ * 这个 4xx 是否**明确表示端点不接受 `stream` 参数**（是否可以安全回退）。
+ *
+ * 抽成纯函数是为了能直接单测：回退一次 = 多一次计费请求，
+ * 判宽了会重复计费，判窄了会让兼容端点无法工作。
+ *
+ * 判据（见 [AssistantModelClient.isStreamUnsupportedResponse] 的说明）：
+ * 必须**同时**满足「点名了 stream 参数」与「明确说不支持/未知」。
+ * 泛化的 `invalid_request_error` / `unsupported` 单独出现**不算** ——
+ * 它们是 OpenAI 兼容端点的通用错误外壳，几乎出现在所有 400 上。
+ */
+internal fun isStreamParameterRejected(code: Int, body: String): Boolean {
+    // 401/403 鉴权、429 限流都**不是**「不支持 stream」：换协议重发毫无意义，
+    // 而且会多花一次请求（限流下还会加重限流）。
+    if (code !in 400..499) return false
+    if (code == 401 || code == 403 || code == 429) return false
+    val lower = body.lowercase()
+    // ① 必须点名 `stream` 参数本身。
+    val namesStreamParameter = listOf(
+        "stream'", "stream\"", "stream`",
+        "parameter stream", "parameter: stream",
+        "stream parameter", "stream 参数",
+    ).any { it in lower } || lower.trim().endsWith("stream")
+    if (!namesStreamParameter) return false
+    // ② 必须明确表达「不支持 / 未知 / 不接受」。
+    return listOf(
+        "unsupported", "not supported", "does not support", "不支持",
+        "未知参数", "unknown parameter", "unrecognized parameter",
+        "unrecognised parameter", "invalid parameter", "不接受的参数",
+    ).any { it in lower }
+}
+
+/**
+ * 是否应该为了「输出预算过大」重发一次并降低预算。
+ *
+ * 只认**明确点名输出上限参数且表达上限被超出**的拒绝。
+ * `max_tokens must be an integer greater than 0` 这类**下界/类型**校验错误
+ * 只是参数写错了，降低预算重发不会成功，也不会成功 —— 必须排除。
+ * 泛化的 `invalid_request_error` 400 同样不算。
+ */
+internal fun isOutputBudgetRejected(body: String): Boolean {
+    val lower = body.lowercase()
+    val namesBudgetParameter = listOf(
+        "max_tokens", "max_output_tokens", "max_completion_tokens",
+    ).any { it in lower }
+    if (!namesBudgetParameter) return false
+    // 下界/类型校验：预算值本身非法，降预算解决不了，绝不能重发。
+    val lowerBoundOrType = listOf(
+        "must be an integer", "integer greater than", "must be greater than",
+        "must be a positive", "must be positive", "invalid value", "invalid type",
+        "not a number", "must be an even", "低于", "必须为整数",
+    ).any { it in lower }
+    if (lowerBoundOrType) return false
+    return listOf(
+        "too large", "too big", "too high", "exceed", "maximum", "max is",
+        "greater than", "larger than", "上限", "过大", "超出", "超过", "最多",
+    ).any { it in lower }
+}
 
 /**
  * 服务商实际可用的联网协议。

@@ -11,6 +11,8 @@ import com.example.lixing.ui.photo.rotatePhotoAndSave
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import androidx.compose.material.icons.filled.RotateRight
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import android.os.Bundle
 import android.os.SystemClock
 import android.speech.RecognitionListener
@@ -198,9 +200,22 @@ private class VoiceInputSession {
 @Composable
 fun AssistantScreen(
     onBack: () -> Unit,
+    /**
+     * 从通知点进来时要直接打开的会话 id。
+     *
+     * 只消费一次；导航事件带自增 id，重复点击同一条 route 会重新进入本屏，
+     * 从而再次打开对应会话。
+     */
+    initialConversationId: String? = null,
     viewModel: AssistantViewModel = hiltViewModel(),
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
+    // 打开通知指向的会话。
+    LaunchedEffect(initialConversationId) {
+        if (!initialConversationId.isNullOrBlank()) {
+            viewModel.openConversation(initialConversationId)
+        }
+    }
     val snackbar = remember { SnackbarHostState() }
     val listState = rememberLazyListState()
     val context = LocalContext.current
@@ -722,6 +737,16 @@ fun AssistantScreen(
                         )
                     }
                     Row(verticalAlignment = Alignment.CenterVertically) {
+                        // 输入框左侧的「重新发送」：只在当前会话最新请求中断且可重试时出现。
+                        // 无中断时不占位，因此不会多出一行常驻提示。
+                        state.retryRequestId?.let { requestId ->
+                            RetrySendButton(
+                                reason = state.retryReason,
+                                busy = state.busy || state.retrying,
+                                onClick = viewModel::retryInterrupted,
+                                requestId = requestId,
+                            )
+                        }
                         IconButton(
                             onClick = {
                                 val file = createAssistantPhotoFile(context)
@@ -1478,6 +1503,8 @@ private fun AssistantMarkdownBody(
     onImageClick: (List<String>, Int) -> Unit,
 ) {
     val segments = remember(content, imagePaths.size) { splitFigureSegments(content, imagePaths.size) }
+    val visibleIndices = remember(imagePaths) { imagePaths.indices.filter { imagePaths[it].isNotBlank() } }
+    val viewerImages = remember(imagePaths) { visibleIndices.map { imagePaths[it] } }
     val hasInlineFigure = segments.any { it.figureIndex != null }
     if (!hasInlineFigure) {
         // 没写锚点（或图没生成出来）：正文 + 末尾图（保持旧排版，模型偶尔不守约定时也不会丢图）。
@@ -1491,29 +1518,50 @@ private fun AssistantMarkdownBody(
             if (plainText.isNotBlank()) key("text") { MarkdownAnswer(plainText) }
             imagePaths.forEachIndexed { index, path ->
                 key("figure-$index") {
-                    InlineGeneratedImage(path = path) { onImageClick(imagePaths, index) }
+                    if (path.isBlank()) FailedGeneratedImageHint(index)
+                    else InlineGeneratedImage(path = path) { onImageClick(viewerImages, visibleIndices.indexOf(index)) }
                 }
             }
         }
         return
     }
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        // 显式 key，理由同 MarkdownAnswer：图文交替时槽位会增减，
-        // 按位置复用会让内层 AndroidView 错配，后面的图/表格随之失去交互。
         segments.forEachIndexed { segmentIndex, segment ->
             key("seg-$segmentIndex") {
                 if (segment.figureIndex != null) {
                     val index = segment.figureIndex
-                    // 锚点越界（模型写了 [[FIGURE:3]] 但只有 2 张图）直接跳过
-                    if (index in imagePaths.indices) {
-                        InlineGeneratedImage(path = imagePaths[index]) { onImageClick(imagePaths, index) }
+                    // 锚点越界（模型写了 [[FIGURE:3]] 但只有 2 张图）直接跳过；
+                    // 槽位为空串表示该图渲染失败——留出编号但不画图，绝不去占用别的图的位次。
+                    val path = imagePaths.getOrNull(index)
+                    if (!path.isNullOrBlank() && index in imagePaths.indices) {
+                        InlineGeneratedImage(path = path) { onImageClick(viewerImages, visibleIndices.indexOf(index)) }
+                    } else if (index in imagePaths.indices) {
+                        FailedGeneratedImageHint(index)
                     }
                 } else if (segment.text.isNotBlank()) {
                     MarkdownAnswer(segment.text)
                 }
             }
         }
+        val anchored = segments.mapNotNull { it.figureIndex }.toSet()
+        imagePaths.indices.filter { it !in anchored }.forEach { index ->
+            key("tail-$index") {
+                if (imagePaths[index].isBlank()) FailedGeneratedImageHint(index)
+                else InlineGeneratedImage(path = imagePaths[index]) {
+                    onImageClick(viewerImages, visibleIndices.indexOf(index))
+                }
+            }
+        }
     }
+}
+
+@Composable
+private fun FailedGeneratedImageHint(index: Int) {
+    Text(
+        text = "第 ${index + 1} 张图未能生成，可让助手重新绘制。",
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
 }
 
 /** 正文片段：要么是一段 Markdown 文字，要么指向某张生成图（0-based）。 */
@@ -1542,7 +1590,12 @@ internal fun splitFigureSegments(content: String, figureCount: Int): List<Figure
         if (before.isNotBlank()) segments += FigureSegment(before, null)
         val oneBased = match.groupValues[1].toIntOrNull()
         val index = oneBased?.minus(1)
-        // 只有确实存在对应图片时才产生图段；否则该锚点被静默丢弃（不露字面量）
+        // 只有确实存在对应图片时才产生图段；否则该锚点被静默丢弃（不露字面量）。
+        //
+        // figureCount 是**槽位数**而不是「成功渲染的图数」：渲染失败的槽位由调用方
+        // 填成空串占位（见 AssistantViewModel.renderFigures），编号因此保持稳定 ——
+        // 第 3 张图失败时 [[FIGURE:3]] 仍然指向第 3 个槽位，只是那个槽位不画图，
+        // 而不是让后面所有图的编号往前挪一位（那样图和正文就对不上了）。
         if (figureCount > 0 && index != null && index in 0 until figureCount) {
             segments += FigureSegment("", index)
         }
@@ -2722,6 +2775,50 @@ private fun EnglishChangeReviewItem(
                     )
                 }
             }
+        }
+    }
+}
+
+/**
+ * 输入框左侧的「重新发送」按钮。
+ *
+ * 设计要点（对应实施文档第三节）：
+ * - **只在中断时出现**：`state.retryRequestId` 为空就整块不渲染，
+ *   所以平时不会占据一个常驻提示行；
+ * - 图标是回旋箭头（[Icons.Filled.RotateRight]），内容描述为「重新发送」；
+ * - 点击立即防重入（`busy`/`retrying` 期间禁用），不会连点发出多次请求；
+ * - 失败原因作为副标题展示，让用户知道上次为什么中断，而不是只看到一个孤立的箭头。
+ */
+@Composable
+private fun RetrySendButton(
+    requestId: String,
+    reason: String?,
+    busy: Boolean,
+    onClick: () -> Unit,
+) {
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        IconButton(
+            onClick = onClick,
+            enabled = !busy,
+            modifier = Modifier.semantics { contentDescription = "重新发送" },
+        ) {
+            Icon(
+                imageVector = Icons.Filled.RotateRight,
+                contentDescription = "重新发送",
+                tint = if (busy) {
+                    MaterialTheme.colorScheme.onSurfaceVariant
+                } else {
+                    MaterialTheme.colorScheme.primary
+                },
+            )
+        }
+        reason?.takeIf { it.isNotBlank() }?.let { text ->
+            Text(
+                text = text,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+            )
         }
     }
 }

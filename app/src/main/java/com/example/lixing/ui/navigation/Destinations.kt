@@ -30,6 +30,17 @@ object Routes {
     const val ENGLISH_NOTEBOOK = "english/notebook"
     const val ENGLISH_REVIEW = "english/review"
     const val ASSISTANT = "assistant"
+
+    /**
+     * 助手页 + 指定会话：从通知点进来时用它直达「那一次生成所在的会话」。
+     *
+     * 单独一条带参路由而不是给 [ASSISTANT] 加可选查询参数：
+     * 现有的 `secondLevel(Routes.ASSISTANT)` 是精确匹配，
+     * 加查询串会让匹配失效；新增一条更清晰，也不影响既有导航。
+     */
+    const val ASSISTANT_CONVERSATION = "assistant/conversation/{conversationId}"
+    fun assistantConversation(conversationId: String) =
+        "assistant/conversation/${android.net.Uri.encode(conversationId)}"
     const val ACHIEVEMENTS = "achievements"
     const val REPORTS = "reports"
     const val PERMISSION_GUIDE = "permission_guide"
