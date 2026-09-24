@@ -17,7 +17,7 @@
 - JDK 21 定向单测：52 项通过（StreamingMarkdownTokenizer、AssistantContinuation、DiagramLayoutAcceptance、DiagramParser、UpdateManifest）。
 - MuMu 12-1（Android 15，`127.0.0.1:16416`）：`DiagramDeviceTest` 6/6 通过，`AssistantAnswerDeviceTest` 2/2 通过。
 - Debug、Release、DebugAndroidTest 均构建成功；Release 通过 R8 与 lintVital。
-- Release APK：45,423,344 字节；SHA-256 `9eff492dbb88310f4653c36566499c328d83239a3b8818b2c59a13cdb0d8d4a`。
+- Release APK：45,423,344 字节；SHA-256 `9eff492dbb88310f4653c36566499c328d83239a3b8818b2c59a13cdb0d8d4a6`。
 - Release 签名证书 SHA-256：`9c5f21a4e1923d3f290339cccbe4b3cb3fba3c849d385e867f5781fb8b1a8de2`。
 - GitHub 独立资产 digest 与本地 APK SHA-256 一致；公开 `update.json` 返回 versionCode 47、minSdk 26、force false。
 
