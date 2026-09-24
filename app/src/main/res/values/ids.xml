@@ -4,4 +4,5 @@
          内容没变时跳过重复的 setMarkdown（滚动重组会反复触发 update，
          重复渲染会重启公式的异步加载）。 -->
     <item name="markdown_render_key" type="id" />
+    <item name="streaming_markdown_cache" type="id" />
 </resources>

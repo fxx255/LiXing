@@ -96,7 +96,7 @@ class UpdateManifestTest {
     }
 
     @Test
-    fun `required decision when minSdk is above current device`() {
+    fun `incompatible update is skipped when minSdk is above current device`() {
         val m = UpdateManifest(
             versionCode = 9,
             apkUrl = "https://x",
@@ -104,8 +104,8 @@ class UpdateManifestTest {
             minSdk = 36,
         )
         val decision = m.isUpgradeFor(currentCode = 1, deviceSdk = 33)
-        // minSdk > deviceSdk 视为强制升级
-        assertTrue(decision is UpgradeDecision.Required)
+        // APK 根本无法安装，不能弹出强制升级。
+        assertTrue(decision is UpgradeDecision.Skip)
 
         // minSdk <= deviceSdk 时不强制升级，而是建议升级
         val m2 = UpdateManifest(

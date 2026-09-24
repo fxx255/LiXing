@@ -225,4 +225,37 @@ class DiagramParserTest {
         assertTrue(warnings.isEmpty())
         assertNull(null)
     }
+
+    @Test fun textbookProfileAndSemanticRoleAreParsed() {
+        val (list, warnings) = parse(
+            JsonObject(
+                mapOf(
+                    "title" to JsonPrimitive("SSB"),
+                    "profile" to JsonPrimitive("textbook_dual_branch"),
+                    "nodes" to json.parseToJsonElement(
+                        """[{"id":"mix","label":"乘法器","shape":"mixer","role":"upper_mixer"}]""",
+                    ),
+                    "edges" to JsonArray(emptyList()),
+                ),
+            ),
+        )
+        assertTrue("不应有警告: $warnings", warnings.isEmpty())
+        assertEquals(DiagramLayoutProfile.TEXTBOOK_DUAL_BRANCH, list.single().profile)
+        assertEquals("upper_mixer", list.single().nodes.single().role)
+    }
+
+    @Test fun unknownProfileKeepsLegacyGenericLayout() {
+        val (list, warnings) = parse(
+            JsonObject(
+                mapOf(
+                    "title" to JsonPrimitive("legacy"),
+                    "profile" to JsonPrimitive("future_profile"),
+                    "nodes" to json.parseToJsonElement("""[{"id":"a","label":"A"}]"""),
+                    "edges" to JsonArray(emptyList()),
+                ),
+            ),
+        )
+        assertTrue("不应有警告: $warnings", warnings.isEmpty())
+        assertEquals(DiagramLayoutProfile.GENERIC, list.single().profile)
+    }
 }

@@ -21,6 +21,8 @@ import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import android.provider.Settings
 import android.text.Spannable
+import android.text.SpannableStringBuilder
+import android.text.Spanned
 import android.text.method.LinkMovementMethod
 import android.text.style.ClickableSpan
 import android.view.MotionEvent
@@ -115,6 +117,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -142,6 +145,7 @@ import androidx.core.content.ContextCompat
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlin.math.abs
 import kotlin.math.sin
@@ -154,6 +158,7 @@ import com.example.lixing.data.local.entity.AssistantConversationEntity
 import com.example.lixing.data.assistant.normalizeAssistantMarkdown
 import com.example.lixing.data.assistant.sanitizeAssistantLatex
 import com.example.lixing.data.assistant.wrapLongFormulas
+import com.example.lixing.data.assistant.isPlaceholderReply
 import com.example.lixing.domain.assistant.AssistantContextKind
 import com.example.lixing.ui.screen.assistant.PlanChangeScope.LONG_TERM
 import com.example.lixing.ui.screen.assistant.PlanChangeScope.TODAY
@@ -666,7 +671,26 @@ fun AssistantScreen(
                                 onToggle = viewModel::toggleReasoningExpanded,
                             )
                         }
-                        if (!streamingAnswer || displayContent.isNotBlank() || message.imagePaths.isNotEmpty()) {
+                        // A persisted placeholder (for example "见上") can be
+                        // present before the first visible answer delta. Keep
+                        // that transient bubble hidden while the thinking
+                        // panel is active; reveal the bubble only after the
+                        // answer stream has actually started.
+                        val hasAnswerText = displayContent.isNotBlank() &&
+                            !isAssistantPlaceholder(displayContent)
+                        val showBubble = if (message.role == "assistant") {
+                            // Keep figure slots (including failed slots with a
+                            // retry hint), but never show a useless placeholder
+                            // or an empty answer while the thinking panel runs.
+                            val hasFigureSlot = message.imagePaths.any(String::isNotBlank) ||
+                                displayContent.contains("[[FIGURE:")
+                            hasFigureSlot ||
+                                (streamingAnswer && state.activeAnswerStarted && hasAnswerText) ||
+                                (!streamingAnswer && hasAnswerText)
+                        } else {
+                            !streamingAnswer || displayContent.isNotBlank() || message.imagePaths.isNotEmpty()
+                        }
+                        if (showBubble) {
                             MessageBubble(
                                 role = message.role,
                                 content = displayContent,
@@ -1298,21 +1322,51 @@ internal fun InlineGeneratedImage(path: String, onClick: () -> Unit) {
         }
         return
     }
-    Image(
-        bitmap = bitmap.asImageBitmap(),
-        contentDescription = "生成的图表",
-        contentScale = ContentScale.FillWidth,
-        modifier = Modifier
-            .fillMaxWidth()
-            // 为什么图片要抬高 zIndex：同一个 Column 里的文本块是真实 Android 视图
-            // （interop），它的实际高度一旦比 Compose 给它的格位高，多出来的部分就
-            // 盖在这张图片上、把本该落到图片上的触摸先吃掉。Compose 的 zIndex 会把
-            // 命中测试顺序改成「先测图片」，于是即便文本块略有溢出，点击也能落在图上。
-            // 这个是**结构性兜底**：不依赖「高度一定准」这个前提。
-            .zIndex(FIGURE_Z_INDEX)
-            .clip(RoundedCornerShape(10.dp))
-            .clickable { onClick() },
-    )
+    val isDiagram = remember(path, bitmap.width, bitmap.height) {
+        shouldScrollGeneratedImage(File(path), bitmap.width, bitmap.height)
+    }
+    if (isDiagram) {
+        // Wide textbook diagrams become unreadably small when they are always
+        // fitted to a phone-width bubble. Keep a readable minimum canvas and
+        // let the bubble scroll horizontally. Measure the finite viewport
+        // before adding horizontalScroll, which gives its child infinite width.
+        BoxWithConstraints(
+            modifier = Modifier
+                .fillMaxWidth()
+                .zIndex(FIGURE_Z_INDEX)
+                .clip(RoundedCornerShape(10.dp)),
+        ) {
+            val viewportWidth = maxWidth.takeIf { it.value.isFinite() && it.value > 0f }
+                ?: DIAGRAM_MIN_INLINE_WIDTH
+            val diagramWidth = maxOf(viewportWidth, DIAGRAM_MIN_INLINE_WIDTH)
+            Box(Modifier.width(viewportWidth).horizontalScroll(rememberScrollState())) {
+                Image(
+                    bitmap = bitmap.asImageBitmap(),
+                    contentDescription = "生成的图表",
+                    contentScale = ContentScale.FillWidth,
+                    modifier = Modifier
+                        .width(diagramWidth)
+                        .clickable { onClick() },
+                )
+            }
+        }
+    } else {
+        Image(
+            bitmap = bitmap.asImageBitmap(),
+            contentDescription = "生成的图表",
+            contentScale = ContentScale.FillWidth,
+            modifier = Modifier
+                .fillMaxWidth()
+                // 为什么图片要抬高 zIndex：同一个 Column 里的文本块是真实 Android 视图
+                // （interop），它的实际高度一旦比 Compose 给它的格位高，多出来的部分就
+                // 盖在这张图片上、把本该落到图片上的触摸先吃掉。Compose 的 zIndex 会把
+                // 命中测试顺序改成「先测图片」，于是即便文本块略有溢出，点击也能落在图上。
+                // 这个是**结构性兜底**：不依赖「高度一定准」这个前提。
+                .zIndex(FIGURE_Z_INDEX)
+                .clip(RoundedCornerShape(10.dp))
+                .clickable { onClick() },
+        )
+    }
 }
 
 /**
@@ -1323,6 +1377,14 @@ internal fun InlineGeneratedImage(path: String, onClick: () -> Unit) {
  * 就会盖住靠后的图片与表格并吃掉它们的触摸（用户反馈的「越靠后越点不动」）。
  */
 private const val FIGURE_Z_INDEX = 1f
+private val DIAGRAM_MIN_INLINE_WIDTH = 640.dp
+
+/** The dimensions also cover diagrams restored into the generic backup folder. */
+internal fun shouldScrollGeneratedImage(file: File, width: Int, height: Int): Boolean =
+    file.parentFile?.name == "diagrams" ||
+        (file.extension.equals("png", ignoreCase = true) &&
+            (file.name.startsWith("diagram_") ||
+                (width >= 1000 && height > 0 && width.toFloat() / height >= 2.1f)))
 
 private const val DECODE_RETRY_MAX = 3
 private const val DECODE_RETRY_DELAY_MS = 600L
@@ -1388,8 +1450,7 @@ internal fun MessageBubble(
                         }
                     } else {
                         if (streaming) {
-                            Text(content, style = MaterialTheme.typography.bodyLarge,
-                                color = MaterialTheme.colorScheme.onSurface)
+                            StreamingMarkdownBody(content)
                         } else {
                             AssistantMarkdownBody(content, imagePaths, onImageClick)
                         }
@@ -1399,6 +1460,149 @@ internal fun MessageBubble(
         }
     }
 }
+
+/**
+ * Stable, throttled rendering for an answer that is still arriving.
+ *
+ * Markwon and JLatexMath need a complete Markdown/LaTeX span before they can
+ * measure it. Feeding the whole answer to Markwon for every token makes an
+ * unfinished formula acquire a new height repeatedly, which moves the rest of
+ * the chat while the answer is being generated. The tokenizer therefore keeps
+ * the unfinished suffix as plain text and only hands closed blocks to the
+ * normal Markdown renderer. A small ticker limits AndroidView/Markwon updates
+ * to at most one batch roughly every 80 ms while preserving the final full
+ * rendering path once streaming ends.
+ */
+@Composable
+private fun StreamingMarkdownBody(content: String) {
+    val tokenizer = remember { StreamingMarkdownTokenizer() }
+    val latestContent = rememberUpdatedState(content)
+    var snapshot by remember { mutableStateOf(tokenizer.update(content)) }
+    var renderedContent by remember { mutableStateOf(content) }
+
+    LaunchedEffect(tokenizer) {
+        while (isActive) {
+            val nextContent = latestContent.value
+            if (nextContent != renderedContent) {
+                snapshot = tokenizer.update(nextContent)
+                renderedContent = nextContent
+            }
+            delay(STREAMING_MARKDOWN_TICK_MS)
+        }
+    }
+
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        snapshot.blocks.forEach { block ->
+            key("stream-block-${block.id}") {
+                MarkdownAnswer(block.text)
+            }
+        }
+        if (snapshot.tail.isNotEmpty()) {
+            key("stream-tail-${snapshot.tailId}") {
+                var maxTailHeightPx by remember { mutableIntStateOf(0) }
+                val density = LocalDensity.current
+                Box(
+                    modifier = Modifier
+                        .heightIn(min = with(density) { maxTailHeightPx.toDp() })
+                        .onSizeChanged { maxTailHeightPx = maxOf(maxTailHeightPx, it.height) },
+                ) {
+                    // The same TextView remains mounted while the paragraph
+                    // grows. Closed formulas are parsed once, then subsequent
+                    // source text is appended as plain text to the cached
+                    // Spanned; opening another formula cannot make the first
+                    // one disappear or schedule it for a fresh parse.
+                    StreamingMarkdownChunk(snapshot)
+                }
+            }
+        }
+    }
+}
+
+private const val STREAMING_MARKDOWN_TICK_MS = 80L
+
+private data class StreamingMarkdownRenderCache(
+    val tailId: Long,
+    val prefixLength: Int,
+    val widthPx: Int,
+    val textColor: Int,
+    val linkColor: Int,
+    val renderedPrefix: Spanned,
+)
+
+@Composable
+private fun StreamingMarkdownChunk(snapshot: StreamingMarkdownSnapshot) {
+    val textColor = MaterialTheme.colorScheme.onSurface.toArgb()
+    val linkColor = MaterialTheme.colorScheme.primary.toArgb()
+    var widthPx by remember { mutableIntStateOf(0) }
+    AndroidView(
+        modifier = Modifier.fillMaxWidth().clipToBounds().onSizeChanged { widthPx = it.width },
+        factory = { context -> createMarkdownTextView(context, textColor, linkColor) },
+        update = { view ->
+            renderStreamingMarkdown(view, snapshot, widthPx, textColor, linkColor)
+        },
+    )
+}
+
+/** Reuse already parsed formula spans while appending the still-growing suffix. */
+private fun renderStreamingMarkdown(
+    view: TextView,
+    snapshot: StreamingMarkdownSnapshot,
+    widthPx: Int,
+    textColor: Int,
+    linkColor: Int,
+) {
+    view.setTextColor(textColor)
+    view.setLinkTextColor(linkColor)
+    val prefixLength = (snapshot.mathPrefixEnd - snapshot.tailStart).coerceIn(0, snapshot.tail.length)
+    if (prefixLength == 0 || widthPx <= 0) {
+        // Before the first formula closes, there is no Markdown work to do.
+        // Keep the same TextView so a later formula does not swap UI types.
+        view.text = snapshot.tail
+        view.setTag(R.id.streaming_markdown_cache, null)
+        return
+    }
+    val old = view.getTag(R.id.streaming_markdown_cache) as? StreamingMarkdownRenderCache
+    val cached = old?.takeIf {
+        it.tailId == snapshot.tailId && it.prefixLength == prefixLength &&
+            it.widthPx == widthPx && it.textColor == textColor && it.linkColor == linkColor
+    }
+    val prefix = cached?.renderedPrefix ?: runCatching {
+        val source = snapshot.tail.substring(0, prefixLength)
+        val prepared = wrapLongFormulas(
+            sanitizeAssistantLatex(normalizeAssistantMarkdown(source)),
+            formulaMaxWidthPx(view, widthPx),
+            formulaWidthMeasurer(view),
+        )
+        (view.tag as Markwon).toMarkdown(prepared)
+    }.onFailure { error ->
+        Log.e(RENDER_LOG_TAG, "streaming formula render failed, fallback to plain text", error)
+        appendRenderErrorLog(view.context, snapshot.tail, error)
+    }.getOrNull()
+    if (prefix == null) {
+        view.text = snapshot.tail
+        view.setTag(R.id.streaming_markdown_cache, null)
+        return
+    }
+    if (cached == null) {
+        view.setTag(R.id.streaming_markdown_cache,
+            StreamingMarkdownRenderCache(snapshot.tailId, prefixLength, widthPx,
+                textColor, linkColor, prefix))
+    }
+    val combined = SpannableStringBuilder(prefix)
+        .append(snapshot.tail.substring(prefixLength))
+    runCatching {
+        (view.tag as Markwon).setParsedMarkdown(view, combined)
+        view.scrollTo(0, 0)
+    }.onFailure { error ->
+        Log.e(RENDER_LOG_TAG, "streaming formula display failed, fallback to plain text", error)
+        appendRenderErrorLog(view.context, snapshot.tail, error)
+        view.text = snapshot.tail
+        view.setTag(R.id.streaming_markdown_cache, null)
+    }
+}
+
+private fun isAssistantPlaceholder(content: String): Boolean =
+    isPlaceholderReply(content)
 
 /**
  * 回答正文渲染。

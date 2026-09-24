@@ -104,4 +104,161 @@ class DiagramLayoutAcceptanceTest {
         assertTrue(result.edges.filter { it.edge.to == "sum" }.all { it.endPort in setOf(DiagramPort.TOP, DiagramPort.BOTTOM) })
         assertTrue(result.nodes.single { it.node.id == "mq" }.row > result.nodes.single { it.node.id == "mi" }.row)
     }
+
+    @Test
+    fun `textbook profile uses fixed rails and preserves empty stages`() {
+        fun n(id: String, role: String, shape: DiagramNodeShape = DiagramNodeShape.BLOCK) =
+            DiagramNode(id, id, shape, role = role)
+        val spec = DiagramSpec(
+            "SSB", listOf(
+                n("in", "input", DiagramNodeShape.IO),
+                n("split", "split", DiagramNodeShape.JUNCTION),
+                n("upper", "upper_mixer", DiagramNodeShape.MIXER),
+                n("lower", "lower_mixer", DiagramNodeShape.MIXER),
+                n("uf", "upper_filter"),
+                n("lf", "lower_filter"),
+                n("sum", "sum", DiagramNodeShape.SUM),
+                n("out", "output", DiagramNodeShape.IO),
+            ),
+            listOf(
+                DiagramEdge("in", "split"),
+                DiagramEdge("split", "upper", fromPort = DiagramPort.TOP),
+                DiagramEdge("split", "lower", fromPort = DiagramPort.BOTTOM),
+                DiagramEdge("upper", "uf"), DiagramEdge("lower", "lf"),
+                DiagramEdge("uf", "sum", toPort = DiagramPort.TOP),
+                DiagramEdge("lf", "sum", toPort = DiagramPort.BOTTOM),
+                DiagramEdge("sum", "out"),
+            ),
+            profile = DiagramLayoutProfile.TEXTBOOK_DUAL_BRANCH,
+        )
+        val result = DiagramLayout.layout(spec)
+        val boxes = result.nodes.associateBy { it.node.id }
+        assertEquals(0, boxes.getValue("upper").row)
+        assertEquals(2, boxes.getValue("lower").row)
+        assertEquals(1, boxes.getValue("sum").row)
+        assertEquals(2, boxes.getValue("upper").column)
+        assertEquals(7, boxes.getValue("sum").column)
+        // The profile keeps stage 3 visible even though this abbreviated
+        // graph has no node there; collapsing it would make later wires
+        // touch the filter boxes when a control branch is added.
+        assertTrue(boxes.getValue("sum").x > boxes.getValue("uf").x + boxes.getValue("uf").width)
+        result.nodes.forEachIndexed { index, a ->
+            result.nodes.drop(index + 1).forEach { b ->
+                val intersects = a.x < b.x + b.width && a.x + a.width > b.x &&
+                    a.y < b.y + b.height && a.y + a.height > b.y
+                assertFalse("Template nodes overlap: ${a.node.id} and ${b.node.id}", intersects)
+            }
+        }
+    }
+
+    @Test
+    fun `textbook profile keeps duplicate roles visible and route bounds inside canvas`() {
+        fun n(id: String, role: String, shape: DiagramNodeShape = DiagramNodeShape.BLOCK) =
+            DiagramNode(id, id, shape, role = role)
+        val spec = DiagramSpec(
+            "", listOf(
+                n("in", "input", DiagramNodeShape.IO),
+                n("a", "upper_mixer", DiagramNodeShape.MIXER),
+                n("b", "upper_mixer", DiagramNodeShape.MIXER),
+            ),
+            listOf(DiagramEdge("in", "a", label = "A"), DiagramEdge("a", "b", label = "B")),
+            profile = DiagramLayoutProfile.TEXTBOOK_DUAL_BRANCH,
+        )
+        val result = DiagramLayout.layout(spec)
+        assertEquals(3, result.nodes.map { it.node.id }.toSet().size)
+        assertTrue(result.nodes.map { it.column }.distinct().size >= 2)
+        result.edges.flatMap { it.points }.forEach { point ->
+            assertTrue("route x outside canvas: $point", point.x in 0f..result.width)
+            assertTrue("route y outside canvas: $point", point.y in 0f..result.height)
+        }
+        val maxLabelWidth = spec.edges.maxOf { DiagramText.layout(it.label.orEmpty(), DiagramTextRole.EDGE_LABEL, 140f).width }
+        val maxRouteX = result.edges.flatMap { it.points }.maxOf { it.x }
+        assertTrue("canvas must leave room for edge labels", result.width > maxRouteX + maxLabelWidth / 2f)
+    }
+
+    @Test
+    fun `legacy split junction labelled A is not mistaken for test point A`() {
+        val split = DiagramNode("split", "A", DiagramNodeShape.JUNCTION)
+        val explicitTest = DiagramNode("probe", "A", DiagramNodeShape.JUNCTION, role = "test_a")
+        val spec = DiagramSpec(
+            "", listOf(split, explicitTest),
+            listOf(DiagramEdge("split", "probe")),
+            profile = DiagramLayoutProfile.TEXTBOOK_DUAL_BRANCH,
+        )
+        val result = DiagramLayout.layout(spec)
+        val splitBox = result.nodes.single { it.node.id == "split" }
+        val probeBox = result.nodes.single { it.node.id == "probe" }
+        assertEquals(1, splitBox.column)
+        assertEquals(1, probeBox.column)
+        assertTrue(
+            "legacy split and explicit A marker must not overlap",
+            probeBox.x + probeBox.width <= splitBox.x ||
+                splitBox.x + splitBox.width <= probeBox.x,
+        )
+    }
+
+    @Test
+    fun `textbook probes stay on signal wires and summer sits above the split`() {
+        fun n(id: String, role: String, shape: DiagramNodeShape = DiagramNodeShape.BLOCK) =
+            DiagramNode(id, id.uppercase(), shape, role = role)
+        val spec = DiagramSpec("SSB", listOf(
+            n("input", "input", DiagramNodeShape.IO),
+            n("split", "split", DiagramNodeShape.JUNCTION),
+            n("a", "test_a", DiagramNodeShape.JUNCTION),
+            n("upper", "upper_mixer", DiagramNodeShape.MIXER),
+            n("lower", "lower_mixer", DiagramNodeShape.MIXER),
+            n("b", "test_b", DiagramNodeShape.JUNCTION),
+            n("d", "test_d", DiagramNodeShape.JUNCTION),
+            n("upper_filter", "upper_filter"),
+            n("lower_filter", "lower_filter"),
+            n("e", "test_e", DiagramNodeShape.JUNCTION),
+            n("hilbert", "lower_hilbert"),
+            n("c", "test_c", DiagramNodeShape.JUNCTION),
+            n("f", "test_f", DiagramNodeShape.JUNCTION),
+            n("carrier", "carrier"),
+            n("phase", "phase_shift"),
+            n("sum", "sum", DiagramNodeShape.SUM),
+            n("g", "test_g", DiagramNodeShape.JUNCTION),
+            n("output", "output", DiagramNodeShape.IO),
+        ), listOf(
+            DiagramEdge("input", "a"), DiagramEdge("a", "split"),
+            DiagramEdge("split", "upper", fromPort = DiagramPort.TOP),
+            DiagramEdge("split", "lower", fromPort = DiagramPort.BOTTOM),
+            DiagramEdge("upper", "b"), DiagramEdge("b", "upper_filter"),
+            DiagramEdge("upper_filter", "c"), DiagramEdge("c", "sum", toPort = DiagramPort.TOP),
+            DiagramEdge("lower", "d"), DiagramEdge("d", "lower_filter"),
+            DiagramEdge("lower_filter", "e"), DiagramEdge("e", "hilbert"),
+            DiagramEdge("hilbert", "f"), DiagramEdge("f", "sum", toPort = DiagramPort.BOTTOM),
+            DiagramEdge("carrier", "upper", toPort = DiagramPort.BOTTOM),
+            DiagramEdge("carrier", "phase"),
+            DiagramEdge("phase", "lower", toPort = DiagramPort.BOTTOM),
+            DiagramEdge("sum", "g"), DiagramEdge("g", "output"),
+        ), profile = DiagramLayoutProfile.TEXTBOOK_DUAL_BRANCH)
+        val result = DiagramLayout.layout(spec)
+        val box = result.nodes.associateBy { it.node.id }
+        fun between(point: String, left: String, right: String) {
+            assertTrue("$point must be after $left", box.getValue(point).x >
+                box.getValue(left).x + box.getValue(left).width)
+            assertTrue("$point must be before $right", box.getValue(point).x +
+                box.getValue(point).width < box.getValue(right).x)
+        }
+        between("a", "input", "split")
+        between("b", "upper", "upper_filter")
+        between("d", "lower", "lower_filter")
+        between("e", "lower_filter", "hilbert")
+        between("g", "sum", "output")
+        assertEquals(box.getValue("upper").centerY, box.getValue("b").centerY, .1f)
+        assertEquals(box.getValue("lower").centerY, box.getValue("d").centerY, .1f)
+        assertEquals(box.getValue("lower").centerY, box.getValue("e").centerY, .1f)
+        assertEquals(box.getValue("sum").centerY, box.getValue("g").centerY, .1f)
+        assertEquals(box.getValue("sum").centerX, box.getValue("f").centerX, .1f)
+        assertTrue(box.getValue("upper").centerY < box.getValue("sum").centerY)
+        assertTrue(box.getValue("sum").centerY < box.getValue("split").centerY)
+        assertTrue(box.getValue("split").centerY < box.getValue("lower").centerY)
+        assertTrue(box.getValue("f").centerY > box.getValue("sum").centerY)
+        assertTrue(box.getValue("f").centerY < box.getValue("lower").centerY)
+        assertEquals(DiagramPort.TOP, result.edges.single { it.edge.from == "phase" }.endPort)
+        assertEquals(DiagramPort.BOTTOM, result.edges.single { it.edge.to == "f" }.endPort)
+        assertEquals(DiagramPort.TOP, result.edges.single { it.edge.from == "f" }.startPort)
+    }
 }

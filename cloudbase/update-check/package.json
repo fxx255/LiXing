@@ -2,8 +2,5 @@
   "name": "lixing-update-check-cloudbase",
   "version": "1.0.0",
   "private": true,
-  "main": "index.js",
-  "dependencies": {
-    "@cloudbase/node-sdk": "latest"
-  }
+  "main": "index.js"
 }

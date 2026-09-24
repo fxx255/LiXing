@@ -15,6 +15,7 @@ import kotlin.math.sqrt
 object DiagramRenderer {
     private const val INK = 0xFF202B38.toInt()
     private const val MUTED = 0xFF536274.toInt()
+    private const val LABEL_CANVAS_PADDING = 28f
 
     fun render(spec: DiagramSpec, widthPx: Int = 4096, heightPx: Int = 4096): Bitmap =
         renderLayout(DiagramLayout.layout(spec), widthPx, heightPx)
@@ -32,9 +33,36 @@ object DiagramRenderer {
             28f, 28f, DiagramTextRole.TITLE)
         layout.edges.forEach { drawEdge(canvas, it) }
         layout.nodes.forEach { drawNode(canvas, it, layout.edges) }
-        // Labels are laid on clear sections of their routed polyline.
-        layout.edges.forEach { drawEdgeLabel(canvas, it) }
+        // Labels are laid on clear sections of their routed polyline.  Keep a
+        // small occupancy list so adjacent branch labels cannot paint over
+        // one another or over a node.  The list uses logical (pre-scale) px.
+        val occupiedLabels = annotationOccupancy(layout)
+        layout.edges.forEach {
+            drawEdgeLabel(canvas, it, layout.nodes, occupiedLabels, layout.width, layout.height)
+        }
         return bitmap
+    }
+
+    /** Reserve marker/sign space before choosing edge-label locations. */
+    private fun annotationOccupancy(layout: DiagramLayoutResult): MutableList<RectF> {
+        val occupied = mutableListOf<RectF>()
+        layout.nodes.filter { it.node.shape == DiagramNodeShape.JUNCTION }.forEach { box ->
+            val marker = DiagramLayout.label(box.node)
+            if (marker.lines.isNotEmpty()) {
+                occupied += RectF(
+                    box.centerX - marker.width / 2f - 4f,
+                    box.y - marker.height - 9f,
+                    box.centerX + marker.width / 2f + 4f,
+                    box.y - 1f,
+                )
+            }
+        }
+        layout.nodes.filter { it.node.shape == DiagramNodeShape.SUM }.forEach { box ->
+            occupied += RectF(box.centerX - 14f, box.y - 26f, box.centerX + 14f, box.y + 2f)
+            occupied += RectF(box.centerX - 14f, box.y + box.height - 2f,
+                box.centerX + 14f, box.y + box.height + 30f)
+        }
+        return occupied
     }
 
     private fun drawNode(canvas: Canvas, box: NodeBox, edges: List<EdgeRoute>) {
@@ -128,18 +156,98 @@ object DiagramRenderer {
         canvas.restore()
     }
 
-    private fun drawEdgeLabel(canvas: Canvas, route: EdgeRoute) {
-        val label = route.edge.label?.takeIf { it.isNotBlank() } ?: return
+    private fun drawEdgeLabel(
+        canvas: Canvas,
+        route: EdgeRoute,
+        nodes: List<NodeBox>,
+        occupied: MutableList<RectF>,
+        canvasWidth: Float,
+        canvasHeight: Float,
+    ) {
+        val label = route.edge.label?.trim()?.takeIf { it.isNotBlank() }
+            ?.takeUnless { isDuplicateMarker(it, route, nodes) }
+            ?: return
         val segment = route.points.zipWithNext().maxByOrNull { (a, b) ->
             kotlin.math.abs(a.x - b.x) + kotlin.math.abs(a.y - b.y)
         } ?: return
         val (a, b) = segment
         val text = DiagramText.layout(label, DiagramTextRole.EDGE_LABEL, 140f)
-        val x = (a.x + b.x) / 2 - text.width / 2
-        val y = (a.y + b.y) / 2 - text.height / 2
-        canvas.drawRect(x - 3, y - 2, x + text.width + 3, y + text.height + 2,
+        val horizontal = kotlin.math.abs(a.x - b.x) >= kotlin.math.abs(a.y - b.y)
+        val midX = (a.x + b.x) / 2f
+        val midY = (a.y + b.y) / 2f
+        val candidates = if (horizontal) {
+            listOf(
+                RectF(midX - text.width / 2f, midY - text.height - 9f,
+                    midX + text.width / 2f, midY - 9f),
+                RectF(midX - text.width / 2f, midY + 9f,
+                    midX + text.width / 2f, midY + 9f + text.height),
+            )
+        } else {
+            listOf(
+                RectF(midX + 9f, midY - text.height / 2f,
+                    midX + 9f + text.width, midY + text.height / 2f),
+                RectF(midX - 9f - text.width, midY - text.height / 2f,
+                    midX - 9f, midY + text.height / 2f),
+            )
+        }
+        fun clamped(rect: RectF): RectF {
+            val dx = when {
+                rect.left < LABEL_CANVAS_PADDING -> LABEL_CANVAS_PADDING - rect.left
+                rect.right > canvasWidth - LABEL_CANVAS_PADDING ->
+                    canvasWidth - LABEL_CANVAS_PADDING - rect.right
+                else -> 0f
+            }
+            val dy = when {
+                rect.top < LABEL_CANVAS_PADDING -> LABEL_CANVAS_PADDING - rect.top
+                rect.bottom > canvasHeight - LABEL_CANVAS_PADDING ->
+                    canvasHeight - LABEL_CANVAS_PADDING - rect.bottom
+                else -> 0f
+            }
+            return RectF(rect.left + dx, rect.top + dy, rect.right + dx, rect.bottom + dy)
+        }
+        fun intersects(a: RectF, b: RectF): Boolean =
+            a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top
+        fun occupiedByNode(rect: RectF): Boolean = nodes.any { box ->
+            intersects(rect, RectF(box.x - 4f, box.y - 4f,
+                box.x + box.width + 4f, box.y + box.height + 4f))
+        }
+        val chosen = candidates.asSequence()
+            .map(::clamped)
+            .firstOrNull { rect -> !occupiedByNode(rect) && occupied.none { intersects(rect, it) } }
+            ?: return
+        occupied += RectF(chosen)
+        val x = chosen.left
+        val y = chosen.top
+        // A safe placement gets an opaque background to keep the wire out of
+        // the glyphs.  If no safe slot exists, omit this optional inline label
+        // rather than painting text over a node or another annotation.
+        canvas.drawRect(chosen.left - 3f, chosen.top - 2f,
+            chosen.right + 3f, chosen.bottom + 2f,
             Paint().apply { color = Color.WHITE })
         drawText(canvas, text, x, y, DiagramTextRole.EDGE_LABEL, centered = true)
+    }
+
+    /**
+     * Test-point letters and output names are sometimes emitted twice: once
+     * as a node label and once as the edge label.  Keep the semantic node
+     * annotation and suppress only the duplicate short marker; signal labels
+     * such as carrier formulas remain visible.
+     */
+    private fun isDuplicateMarker(label: String, route: EdgeRoute, nodes: List<NodeBox>): Boolean {
+        val marker = label.trim().replace("−", "-")
+        val isTestMarker = marker.length == 1 && marker[0] in 'A'..'G'
+        val source = nodes.firstOrNull { it.node.id == route.edge.from }?.node
+        val target = nodes.firstOrNull { it.node.id == route.edge.to }?.node
+        fun normalized(value: String?): String = value.orEmpty()
+            .trim()
+            .replace(Regex("\\s+"), "")
+            .replace("−", "-")
+        val edgeText = normalized(marker)
+        val matchesNode = listOf(source, target).any { node ->
+            val text = normalized(node?.label)
+            text == edgeText || (isTestMarker && text.contains(edgeText))
+        }
+        return matchesNode || (isTestMarker && listOf(source, target).any { it?.role?.equals("test_${marker.lowercase()}") == true })
     }
 
     private fun drawText(canvas: Canvas, block: DiagramTextBlock, x: Float, top: Float,

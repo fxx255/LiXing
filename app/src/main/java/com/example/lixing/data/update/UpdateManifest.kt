@@ -24,7 +24,7 @@ data class UpdateManifest(
     val sha256: String = "",
     /** 更新日志（纯文本）。 */
     val changelog: String = "",
-    /** 最低支持的 Android SDK 版本。当前 App targetSdk < 此值时强制升级。 */
+    /** 安装新版所需的最低 Android SDK 版本；当前设备低于它时不提示安装。 */
     val minSdk: Int = 0,
     /** 强制升级：忽略用户的「稍后再说」选项。 */
     val force: Boolean = false,
@@ -38,9 +38,10 @@ data class UpdateManifest(
     fun isUpgradeFor(currentCode: Int, deviceSdk: Int): UpgradeDecision {
         if (apkUrl.isBlank() || sha256.isBlank()) return UpgradeDecision.Skip("清单字段缺失")
         if (versionCode <= currentCode) return UpgradeDecision.Skip("不是新版本")
-        // minSdk 0 视作「无最低要求」；非 0 且大于当前设备 = 强升；非 0 且小于 1 = 字段污染。
+        // minSdk 0 视作「无最低要求」；设备低于新版门槛时不能安装，
+        // 因此跳过更新提示，绝不能把不可安装的 APK 当成强制升级。
         if (minSdk != 0 && minSdk < 1) return UpgradeDecision.Skip("minSdk 无效 ($minSdk)")
-        if (minSdk > deviceSdk) return UpgradeDecision.Required("当前设备 SDK $deviceSdk 低于最低要求 $minSdk")
+        if (minSdk > deviceSdk) return UpgradeDecision.Skip("当前设备 SDK $deviceSdk 低于新版最低要求 $minSdk")
         return if (force) UpgradeDecision.Required("强制升级") else UpgradeDecision.Suggested
     }
 }

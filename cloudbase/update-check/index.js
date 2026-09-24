@@ -159,7 +159,9 @@ async function fetchManifest() {
   const inline = process.env.UPDATE_MANIFEST_JSON;
   if (inline && inline.trim()) {
     try {
-      return { ...normalizeManifest(JSON.parse(inline)), fallback: true, errors };
+      // Do not echo failed source URLs in a public response: an operator may
+      // configure a signed manifest URL with credentials in its query string.
+      return { ...normalizeManifest(JSON.parse(inline)), fallback: true };
     } catch (error) {
       errors.push(`UPDATE_MANIFEST_JSON 解析失败 → ${error.message}`);
     }
@@ -172,9 +174,11 @@ async function fetchManifest() {
       errors.length ? `清单获取失败：${errors.join(" | ")}` : "未配置 UPDATE_MANIFEST_URL / UPDATE_MANIFEST_JSON / GITHUB_REPO 任一清单源",
     );
   }
+  const apiBudget = deadline - Date.now();
+  if (apiBudget <= 300) throw new Error("回源总预算用尽");
   const release = await fetchJsonWithTimeout(
     `https://api.github.com/repos/${repo}/releases/latest`,
-    FETCH_TIMEOUT_MS,
+    Math.min(FETCH_TIMEOUT_MS, apiBudget),
     { Accept: "application/vnd.github+json", "User-Agent": "lixing-update-check" },
   );
   const asset = (release.assets || []).find((item) => item.name.endsWith(".apk"));
@@ -183,7 +187,10 @@ async function fetchManifest() {
   if (manifestAsset && manifestAsset.browser_download_url) {
     try {
       return normalizeManifest(
-        await fetchJsonWithTimeout(manifestAsset.browser_download_url, FETCH_TIMEOUT_MS),
+        await fetchJsonWithTimeout(
+          manifestAsset.browser_download_url,
+          Math.min(FETCH_TIMEOUT_MS, Math.max(1, deadline - Date.now())),
+        ),
       );
     } catch (error) {
       errors.push(`清单附件拉取失败 → ${error.message}`);
@@ -198,6 +205,7 @@ async function fetchManifest() {
     apkUrl: asset.browser_download_url,
     sha256: null,
     sizeBytes: asset.size || 0,
+    minSdk: 0,
     changelog: release.body || "",
     force: false,
   };
@@ -206,6 +214,7 @@ async function fetchManifest() {
 /** 统一字段与类型，缺字段时给出可判定的默认值，避免 App 端解析歧义。 */
 function normalizeManifest(data) {
   const versionCode = Number(data.versionCode);
+  const minSdk = Number(data.minSdk);
   // App 端 UpdateManifest 读的是 sizeBytes（兼容旧字段名 size）。
   const sizeBytes = Number(data.sizeBytes ?? data.size) || 0;
   return {
@@ -215,8 +224,9 @@ function normalizeManifest(data) {
     apkUrl: String(data.apkUrl || ""),
     sha256: data.sha256 ? String(data.sha256).toLowerCase() : null,
     sizeBytes,
+    minSdk: Number.isFinite(minSdk) && minSdk >= 0 ? Math.trunc(minSdk) : 0,
     changelog: String(data.changelog || ""),
-    force: Boolean(data.force),
+    force: data.force === true,
   };
 }
 

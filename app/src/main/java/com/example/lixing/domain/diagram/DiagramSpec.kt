@@ -51,6 +51,13 @@ data class DiagramNode(
     val row: Int? = null,
     /** 主链上的次序提示（越大越靠右）。 */
     val column: Int? = null,
+    /**
+     * Optional semantic role used by a layout profile.  It is deliberately a
+     * string so new model vocabulary can be ignored by older clients without
+     * changing the wire format; the built-in profiles only consume known
+     * aliases.
+     */
+    val role: String? = null,
 )
 
 @Serializable
@@ -73,10 +80,23 @@ data class DiagramSpec(
     val edges: List<DiagramEdge>,
     /** 期望流向：row/column 缺失用于主推断。 */
     val direction: DiagramDirection = DiagramDirection.LR,
+    /** Deterministic local arrangement; omitted in old specs. */
+    val profile: DiagramLayoutProfile = DiagramLayoutProfile.GENERIC,
 )
 
 @Serializable
 enum class DiagramDirection { LR, TB }
+
+/**
+ * Local layout profile.  The model still describes topology; a profile only
+ * selects a deterministic, textbook-like arrangement for a known family of
+ * diagrams.  [GENERIC] keeps the original graph layout for old saved specs.
+ */
+@Serializable
+enum class DiagramLayoutProfile {
+    GENERIC,
+    TEXTBOOK_DUAL_BRANCH,
+}
 
 /** 规模上限。超出的图拒收，而不是画成一团看不清的东西。 */
 object DiagramLimits {
@@ -85,6 +105,7 @@ object DiagramLimits {
     const val MAX_EDGES = 40
     const val MAX_LABEL_CHARS = 60
     const val MAX_SUB_LABEL_CHARS = 40
+    const val MAX_ROLE_CHARS = 32
     const val MAX_TITLE_CHARS = 40
     const val MAX_ID_CHARS = 24
     const val MAX_ROWS = 4

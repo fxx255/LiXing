@@ -31,7 +31,7 @@ CloudBase **免费版**的 `update-check` 函数执行超时最多只能选 **3 
 **A. 只需重新部署本函数代码（推荐，已内置镜像优先，不需要改任何环境变量）**
 代码里的 `expandSources()` 会把 `UPDATE_MANIFEST_URL` 配置的地址自动展开成
 「`ghfast.top` → `ghproxy.net` → 原始地址」的候选列表，并用 `TOTAL_BUDGET_MS`（2.5 秒）
-控制总预算，绝不会把 3 秒函数预算烧光。所以：把本目录 `index.js` 整段粘进控制台 → 部署即可。
+控制所有回源请求的总预算。部署时用本目录 `index.js` 更新当前事件函数。
 
 **B. 或者改环境变量**（老代码也适用）：
 1. `UPDATE_MANIFEST_URL` 只填**一个最快**的镜像（多源会叠加耗时，反而更容易顶破 3 秒）：
@@ -62,10 +62,10 @@ CloudBase **免费版**的 `update-check` 函数执行超时最多只能选 **3 
 2. 「云函数/托管」→「创建云函数」→ 创建方式选「**空白函数**」（不要选「通过模板创建」里的 HTTP 模板）：
    - 函数名称：`update-check`
    - 运行时：**Node.js 18**
-   - 内存 128MB、执行超时 10 秒、允许公网访问
+   - 内存 128MB、执行超时按当前套餐上限设置（免费版为 3 秒）、允许公网访问
 3. 创建后进入在线编辑器，用 `index.js`（事件版）的内容**整体覆盖**默认代码 → 保存 → 部署；
 4. 「函数配置」→ 环境变量：
-   - `UPDATE_MANIFEST_JSON` = `{"versionCode":2,"versionName":"1.0.1","apkUrl":"…","sizeBytes":296797253,"sha256":"…","changelog":"…","force":false}`
+   - `UPDATE_MANIFEST_JSON` = `{"versionCode":2,"versionName":"1.0.1","apkUrl":"…","sizeBytes":296797253,"sha256":"…","minSdk":26,"changelog":"…","force":false}`
 5. 左侧「HTTP 访问服务」→ 路由（新建或编辑已有）：
    - 路径前缀：`/update/check`
    - 关联函数：`update-check`
@@ -84,7 +84,7 @@ curl -s "https://lixing-d7g243r7kcad67750-1323070606.ap-shanghai.app.tcloudbase.
 期望返回：
 
 ```json
-{"ok":true,"versionCode":2,"versionName":"1.0.1","apkUrl":"…","sha256":"…","sizeBytes":296797253,"changelog":"…","force":false,"cached":false}
+{"ok":true,"versionCode":2,"versionName":"1.0.1","apkUrl":"…","sha256":"…","sizeBytes":296797253,"minSdk":26,"changelog":"…","force":false,"cached":false}
 ```
 
 ## 测试 App 弹窗（不必真发新版）

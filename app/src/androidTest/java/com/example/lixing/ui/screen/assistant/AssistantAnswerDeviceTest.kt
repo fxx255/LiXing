@@ -17,6 +17,7 @@ import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import androidx.test.platform.app.InstrumentationRegistry
 import com.example.lixing.domain.plot.Axis
 import com.example.lixing.domain.plot.MarkLine
 import com.example.lixing.domain.plot.PlotSpec
@@ -92,5 +93,40 @@ class AssistantAnswerDeviceTest {
         compose.runOnIdle { finish() }
         compose.waitForIdle()
         compose.runOnIdle { assertTrue(answerBounds.height > 0) }
+    }
+
+    @Test fun streamedInlineFormulaStaysInItsParagraphBelowThinking() {
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        JLatexMathAndroid.init(context)
+        var update: (String) -> Unit = {}
+        var thinkingBounds = Rect.Zero
+        var answerBounds = Rect.Zero
+        compose.setContent {
+            var content by remember { mutableStateOf("结论：当 ${'$'}x") }
+            update = { content = it }
+            MaterialTheme {
+                Column(Modifier.fillMaxSize()) {
+                    Box(Modifier.onGloballyPositioned { thinkingBounds = it.boundsInRoot() }) {
+                        ThinkingPanel("已经完成推导", true, false, {})
+                    }
+                    Box(Modifier.onGloballyPositioned { answerBounds = it.boundsInRoot() }) {
+                        MessageBubble("assistant", content, emptyList(), streaming = true) { _, _ -> }
+                    }
+                }
+            }
+        }
+        compose.runOnIdle { update("结论：当 ${'$'}x^2${'$'} 成立时，答案为 4。") }
+        compose.mainClock.advanceTimeBy(320)
+        compose.waitUntil(5_000) { answerBounds.height > 0 }
+        compose.waitForIdle()
+        compose.runOnIdle {
+            assertTrue("回答必须在思考面板下方", thinkingBounds.bottom <= answerBounds.top + 1)
+            assertTrue(answerBounds.height > 0)
+        }
+        InstrumentationRegistry.getInstrumentation().uiAutomation.takeScreenshot()?.let { bitmap ->
+            File(context.getExternalFilesDir(null), "streamed-inline-formula.png")
+                .outputStream().use { bitmap.compress(Bitmap.CompressFormat.PNG, 100, it) }
+            bitmap.recycle()
+        }
     }
 }

@@ -187,4 +187,55 @@ class DiagramDeviceTest {
         assertTrue(filter.height >= main.height + sub.height + 32)
         save(spec, "diagram-long-label")
     }
+
+    @Test fun textbookDualBranchTemplateRendersAsAReadableHorizontalDiagram() {
+        JLatexMathAndroid.init(context)
+        fun node(id: String, label: String, shape: DiagramNodeShape, role: String) =
+            DiagramNode(id, label, shape, role = role)
+        val spec = DiagramSpec(
+            title = "相干解调",
+            nodes = listOf(
+                node("in", "s(t)", DiagramNodeShape.IO, "input"),
+                node("split", "A", DiagramNodeShape.JUNCTION, "split"),
+                node("mi", "乘法器", DiagramNodeShape.MIXER, "upper_mixer"),
+                node("mq", "乘法器", DiagramNodeShape.MIXER, "lower_mixer"),
+                node("fi", "低通滤波器", DiagramNodeShape.BLOCK, "upper_filter"),
+                node("fq", "低通滤波器", DiagramNodeShape.BLOCK, "lower_filter"),
+                node("hilbert", "希尔伯特滤波器", DiagramNodeShape.BLOCK, "lower_hilbert"),
+                node("carrier", "载波提取", DiagramNodeShape.BLOCK, "carrier"),
+                node("phase", "−90° 移相", DiagramNodeShape.BLOCK, "phase_shift"),
+                node("sum", "求和", DiagramNodeShape.SUM, "sum"),
+                node("out", "m(t)", DiagramNodeShape.IO, "output"),
+            ),
+            edges = listOf(
+                DiagramEdge("in", "split"),
+                DiagramEdge("split", "mi", fromPort = DiagramPort.TOP),
+                DiagramEdge("split", "mq", fromPort = DiagramPort.BOTTOM),
+                DiagramEdge("mi", "fi", label = "I"),
+                DiagramEdge("mq", "fq", label = "Q"),
+                DiagramEdge("fq", "hilbert"),
+                DiagramEdge("fi", "sum", toPort = DiagramPort.TOP, label = "C", polarity = "+"),
+                DiagramEdge("hilbert", "sum", toPort = DiagramPort.BOTTOM, label = "F", polarity = "-"),
+                DiagramEdge("sum", "out"),
+                DiagramEdge("carrier", "mi", toPort = DiagramPort.BOTTOM, label = "cos 2πf_ct"),
+                DiagramEdge("carrier", "phase"),
+                DiagramEdge("phase", "mq", toPort = DiagramPort.BOTTOM, label = "sin 2πf_ct"),
+            ),
+            profile = DiagramLayoutProfile.TEXTBOOK_DUAL_BRANCH,
+        )
+        val layout = DiagramLayout.layout(spec)
+        assertEquals(0, layout.nodes.single { it.node.id == "mi" }.row)
+        assertEquals(2, layout.nodes.single { it.node.id == "mq" }.row)
+        assertTrue(layout.width >= 1600f)
+        val image = DiagramRenderer.render(spec)
+        try {
+            assertTrue(image.width >= 1600)
+            assertTrue(image.height >= 500)
+            val file = File(context.getExternalFilesDir(null), "diagram-textbook.png")
+            file.outputStream().use { image.compress(Bitmap.CompressFormat.PNG, 100, it) }
+            assertTrue(file.isFile && file.length() > 0L)
+        } finally {
+            image.recycle()
+        }
+    }
 }

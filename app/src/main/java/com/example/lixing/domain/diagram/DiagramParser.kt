@@ -65,6 +65,7 @@ object DiagramParser {
             nodes = nodes,
             edges = edges,
             direction = parseDirection(obj["direction"]),
+            profile = parseProfile(obj["profile"] ?: obj["template"]),
         )
     }
 
@@ -81,6 +82,7 @@ object DiagramParser {
             subLabel = obj.boundedText("subLabel", DiagramLimits.MAX_SUB_LABEL_CHARS),
             row = obj.index("row", DiagramLimits.MAX_ROWS),
             column = obj.index("column", DiagramLimits.MAX_COLUMNS),
+            role = obj.boundedText("role", DiagramLimits.MAX_ROLE_CHARS),
         )
     }
 
@@ -129,6 +131,23 @@ object DiagramParser {
         val value = (element as? JsonPrimitive)?.contentOrNull?.trim()?.lowercase()
         require(value == null || value == "lr") { "目前框图支持从左到右（LR）的主链布局" }
         return DiagramDirection.LR
+    }
+
+    /**
+     * Unknown profiles fall back to the generic layout.  This keeps a newer
+     * model from making an otherwise valid old-style diagram disappear on an
+     * older client; known profiles remain explicit and deterministic.
+     */
+    private fun parseProfile(element: JsonElement?): DiagramLayoutProfile {
+        val value = (element as? JsonPrimitive)?.contentOrNull?.trim()?.lowercase()
+            ?: return DiagramLayoutProfile.GENERIC
+        return when (value) {
+            "textbook_dual_branch", "textbook-dual-branch", "dual_branch",
+            "dual-branch", "ssb", "ssb_demodulator", "ssb-demodulator" ->
+                DiagramLayoutProfile.TEXTBOOK_DUAL_BRANCH
+            "generic", "auto" -> DiagramLayoutProfile.GENERIC
+            else -> DiagramLayoutProfile.GENERIC
+        }
     }
 
     private fun JsonObject.text(key: String): String? = (this[key] as? JsonPrimitive)?.contentOrNull

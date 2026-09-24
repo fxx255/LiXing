@@ -1285,6 +1285,19 @@ class AssistantGenerationManager @Inject constructor(
                     continue
                 }
 
+                // A model can spend time reasoning and still return only
+                // "见上" (or an empty reply). Neither is a completed answer.
+                // Clear the transient placeholder before the existing failure
+                // path stores partial text, so the user gets a retry entry
+                // instead of a successful empty/placeholder bubble.
+                if (part.isBlank() && confirmedText.isBlank() && reply.orderedFigures().isEmpty()) {
+                    partial = ""
+                    throw AssistantModelException(
+                        AssistantModelException.Kind.INVALID_RESPONSE,
+                        "模型未返回有效正文，请重试",
+                    )
+                }
+
                 // **保留全部合并正文**：续写必须在前文基础上追加，
                 // 绝不能只留最后一轮（那会把用户已经看到的长正文整段抹掉）。
                 confirmedText = mergeAssistantContinuation(confirmedText, part)

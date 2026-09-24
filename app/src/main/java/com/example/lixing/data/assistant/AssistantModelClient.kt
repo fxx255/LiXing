@@ -1721,10 +1721,12 @@ class AssistantModelClient @Inject constructor(
     - **图表要插在正文里，不能堆在最后**：正文中提到某张图时，就在那句话的下一行单独写一个锚点 `[[FIGURE:1]]`（序号从 1 开始，对应 plots 数组的第几项），客户端会把这个位置替换成图。例如：「由图可见主瓣宽度为 2/T。\n[[FIGURE:1]]\n接下来分析旁瓣……」正文里不要写「见下图」再让图出现在文末。
     - 每张图最多插入一次锚点；某张图如果在正文中没有对应讲解位置，可以不放锚点（客户端会把它排在末尾）
     - 没有画图需求时不要输出 plots；正文里也不要再重复粘贴公式图像的描述
-14. 需要画**框图**时（通信原理框图、系统组成图、信号流程图：调制/解调、编码/译码、滤波/抽样、放大器级联、分支与合流等），在顶层加一个 diagrams 数组，每项一张图，**客户端本地排版并绘制**；你只给拓扑，**不要给坐标、不要用 ASCII 画框**（禁止在代码块里用 ──→、│、┌──┐ 这类字符拼框图——手机窄屏上会换行散乱、完全读不出来）：
-     示例（上下双支路）：`{"title":"相干解调","nodes":[{"id":"in","label":"A ${'$'}s(t)${'$'}","shape":"io","column":0},{"id":"split","label":"A","shape":"junction","column":1,"row":0},{"id":"mi","label":"乘法器","shape":"mixer","glyph":"×","column":2,"row":0},{"id":"mq","label":"乘法器","shape":"mixer","glyph":"×","column":2,"row":1},{"id":"fi","label":"LPF","shape":"block","column":3,"row":0},{"id":"fq","label":"LPF","shape":"block","column":3,"row":1},{"id":"sum","label":"求和","shape":"sum","column":5,"row":0},{"id":"out","label":"G 输出","shape":"io","column":6,"row":0},{"id":"car","label":"载波提取","shape":"block","column":4,"row":2},{"id":"phase","label":"−90° 移相","shape":"block","column":1,"row":2}],"edges":[{"from":"in","to":"split","label":"A"},{"from":"split","to":"mi","fromPort":"top"},{"from":"split","to":"mq","fromPort":"bottom"},{"from":"mi","to":"fi","label":"B"},{"from":"fi","to":"sum","toPort":"top","label":"C"},{"from":"mq","to":"fq","label":"D"},{"from":"fq","to":"sum","toPort":"bottom","label":"F","polarity":"-"},{"from":"sum","to":"out","label":"G"},{"from":"car","to":"mi","toPort":"bottom","label":"cos 2πf_ct"},{"from":"car","to":"phase"},{"from":"phase","to":"mq","toPort":"bottom","label":"sin 2πf_ct"}]}`
+    14. 需要画**框图**时（通信原理框图、系统组成图、信号流程图：调制/解调、编码/译码、滤波/抽样、放大器级联、分支与合流等），在顶层加一个 diagrams 数组，每项一张图，**客户端本地排版并绘制**；你只给拓扑和语义角色，**不要给绝对坐标、不要用 ASCII 画框**（禁止在代码块里用 ──→、│、┌──┐ 这类字符拼框图——手机窄屏上会换行散乱、完全读不出来）：
+      示例（上下双支路）：`{"title":"相干解调","profile":"textbook_dual_branch","nodes":[{"id":"in","label":"A ${'$'}s(t)${'$'}","shape":"io"},{"id":"split","label":"A","shape":"junction"},{"id":"mi","label":"乘法器","shape":"mixer","glyph":"×"},{"id":"mq","label":"乘法器","shape":"mixer","glyph":"×"},{"id":"fi","label":"LPF","shape":"block"},{"id":"fq","label":"LPF","shape":"block"},{"id":"sum","label":"求和","shape":"sum"},{"id":"out","label":"G 输出","shape":"io"},{"id":"car","label":"载波提取","shape":"block"},{"id":"phase","label":"−90° 移相","shape":"block"}],"edges":[{"from":"in","to":"split","label":"A"},{"from":"split","to":"mi","fromPort":"top"},{"from":"split","to":"mq","fromPort":"bottom"},{"from":"mi","to":"fi","label":"B"},{"from":"fi","to":"sum","toPort":"top","label":"C"},{"from":"mq","to":"fq","label":"D"},{"from":"fq","to":"sum","toPort":"bottom","label":"F","polarity":"-"},{"from":"sum","to":"out","label":"G"},{"from":"car","to":"mi","toPort":"bottom","label":"cos 2πf_ct"},{"from":"car","to":"phase"},{"from":"phase","to":"mq","toPort":"bottom","label":"sin 2πf_ct"}]}`
      - shape：block（矩形功能框，默认）、mixer（圆形乘法器，glyph 写 ×）、sum（带十字和输入符号的求和圆）、io（无框文字）、junction（黑色测试点；label 可写 A～G，客户端会显示在点上方）
-     - 位置用 row / column 提示：**row 0 = 主链，1 = 主链下方一行**（本地载波这类支路就设 row:1）；column 显式指定次序（越大越靠右），不写则由连线自动推导
+      - 对教材式 SSB/IQ 双支路请设置 `profile:"textbook_dual_branch"`，并给节点加 role：`input`、`split`、`upper_mixer`、`lower_mixer`、`upper_filter`、`lower_filter`、`lower_hilbert`、`carrier`、`phase_shift`、`sum`、`output`；A～G 测试点可写 `role:"test_a"` 等。客户端会按固定列和上下轨道排版，保证方正清晰，此时不要自行猜 row/column。
+      - A～G 测试点只在节点标签或对应 edge.label 中出现一次；如果使用 `test_a` 等节点角色，相关 edge 不要再次重复同一个字母。edge.label 优先只写载波、公式和信号名称，避免出现 `s(t) s(t)`、`G → G 输出` 这样的重复标注。
+      - 通用框图才使用 row / column 提示：row 0 = 主链，1 = 主链下方一行；column 越大越靠右。不写则由连线自动推导。
      - 连线端口 fromPort / toPort：left / right / top / bottom / auto。**从下方接进某个框**写 "toPort":"bottom"（本地载波 → 乘法器下方，箭头向上）；不写时按相对位置自动选
      - 连线可带 label（如短标注）、polarity（求和器输入符号，只能写 + 或 -）与 dashed:true（虚线，表示可选/反馈）。求和器上下输入会自动显示 +/−，复杂情况用 polarity 明确指定。
      - 节点可带 subLabel 作为框内第二行小字（型号、参数）
@@ -1732,7 +1734,7 @@ class AssistantModelClient @Inject constructor(
      - 规模限制：一张图最多 24 个节点、40 条连线，一次最多 4 张图；标签 60 字以内、标题 40 字以内
      - **节点 id 必须唯一、连线的 from/to 必须指向已定义的 id**，否则整张图会被丢弃；写之前先自查一遍
      - 分支与合流都能表达：同一个 from 写多条 edge 即分支，多条 edge 指向同一个 to 即合流
-     - 教材式通信框图应显式使用 junction 测试点、row/column 排出上下两条平行支路，并给每条关键线标 A～G 或信号公式；不要把所有内容压成一条链。载波提取、移相、滤波器等共享支路要用真实 edge 连接，不能只写在正文。
+      - 教材式通信框图应使用 `textbook_dual_branch` profile、semantic role 和 junction 测试点排出上下两条平行支路，并给每条关键线标 A～G 或信号公式；不要把所有内容压成一条链。载波提取、移相、滤波器等共享支路要用真实 edge 连接，不能只写在正文。
      - diagrams 与 plots **共用** [[FIGURE:n]] 编号：**plots 的图在前，diagrams 的图在后**。例如本轮 1 张曲线图 + 1 张框图，正文里分别写 [[FIGURE:1]] 与 [[FIGURE:2]]
 
 输出格式（必须是可以直接 JSON.parse 的单个对象，不要 Markdown 代码块）：

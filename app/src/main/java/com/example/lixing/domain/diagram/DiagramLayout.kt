@@ -7,11 +7,18 @@ import kotlin.math.max
 object DiagramLayout {
     private const val GAP_X = 64f
     private const val GAP_Y = 64f
+    private const val TEMPLATE_GAP_X = 84f
+    private const val TEMPLATE_GAP_Y = 92f
+    private const val TEMPLATE_COLUMN_WIDTH = 118f
+    private const val TEMPLATE_ROW_HEIGHT = 96f
     private const val PADDING = 28f
     private data class Cell(val col: Int, val row: Int)
 
     fun layout(spec: DiagramSpec): DiagramLayoutResult {
         require(spec.direction == DiagramDirection.LR) { "Only LR diagrams are supported" }
+        if (spec.profile == DiagramLayoutProfile.TEXTBOOK_DUAL_BRANCH) {
+            return textbookDualBranch(spec)
+        }
         val grid = grid(spec)
         val sizes = spec.nodes.associate { it.id to sizeOf(it) }
         val widths = grid.values.map { it.col }.distinct().associateWith { col ->
@@ -49,11 +56,255 @@ object DiagramLayout {
             routes.flatMap { it.points }.maxOfOrNull { it.x } ?: 0f)
         val maxY = max(boxes.maxOfOrNull { it.y + it.height } ?: 0f,
             routes.flatMap { it.points }.maxOfOrNull { it.y } ?: 0f)
+        val maxLabelWidth = edgeLabels.maxOfOrNull { it.width } ?: 0f
+        val maxLabelHeight = edgeLabels.maxOfOrNull { it.height } ?: 0f
         return DiagramLayoutResult(
-            maxOf(maxX + PADDING, title.width + PADDING * 2, DiagramMetrics.MIN_WIDTH),
-            maxOf(maxY + PADDING, DiagramMetrics.MIN_HEIGHT), spec.title, boxes, routes,
+            maxOf(maxX + PADDING + maxLabelWidth / 2f + 8f,
+                title.width + PADDING * 2, DiagramMetrics.MIN_WIDTH),
+            maxOf(maxY + PADDING + maxLabelHeight + 16f, DiagramMetrics.MIN_HEIGHT),
+            spec.title, boxes, routes,
             boxes.groupBy { it.row }.mapValues { (_, row) -> row.map { it.node.id } })
     }
+
+    /**
+     * Deterministic geometry for the common SSB/IQ communication diagram.
+     *
+     * A language model is good at naming the blocks and edges but is not a
+     * reliable graph-drawing engine.  This profile therefore assigns semantic
+     * roles to fixed stage/rail cells and leaves the generic layout as a
+     * backwards-compatible fallback.  Explicit row/column values are still
+     * honored for nodes that do not have a recognized role.
+     */
+    private fun textbookDualBranch(spec: DiagramSpec): DiagramLayoutResult {
+        val title = DiagramText.layout(spec.title, DiagramTextRole.TITLE, 600f)
+        val sizes = spec.nodes.associate { it.id to sizeOf(it) }
+        val cells = linkedMapOf<String, Cell>()
+        val used = mutableSetOf<Cell>()
+        val assigned = mutableSetOf<String>()
+
+        fun place(node: DiagramNode, column: Int, row: Int) {
+            if (node.id in assigned) return
+            var cell = Cell(column.coerceAtLeast(0), row.coerceAtLeast(0))
+            while (cell in used) cell = cell.copy(row = cell.row + 1)
+            cells[node.id] = cell
+            used += cell
+            assigned += node.id
+        }
+
+        val byRole = spec.nodes.groupBy(::profileRole)
+        fun take(role: String): DiagramNode? = byRole[role].orEmpty().firstOrNull { it.id !in assigned }
+        fun fixed(role: String, column: Int, row: Int) {
+            take(role)?.let { place(it, column, row) }
+        }
+
+        // Rows: 0 = upper signal path, 1 = central/control path,
+        // 2 = lower signal path.  Columns are stages, including deliberate
+        // empty columns so that long textbook wires do not collapse together.
+        fixed("input", 0, 1)
+        fixed("split", 1, 1)
+        fixed("upper_mixer", 2, 0)
+        fixed("lower_mixer", 2, 2)
+        fixed("phase_shift", 2, 1)
+        fixed("upper_filter", 4, 0)
+        fixed("lower_filter", 4, 2)
+        fixed("lower_hilbert", 5, 2)
+        fixed("carrier", 4, 1)
+        fixed("sum", 7, 1)
+        fixed("output", 8, 1)
+        // Test points are marks on a wire, not extra stages.  Placing A, E,
+        // or G in a full grid cell collides with the split, Hilbert filter,
+        // or summing circle and silently moves the mark to another rail.
+        val testPoints = listOf("test_a", "test_b", "test_c", "test_d",
+            "test_e", "test_f", "test_g").mapNotNull { role ->
+            take(role)?.also { assigned += it.id }?.let { role to it }
+        }
+
+        // A profile may be used with an abbreviated graph.  Keep all
+        // remaining nodes visible, preferring their explicit hint and then a
+        // free cell to the right of the known template.
+        var nextColumn = (cells.values.maxOfOrNull { it.col } ?: 0) + 1
+        spec.nodes.filter { it.id !in assigned }.forEach { node ->
+            val suggested = Cell(node.column ?: nextColumn, node.row ?: 1)
+            var cell = suggested.copy(
+                col = suggested.col.coerceAtLeast(0),
+                row = suggested.row.coerceAtLeast(0),
+            )
+            while (cell in used) cell = cell.copy(row = cell.row + 1)
+            cells[node.id] = cell
+            used += cell
+            assigned += node.id
+            nextColumn = maxOf(nextColumn, cell.col + 1)
+        }
+
+        // (left stage, right stage, rail) describes the wire segment carrying
+        // the marker; the marker itself remains a tiny junction box.
+        val markerLocations = mapOf(
+            "test_a" to Triple(0, 1, 1),
+            "test_b" to Triple(2, 4, 0),
+            "test_c" to Triple(4, 7, 0),
+            "test_d" to Triple(2, 4, 2),
+            "test_e" to Triple(4, 5, 2),
+            "test_f" to Triple(5, 7, 2),
+            "test_g" to Triple(7, 8, 1),
+        )
+        val maxColumn = maxOf(cells.values.maxOfOrNull { it.col } ?: 0,
+            testPoints.maxOfOrNull { markerLocations.getValue(it.first).second } ?: 0)
+        val maxRow = maxOf(cells.values.maxOfOrNull { it.row } ?: 0,
+            testPoints.maxOfOrNull { markerLocations.getValue(it.first).third } ?: 0)
+        val columns = 0..maxColumn
+        val rows = 0..maxRow
+        val widths = columns.associateWith { col ->
+            maxOf(TEMPLATE_COLUMN_WIDTH,
+                spec.nodes.filter { cells[it.id]?.col == col }
+                    .maxOfOrNull { sizes.getValue(it.id).width } ?: 0f)
+        }
+        val heights = rows.associateWith { row ->
+            maxOf(TEMPLATE_ROW_HEIGHT,
+                spec.nodes.filter { cells[it.id]?.row == row }
+                    .maxOfOrNull { sizes.getValue(it.id).height } ?: 0f)
+        }
+        val gapX = max(TEMPLATE_GAP_X,
+            (spec.edges.map { DiagramText.layout(it.label.orEmpty(), DiagramTextRole.EDGE_LABEL, 140f) }
+                .maxOfOrNull { it.width } ?: 0f) + 36f)
+        val gapY = max(TEMPLATE_GAP_Y,
+            (spec.edges.map { DiagramText.layout(it.label.orEmpty(), DiagramTextRole.EDGE_LABEL, 140f) }
+                .maxOfOrNull { it.height } ?: 0f) + 36f)
+        val x = starts(widths, PADDING, gapX)
+        val y = starts(heights, PADDING + title.height + (if (spec.title.isBlank()) 0f else 16f), gapY)
+        fun railCenter(row: Int) = y.getValue(row) + heights.getValue(row) / 2f
+        val upperRail = railCenter(0)
+        val middleRail = railCenter(1.coerceAtMost(maxRow))
+        val lowerRail = railCenter(2.coerceAtMost(maxRow))
+        // In the reference drawing the summer and carrier branch are between
+        // the upper and lower signal rails.  They are not all one center rail.
+        val carrierRail = upperRail + (middleRail - upperRail) * 0.55f
+        fun centerY(node: DiagramNode, row: Int): Float = when (profileRole(node)) {
+            "carrier", "sum", "output" -> carrierRail
+            else -> railCenter(row)
+        }
+        val stageBoxes = spec.nodes.filter { it.id in cells }.map { node ->
+            val cell = cells.getValue(node.id)
+            val size = sizes.getValue(node.id)
+            NodeBox(node,
+                x.getValue(cell.col) + (widths.getValue(cell.col) - size.width) / 2,
+                centerY(node, cell.row) - size.height / 2f,
+                size.width, size.height, cell.col, cell.row)
+        }
+        val testBoxes = testPoints.map { (role, node) ->
+            val (leftColumn, rightColumn, row) = markerLocations.getValue(role)
+            val size = sizes.getValue(node.id)
+            val leftEdge = x.getValue(leftColumn) + widths.getValue(leftColumn)
+            val rightEdge = x.getValue(rightColumn)
+            val centerX = if (role == "test_f") {
+                // F is the junction on the vertical feed into the summer.  It
+                // must share the summer's x coordinate so both legs meet at
+                // the marker instead of leaving a short diagonal segment.
+                val summer = byRole["sum"].orEmpty().firstOrNull()
+                val summerCell = summer?.let { cells[it.id] }
+                if (summerCell != null) {
+                    x.getValue(summerCell.col) + widths.getValue(summerCell.col) / 2f
+                } else {
+                    (leftEdge + rightEdge) / 2f
+                }
+            } else {
+                (leftEdge + rightEdge) / 2f
+            }
+            val centerY = when (role) {
+                "test_f" -> (carrierRail + lowerRail) / 2f
+                "test_g" -> carrierRail
+                else -> railCenter(row)
+            }
+            NodeBox(node,
+                centerX - size.width / 2f,
+                centerY - size.height / 2f,
+                size.width, size.height, rightColumn, row)
+        }
+        val byStageId = stageBoxes.associateBy { it.node.id }
+        val byTestId = testBoxes.associateBy { it.node.id }
+        val boxes = spec.nodes.map { node ->
+            byStageId[node.id] ?: byTestId.getValue(node.id)
+        }
+        val byId = boxes.associateBy { it.node.id }
+        val routes = spec.edges.map { edge ->
+            val from = byId.getValue(edge.from)
+            val to = byId.getValue(edge.to)
+            val fromRole = profileRole(from.node)
+            val toRole = profileRole(to.node)
+            val departure = if (fromRole == "test_f" && toRole == "sum") DiagramPort.TOP
+            else resolvePort(edge.fromPort, from, to)
+            // In this fixed profile the phase shifter sits *above* the lower
+            // mixer.  Its output enters that mixer from the top even when an
+            // older model supplied the generic carrier "bottom" hint.
+            val arrival = when {
+                fromRole == "phase_shift" && toRole == "lower_mixer" -> DiagramPort.TOP
+                toRole == "test_f" && fromRole in setOf("lower_hilbert", "lower_filter") -> DiagramPort.BOTTOM
+                else -> resolvePort(edge.toPort, to, from)
+            }
+            val start = anchor(from, departure)
+            val end = anchor(to, arrival)
+            EdgeRoute(edge, start, end, departure, arrival,
+                DiagramRouting.route(start, end, departure, arrival, boxes))
+        }
+        val labelWidth = spec.edges.map { DiagramText.layout(it.label.orEmpty(), DiagramTextRole.EDGE_LABEL, 140f) }
+            .maxOfOrNull { it.width } ?: 0f
+        val labelHeight = spec.edges.map { DiagramText.layout(it.label.orEmpty(), DiagramTextRole.EDGE_LABEL, 140f) }
+            .maxOfOrNull { it.height } ?: 0f
+        val maxX = max(boxes.maxOfOrNull { it.x + it.width } ?: 0f,
+            routes.flatMap { it.points }.maxOfOrNull { it.x } ?: 0f)
+        val maxY = max(boxes.maxOfOrNull { it.y + it.height } ?: 0f,
+            routes.flatMap { it.points }.maxOfOrNull { it.y } ?: 0f)
+        return DiagramLayoutResult(
+            maxOf(maxX + PADDING + labelWidth / 2f + 8f,
+                title.width + PADDING * 2, DiagramMetrics.MIN_WIDTH),
+            maxOf(maxY + PADDING + labelHeight / 2f + 8f, DiagramMetrics.MIN_HEIGHT),
+            spec.title, boxes, routes,
+            boxes.groupBy { it.row }.mapValues { (_, row) -> row.map { it.node.id } })
+    }
+
+    private fun profileRole(node: DiagramNode): String {
+        val values = listOfNotNull(node.role, node.id, node.label)
+            .map { it.trim().lowercase().replace('-', '_').replace(' ', '_') }
+        val explicitRole = node.role?.trim()?.lowercase()
+            ?.replace('-', '_')?.replace(' ', '_')
+        fun has(vararg aliases: String) = values.any { value ->
+            aliases.any { alias -> value == alias || (alias.length >= 4 && value.contains(alias)) }
+        }
+        // An explicit semantic role always wins over an id/label inference.
+        // This matters for the legacy shorthand `id=split,label=A`: the A is
+        // a split marker there, while `role=test_a` must remain a test point.
+        if (explicitRole != null && hasExplicitTestRole(explicitRole)) {
+            return explicitRole
+        }
+        if (explicitRole != null && (explicitRole == "split" || explicitRole.contains("branch"))) {
+            return "split"
+        }
+        if (node.shape == DiagramNodeShape.SUM || has("sum", "adder", "merge")) return "sum"
+        // Check split/branch before bare A~G labels.  Older prompts used a
+        // junction labelled A as the branch node, not as test point A.
+        if (has("split", "branch")) return "split"
+        if (has("test_a") || (node.shape == DiagramNodeShape.JUNCTION && values.any { it == "a" })) return "test_a"
+        if (has("test_b") || (node.shape == DiagramNodeShape.JUNCTION && values.any { it == "b" })) return "test_b"
+        if (has("test_c") || (node.shape == DiagramNodeShape.JUNCTION && values.any { it == "c" })) return "test_c"
+        if (has("test_d") || (node.shape == DiagramNodeShape.JUNCTION && values.any { it == "d" })) return "test_d"
+        if (has("test_e") || (node.shape == DiagramNodeShape.JUNCTION && values.any { it == "e" })) return "test_e"
+        if (has("test_f") || (node.shape == DiagramNodeShape.JUNCTION && values.any { it == "f" })) return "test_f"
+        if (has("test_g") || (node.shape == DiagramNodeShape.JUNCTION && values.any { it == "g" })) return "test_g"
+        if (has("upper_mixer", "top_mixer", "mixer_i", "mix_i", "mi")) return "upper_mixer"
+        if (has("lower_mixer", "bottom_mixer", "mixer_q", "mix_q", "mq")) return "lower_mixer"
+        if (has("upper_filter", "top_filter", "filter_i", "lpf_i", "fi")) return "upper_filter"
+        if (has("lower_filter", "bottom_filter", "filter_q", "lpf_q", "fq")) return "lower_filter"
+        if (has("hilbert", "hilbert_filter", "q_filter")) return "lower_hilbert"
+        if (has("phase_shift", "phase", "shift", "minus_90")) return "phase_shift"
+        if (has("carrier_extract", "carrier_source", "carrier", "oscillator", "car")) return "carrier"
+        if (node.shape == DiagramNodeShape.JUNCTION) return "split"
+        if (has("output", "out", "result")) return "output"
+        if (has("input", "source", "signal_in", "in") || values.any { it == "s" }) return "input"
+        return "other"
+    }
+
+    private fun hasExplicitTestRole(role: String): Boolean =
+        role == "test_a" || role == "test_b" || role == "test_c" ||
+            role == "test_d" || role == "test_e" || role == "test_f" || role == "test_g"
 
     private fun grid(spec: DiagramSpec): Map<String, Cell> {
         // Vertical ports identify auxiliary branches, even if the carrier appears first.

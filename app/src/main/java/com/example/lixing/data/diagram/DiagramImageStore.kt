@@ -78,7 +78,9 @@ class DiagramImageStore @Inject constructor(
     }
 
     private fun cacheKey(spec: DiagramSpec): String =
-        MessageDigest.getInstance("SHA-256").digest(("v1:" + json.encodeToString(spec)).toByteArray())
+        // Bump when layout geometry or label placement changes.  Otherwise a
+        // previously rendered PNG would mask the new deterministic template.
+        MessageDigest.getInstance("SHA-256").digest(("v3:" + json.encodeToString(spec)).toByteArray())
             .joinToString("") { "%02x".format(it) }
 
     private companion object {

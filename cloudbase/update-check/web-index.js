@@ -88,6 +88,7 @@ async function fetchManifest() {
     apkUrl: asset.browser_download_url,
     sha256: null,
     sizeBytes: asset.size || 0,
+    minSdk: 0,
     changelog: release.body || "",
     force: false,
   };
@@ -96,6 +97,7 @@ async function fetchManifest() {
 /** 统一字段与类型，缺字段时给出可判定的默认值，避免 App 端解析歧义。 */
 function normalizeManifest(data) {
   const versionCode = Number(data.versionCode);
+  const minSdk = Number(data.minSdk);
   // App 端 UpdateManifest 读的是 sizeBytes（兼容旧字段名 size）。
   const sizeBytes = Number(data.sizeBytes ?? data.size) || 0;
   return {
@@ -105,8 +107,9 @@ function normalizeManifest(data) {
     apkUrl: String(data.apkUrl || ""),
     sha256: data.sha256 ? String(data.sha256).toLowerCase() : null,
     sizeBytes,
+    minSdk: Number.isFinite(minSdk) && minSdk >= 0 ? Math.trunc(minSdk) : 0,
     changelog: String(data.changelog || ""),
-    force: Boolean(data.force),
+    force: data.force === true,
   };
 }
 

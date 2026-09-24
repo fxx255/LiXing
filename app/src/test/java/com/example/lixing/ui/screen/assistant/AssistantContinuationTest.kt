@@ -46,4 +46,15 @@ class AssistantContinuationTest {
         assertEquals(streamed, reconcileStreamedReply(streamed, "见上"))
         assertEquals("最终修正的答案", reconcileStreamedReply(streamed, "最终修正的答案"))
     }
+
+    @Test fun `short non-placeholder streamed answer survives a final placeholder`() {
+        val streamed = "结论：应选 A。"
+        assertEquals(streamed, reconcileStreamedReply(streamed, "见上"))
+    }
+
+    @Test fun `placeholder-only final response does not become successful answer`() {
+        assertEquals("", reconcileStreamedReply("", "见上"))
+        assertEquals("", reconcileStreamedReply("见上", "见上"))
+        assertEquals("", reconcileStreamedReply("", "如上所述。"))
+    }
 }

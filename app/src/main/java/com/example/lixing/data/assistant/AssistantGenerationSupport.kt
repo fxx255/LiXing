@@ -45,7 +45,17 @@ fun reconcileStreamedReply(streamed: String, parsed: String): String {
     val streamedText = streamed.trim()
     val parsedText = parsed.trim()
     return when {
-        streamedText.length >= MIN_MEANINGFUL_CHARS && isPlaceholderReply(parsedText) -> streamedText
+        // A provider can emit a useful short reply in the stream and then put
+        // a stale "见上"/"如上" value in the final JSON field.  The old
+        // length gate (200 chars) let that placeholder overwrite short but
+        // complete answers.  Only reject an equally short placeholder stream;
+        // any other visible stream text is the answer the user saw arriving.
+        isPlaceholderReply(parsedText) && streamedText.isNotBlank() &&
+            !isPlaceholderReply(streamedText) -> streamedText
+        // Neither the final JSON nor the streamed reply contains an answer.
+        // Returning the placeholder here would let the generation finish as a
+        // successful two-character response and remove the retry entry.
+        isPlaceholderReply(parsedText) || (parsedText.isBlank() && isPlaceholderReply(streamedText)) -> ""
         parsedText.isBlank() && streamedText.isNotBlank() -> streamedText
         else -> parsedText
     }
