@@ -27,6 +27,30 @@ const val CONTINUE_INSTRUCTION =
 /** 单轮「有效产出」阈值：低于它视为模型在收尾或打转。 */
 const val MIN_MEANINGFUL_CHARS = 200
 
+/**
+ * Models occasionally finish a long reasoning turn with a reference such as
+ * "见上" instead of a self-contained answer.  Treat these exact short replies
+ * as placeholders so they cannot overwrite a useful streamed answer.
+ */
+fun isPlaceholderReply(text: String): Boolean {
+    val normalized = text.trim()
+        .replace(Regex("[。！？!?：:，,、\\s]+$"), "")
+    return normalized in setOf(
+        "见上", "如上", "同上", "见前文", "见上文", "如上所述", "见图", "见下图",
+    )
+}
+
+/** Prefer a meaningful streamed answer over a short placeholder from final JSON. */
+fun reconcileStreamedReply(streamed: String, parsed: String): String {
+    val streamedText = streamed.trim()
+    val parsedText = parsed.trim()
+    return when {
+        streamedText.length >= MIN_MEANINGFUL_CHARS && isPlaceholderReply(parsedText) -> streamedText
+        parsedText.isBlank() && streamedText.isNotBlank() -> streamedText
+        else -> parsedText
+    }
+}
+
 /** 累计输出绝对熔断长度。 */
 const val TOTAL_CHAR_FUSE = 240_000
 

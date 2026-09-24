@@ -11,6 +11,7 @@ import com.example.lixing.ui.photo.rotatePhotoAndSave
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import androidx.compose.material.icons.filled.RotateRight
+import androidx.compose.material.icons.filled.RotateLeft
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import android.os.Bundle
@@ -524,9 +525,9 @@ fun AssistantScreen(
             viewModel.consumeApplyMessage()
         }
     }
-    LaunchedEffect(state.messages.size, state.pendingActions.size) {
+    LaunchedEffect(state.currentConversationId, state.messages.lastOrNull()?.id) {
         if (state.messages.isNotEmpty() || state.pendingActions.isNotEmpty()) {
-            listState.animateScrollToItem(0)
+            listState.scrollToItem(0)
         }
     }
 
@@ -648,29 +649,32 @@ fun AssistantScreen(
                 contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
-                // reverseLayout 的第 0 项在视觉底部，思考面板独立占位，始终紧跟最新消息。
-                if (state.busy) {
-                    item(key = "thinking") {
-                        ThinkingPanel(
-                            reasoning = state.activeReasoning,
-                            answerStarted = state.activeAnswerStarted,
-                            expanded = state.reasoningExpanded,
-                            onToggle = viewModel::toggleReasoningExpanded,
-                        )
-                    }
-                } else if (state.messages.isEmpty()) {
+                if (!state.busy && state.messages.isEmpty()) {
                     item(key = "empty-hint") { EmptyHint() }
                 }
-                itemsIndexed(state.messages.asReversed(), key = { index, _ -> "msg-${state.messages.size - 1 - index}" }) { index, message ->
+                itemsIndexed(state.messages.asReversed(), key = { index, message -> message.id ?: "local-$index" }) { index, message ->
                     val messageIndex = state.messages.size - 1 - index
-                    // busy 切换时保留同一个正文组合位置，不再销毁/重建整个 Markdown 视图。
+                    val streamingAnswer = index == 0 && state.busy && message.role == "assistant"
+                    val displayContent = message.displayContent ?: message.content
+                    // The newest answer shares a stable list item with thinking, above its bubble.
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        MessageBubble(
-                            role = message.role,
-                            content = message.displayContent ?: message.content,
-                            imagePaths = message.imagePaths,
-                            onImageClick = { paths, imageIndex -> photoViewer = PhotoViewerState(paths, imageIndex) },
-                        )
+                        if (index == 0 && state.busy) {
+                            ThinkingPanel(
+                                reasoning = state.activeReasoning,
+                                answerStarted = state.activeAnswerStarted,
+                                expanded = state.reasoningExpanded,
+                                onToggle = viewModel::toggleReasoningExpanded,
+                            )
+                        }
+                        if (!streamingAnswer || displayContent.isNotBlank() || message.imagePaths.isNotEmpty()) {
+                            MessageBubble(
+                                role = message.role,
+                                content = displayContent,
+                                imagePaths = message.imagePaths,
+                                streaming = streamingAnswer,
+                                onImageClick = { paths, imageIndex -> photoViewer = PhotoViewerState(paths, imageIndex) },
+                            )
+                        }
                         if (message.role == "assistant" && !(index == 0 && state.busy)) {
                             AssistantMessageActionBar(
                                 planCount = if (state.pendingActionsOwnerIndex == messageIndex) state.pendingActions.size else 0,
@@ -684,6 +688,12 @@ fun AssistantScreen(
                                 },
                             )
                         }
+                    }
+                }
+                if (state.busy && state.messages.isEmpty()) {
+                    item(key = "thinking") {
+                        ThinkingPanel(state.activeReasoning, state.activeAnswerStarted,
+                            state.reasoningExpanded, viewModel::toggleReasoningExpanded)
                     }
                 }
             }
@@ -1322,6 +1332,7 @@ internal fun MessageBubble(
     role: String,
     content: String,
     imagePaths: List<String>,
+    streaming: Boolean = false,
     onImageClick: (List<String>, Int) -> Unit,
 ) {
     val isUser = role == "user"
@@ -1376,7 +1387,12 @@ internal fun MessageBubble(
                                 color = MaterialTheme.colorScheme.onPrimaryContainer)
                         }
                     } else {
-                        AssistantMarkdownBody(content, imagePaths, onImageClick)
+                        if (streaming) {
+                            Text(content, style = MaterialTheme.typography.bodyLarge,
+                                color = MaterialTheme.colorScheme.onSurface)
+                        } else {
+                            AssistantMarkdownBody(content, imagePaths, onImageClick)
+                        }
                     }
                 }
             }
@@ -2225,8 +2241,8 @@ internal fun PhotoViewerDialog(paths: List<String>, initialIndex: Int, onDismiss
                     }
                 },
             ) {
-                Icon(Icons.Filled.RotateRight, contentDescription = null, tint = Color.White)
-                Text(if (rotating) "旋转中…" else "顺时针 90°", color = Color.White)
+                Icon(Icons.Filled.RotateLeft, contentDescription = null, tint = Color.White)
+                Text(if (rotating) "旋转中…" else "逆时针 90°", color = Color.White)
             }
             rotateError?.let { Text(it, color = Color.White, modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 60.dp)) }
             if (paths.size > 1) {

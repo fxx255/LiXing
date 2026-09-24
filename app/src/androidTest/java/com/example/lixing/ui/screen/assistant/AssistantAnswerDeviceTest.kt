@@ -2,6 +2,7 @@ package com.example.lixing.ui.screen.assistant
 
 import android.graphics.Bitmap
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.material3.MaterialTheme
@@ -65,14 +66,16 @@ class AssistantAnswerDeviceTest {
             finish = { busy = false }
             MaterialTheme {
                 LazyColumn(Modifier.fillMaxSize(), reverseLayout = true) {
-                    if (busy) item(key = "thinking") {
-                        Box(Modifier.onGloballyPositioned { thinkingBounds = it.boundsInRoot() }) {
-                            ThinkingPanel("仍在继续分析", false, true, {})
-                        }
-                    }
                     item(key = "answer") {
-                        Box(Modifier.onGloballyPositioned { answerBounds = it.boundsInRoot() }) {
-                            MessageBubble("assistant", content, listOf(output.absolutePath)) { _, _ -> }
+                        Column {
+                            if (busy) {
+                                Box(Modifier.onGloballyPositioned { thinkingBounds = it.boundsInRoot() }) {
+                                    ThinkingPanel("仍在继续分析", false, true, {})
+                                }
+                            }
+                            Box(Modifier.onGloballyPositioned { answerBounds = it.boundsInRoot() }) {
+                                MessageBubble("assistant", content, listOf(output.absolutePath)) { _, _ -> }
+                            }
                         }
                     }
                 }
@@ -84,7 +87,7 @@ class AssistantAnswerDeviceTest {
         compose.runOnIdle {
             assertTrue("续写正文不可见", answerBounds.height > 0)
             assertTrue("思考面板遮挡正文: $answerBounds / $thinkingBounds",
-                thinkingBounds.top >= answerBounds.bottom - 1)
+                thinkingBounds.bottom <= answerBounds.top + 1)
         }
         compose.runOnIdle { finish() }
         compose.waitForIdle()

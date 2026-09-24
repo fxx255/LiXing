@@ -129,6 +129,38 @@ class AssistantStreamRecoveryTest {
         assertFalse(error!!.message.orEmpty().contains("unverified draft"))
     }
 
+    @Test fun `placeholder reply after reasoning is recovered instead of saved`() = runBlocking {
+        val model = client(listOf(
+            200 to sse(reasoning = "已经分析了图片", content = """{"reply":"见上"}"""),
+            200 to sse(content = """{"reply":"这道题的完整解答与步骤。"}"""),
+        ))
+        val events = mutableListOf<AssistantStreamEvent>()
+        val result = model.chatStreaming(listOf(AssistantMessage("user", "帮我详细讲解")), "") { events += it }
+        assertEquals("这道题的完整解答与步骤。", result.reply)
+        assertEquals(2, requests.size)
+        assertTrue(events.any { it == AssistantStreamEvent.AnswerReset })
+    }
+
+    @Test fun `complete streamed reply survives a conflicting short final field`() = runBlocking {
+        val complete = "完整的图片讲解。".repeat(28)
+        val raw = buildJsonObject { put("reply", complete) }.toString().dropLast(1) + ",\"reply\":\"见上\"}"
+        val model = client(listOf(200 to sse(content = raw)))
+        val result = model.chatStreaming(listOf(AssistantMessage("user", "讲解图片")), "") {}
+        assertEquals(complete, result.reply)
+        assertEquals(1, requests.size)
+    }
+
+    @Test fun `second English accumulation recovers missing confirmation actions`() = runBlocking {
+        val model = client(listOf(
+            200 to sse(content = """{"reply":"已生成英语积累方案，请确认","english_actions":[]}"""),
+            200 to sse(content = """{"reply":"请确认英语积累","english_actions":[{"kind":"ADD_ENGLISH_ENTRY","type":"PHRASE","content":"shell out","meaning":"花钱"}]}"""),
+        ))
+        val result = model.chatStreaming(listOf(AssistantMessage("user", "是的帮我积累一下")), "") {}
+        assertEquals(2, requests.size)
+        assertEquals(1, result.englishActions.size)
+        assertNotNull(result.rawEnglishActionsJson)
+    }
+
     @Test fun `finish reason without delta still triggers continuation and preserves raw delimiters`() = runBlocking {
         val model = client(listOf(200 to sse(content = """{"reply":"value ${'$'}x"}""", finish = "length")))
         val result = model.chatStreaming(listOf(AssistantMessage("user", "question")), "") {}

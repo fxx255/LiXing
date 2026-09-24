@@ -3,6 +3,7 @@ package com.example.lixing.ui.screen.assistant
 import com.example.lixing.data.assistant.AssistantResponseParser
 import com.example.lixing.data.assistant.mergeAssistantContinuation
 import com.example.lixing.data.assistant.normalizeAssistantMarkdown
+import com.example.lixing.data.assistant.reconcileStreamedReply
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import org.junit.Assert.assertEquals
@@ -38,5 +39,11 @@ class AssistantContinuationTest {
     @Test fun `overlapping replay is not duplicated`() {
         val overlap = "这是前一轮已经写出的足够长的一段结论。"
         assertEquals("前文。" + overlap + "后文。", mergeAssistantContinuation("前文。" + overlap, overlap + "后文。"))
+    }
+
+    @Test fun `short final placeholder cannot replace a complete streamed answer`() {
+        val streamed = "详细解答：" + "每一步都说明了推导依据。".repeat(18)
+        assertEquals(streamed, reconcileStreamedReply(streamed, "见上"))
+        assertEquals("最终修正的答案", reconcileStreamedReply(streamed, "最终修正的答案"))
     }
 }

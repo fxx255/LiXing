@@ -31,13 +31,13 @@ object DiagramRenderer {
         drawText(canvas, DiagramText.layout(layout.title, DiagramTextRole.TITLE, 600f),
             28f, 28f, DiagramTextRole.TITLE)
         layout.edges.forEach { drawEdge(canvas, it) }
-        layout.nodes.forEach { drawNode(canvas, it) }
+        layout.nodes.forEach { drawNode(canvas, it, layout.edges) }
         // Labels are laid on clear sections of their routed polyline.
         layout.edges.forEach { drawEdgeLabel(canvas, it) }
         return bitmap
     }
 
-    private fun drawNode(canvas: Canvas, box: NodeBox) {
+    private fun drawNode(canvas: Canvas, box: NodeBox, edges: List<EdgeRoute>) {
         val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE }
         val stroke = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = INK; style = Paint.Style.STROKE; strokeWidth = 1.6f
@@ -47,12 +47,28 @@ object DiagramRenderer {
             DiagramNodeShape.MIXER, DiagramNodeShape.SUM -> {
                 canvas.drawOval(rect, fill)
                 canvas.drawOval(rect, stroke)
-                val glyph = box.node.glyph ?: if (box.node.shape == DiagramNodeShape.SUM) "+" else "×"
-                val text = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = INK; textSize = 29f; textAlign = Paint.Align.CENTER }
-                canvas.drawText(glyph, box.centerX, box.centerY - (text.ascent() + text.descent()) / 2, text)
+                if (box.node.shape == DiagramNodeShape.SUM) {
+                    val cross = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                        color = INK; style = Paint.Style.STROKE; strokeWidth = 1.35f
+                    }
+                    canvas.drawLine(box.centerX, box.y + 8f, box.centerX, box.y + box.height - 8f, cross)
+                    canvas.drawLine(box.x + 8f, box.centerY, box.x + box.width - 8f, box.centerY, cross)
+                    drawSumInputSigns(canvas, box, edges)
+                } else {
+                    val glyph = box.node.glyph ?: "×"
+                    val text = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = INK; textSize = 29f; textAlign = Paint.Align.CENTER }
+                    canvas.drawText(glyph, box.centerX, box.centerY - (text.ascent() + text.descent()) / 2, text)
+                }
             }
-            DiagramNodeShape.JUNCTION -> canvas.drawCircle(box.centerX, box.centerY, box.width / 2,
-                Paint(Paint.ANTI_ALIAS_FLAG).apply { color = INK })
+            DiagramNodeShape.JUNCTION -> {
+                canvas.drawCircle(box.centerX, box.centerY, box.width / 2,
+                    Paint(Paint.ANTI_ALIAS_FLAG).apply { color = INK })
+                val marker = DiagramLayout.label(box.node)
+                if (marker.lines.isNotEmpty()) {
+                    drawText(canvas, marker, box.centerX - marker.width / 2,
+                        box.y - marker.height - 5f, DiagramTextRole.EDGE_LABEL, centered = true)
+                }
+            }
             else -> {
                 if (box.node.shape == DiagramNodeShape.BLOCK) {
                     canvas.drawRoundRect(rect, 4f, 4f, fill)
@@ -66,6 +82,25 @@ object DiagramRenderer {
                 drawText(canvas, sub, box.centerX - sub.width / 2, top + main.height + gap,
                     DiagramTextRole.SUB_LABEL, centered = true)
             }
+        }
+    }
+
+    private fun drawSumInputSigns(canvas: Canvas, box: NodeBox, edges: List<EdgeRoute>) {
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = INK; textSize = 17f; textAlign = Paint.Align.CENTER }
+        edges.filter { it.edge.to == box.node.id }.forEach { route ->
+            val sign = route.edge.polarity ?: when (route.endPort) {
+                DiagramPort.TOP -> "+"
+                DiagramPort.BOTTOM -> "−"
+                else -> null
+            } ?: return@forEach
+            val (x, y) = when (route.endPort) {
+                DiagramPort.TOP -> box.centerX to box.y - 8f
+                DiagramPort.BOTTOM -> box.centerX to box.y + box.height + 22f
+                DiagramPort.LEFT -> box.x - 12f to box.centerY - 6f
+                DiagramPort.RIGHT -> box.x + box.width + 12f to box.centerY - 6f
+                DiagramPort.AUTO -> return@forEach
+            }
+            canvas.drawText(sign, x, y, paint)
         }
     }
 

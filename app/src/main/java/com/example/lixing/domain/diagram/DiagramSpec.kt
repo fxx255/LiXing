@@ -62,6 +62,8 @@ data class DiagramEdge(
     val toPort: DiagramPort = DiagramPort.AUTO,
     /** 虚线：可选、备注性质的连接。 */
     val dashed: Boolean = false,
+    /** 合流节点的输入符号，例如求和器上方为 +、下方为 −。 */
+    val polarity: String? = null,
 )
 
 @Serializable

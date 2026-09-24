@@ -35,16 +35,16 @@ class PhotoPlotDeviceTest {
         file.outputStream().use { source.compress(Bitmap.CompressFormat.PNG, 100, it) }
         var saved = false
         compose.setContent { MaterialTheme { PhotoCropDialog(file.path, { saved = true }, {}, { saved = true }) } }
-        compose.onNodeWithText("顺时针 90°").performClick()
+        compose.onNodeWithText("逆时针 90°").performClick()
         compose.onNodeWithText("使用整张").performScrollTo().assertIsDisplayed().performClick()
         try { compose.waitUntil(10_000) { saved } }
         catch (failure: Throwable) { throw AssertionError(compose.onRoot().printToString(), failure) }
         val rotated = decodeUprightPhoto(file.path)!!
         assertEquals(80, rotated.width)
         assertEquals(120, rotated.height)
-        assertEquals(Color.BLUE, rotated.getPixel(20, 20))
-        assertEquals(Color.RED, rotated.getPixel(60, 20))
-        assertEquals(Color.YELLOW, rotated.getPixel(20, 100))
+        assertEquals(Color.GREEN, rotated.getPixel(20, 20))
+        assertEquals(Color.YELLOW, rotated.getPixel(60, 20))
+        assertEquals(Color.RED, rotated.getPixel(20, 100))
         file.delete()
     }
 

@@ -180,6 +180,23 @@ class DiagramParserTest {
     }
 
     /** 未知端口拒收该图。 */
+    @Test fun summingInputPolarityIsPreserved() {
+        val (list) = parse(
+            diagram(
+                nodes = """[
+                    {"id":"a","label":"A","shape":"io"},
+                    {"id":"b","label":"B","shape":"io"},
+                    {"id":"sum","label":"Σ","shape":"sum"}
+                ]""",
+                edges = """[
+                    {"from":"a","to":"sum","toPort":"top"},
+                    {"from":"b","to":"sum","toPort":"bottom","polarity":"-"}
+                ]""",
+            ),
+        )
+        assertEquals("−", list.single().edges.last().polarity)
+    }
+
     @Test fun unknownPortIsRejected() {
         val (list) = parse(
             diagram(

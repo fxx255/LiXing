@@ -59,7 +59,7 @@ fun savePhotoBitmap(path: String, bitmap: Bitmap) {
     } finally { temporary.delete() }
 }
 
-fun rotatePhotoAndSave(path: String, quarterTurns: Int = 1) {
+fun rotatePhotoAndSave(path: String, quarterTurns: Int = -1) {
     val source = decodeUprightPhoto(path) ?: error("无法读取照片")
     savePhotoBitmap(path, rotatePhotoBitmap(source, quarterTurns))
 }

@@ -299,6 +299,25 @@ class AssistantGenerationManagerTest {
     }
 
     @Test
+    fun `answer reset replaces placeholder stream before final persistence`() = runBlocking {
+        val requestId = seed()
+        val placeholder = """{"reply":"见上","plan_actions":[]}"""
+        val complete = """{"reply":"完整的图片讲解","plan_actions":[]}"""
+        coEvery {
+            modelClient.chatStreaming(any(), any(), any(), any(), any(), any(), any(), any<suspend (AssistantStreamEvent) -> Unit>())
+        } coAnswers {
+            val onEvent = arg<suspend (AssistantStreamEvent) -> Unit>(7)
+            onEvent(AssistantStreamEvent.AnswerDelta(placeholder))
+            onEvent(AssistantStreamEvent.AnswerReset)
+            onEvent(AssistantStreamEvent.AnswerDelta(complete))
+            AssistantResponseParser.parse(complete, normalizeMarkdown = false)
+        }
+        manager.start(request(requestId = requestId), requestId)
+        assertEquals(AssistantRequestStatus.COMPLETED.name, awaitTerminal(requestId))
+        assertEquals("完整的图片讲解", db.assistantRequestDao().getMessage("a1")!!.content)
+    }
+
+    @Test
     fun `answer deltas are incremental and visible before the stream ends`() = runBlocking {
         val requestId = seed()
         val visible = StringBuilder()

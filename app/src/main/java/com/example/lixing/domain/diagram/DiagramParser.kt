@@ -95,6 +95,9 @@ object DiagramParser {
             fromPort = parsePort(obj["fromPort"]),
             toPort = parsePort(obj["toPort"]),
             dashed = (obj["dashed"] as? JsonPrimitive)?.contentOrNull == "true",
+            polarity = obj.boundedText("polarity", 1)?.also {
+                require(it == "+" || it == "-" || it == "−") { "polarity 只能是 + 或 -" }
+            }?.replace('-', '−'),
         )
     }
 

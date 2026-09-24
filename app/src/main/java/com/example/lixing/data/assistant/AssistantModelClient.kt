@@ -52,6 +52,7 @@ class AssistantModelException(
 sealed interface AssistantStreamEvent {
     data class ReasoningDelta(val text: String) : AssistantStreamEvent
     data class AnswerDelta(val text: String) : AssistantStreamEvent
+    data object AnswerReset : AssistantStreamEvent
 }
 
 /**
@@ -175,8 +176,16 @@ class AssistantModelClient @Inject constructor(
             .build()
 
         val firstOutput = executeStreaming(request, onEvent, onUsage)
-        val output = if (firstOutput.answer.isBlank() && firstOutput.reasoning.isNotBlank()) {
-            onEvent(AssistantStreamEvent.ReasoningDelta("\n\n…首轮思考较长，正在续写最终答案…\n"))
+        val userPrompt = messages.lastOrNull { it.role == "user" }?.content.orEmpty()
+        val firstParsed = AssistantResponseParser.parse(firstOutput.answer.trim(), normalizeMarkdown = false)
+        val firstStreamedReply = decodeReplyIncremental(firstOutput.answer)
+        val needsAnswer = firstOutput.answer.isBlank() && firstOutput.reasoning.isNotBlank() ||
+            isPlaceholderReply(firstParsed.reply) && firstStreamedReply.length < MIN_MEANINGFUL_CHARS
+        val needsEnglishActions = looksLikeEnglishEntryRequest(userPrompt) &&
+            firstParsed.englishActions.isEmpty() && !needsAnswer
+        val output = if (needsAnswer || needsEnglishActions) {
+            onEvent(AssistantStreamEvent.ReasoningDelta("\n\n…正在补全最终回答…\n"))
+            onEvent(AssistantStreamEvent.AnswerReset)
             try {
                 recoverFinalAnswer(
                     configured = configured,
@@ -186,6 +195,13 @@ class AssistantModelClient @Inject constructor(
                     previous = firstOutput,
                     onUsage = onUsage,
                     onEvent = onEvent,
+                    instruction = if (needsEnglishActions) {
+                        "上轮回答没有可确认的 english_actions。请根据用户刚才要求积累的内容重新给出完整 JSON，" +
+                            "并在 english_actions 中写入有效条目；没有条目时明确说明原因，不要声称已生成方案。"
+                    } else {
+                        "请重新给出对原问题独立、完整的最终回答。不得只写‘见上’、‘如上’或引用内部思考。" +
+                            "正文保留必要的讲解、公式与推导。严格遵守系统要求，只输出完整 JSON 对象。"
+                    },
                 )
             } catch (error: CancellationException) {
                 throw error
@@ -209,10 +225,17 @@ class AssistantModelClient @Inject constructor(
                 if (output.finishReason == "length") "模型输出达到长度上限，未生成最终答案" else "模型未返回有效内容",
             )
         }
+        val parsedAnswer = AssistantResponseParser.parse(answer, normalizeMarkdown = false)
+        val visibleAnswer = reconcileStreamedReply(decodeReplyIncremental(answer), parsedAnswer.reply)
+        if (isPlaceholderReply(visibleAnswer)) {
+            throw AssistantModelException(
+                AssistantModelException.Kind.INVALID_RESPONSE,
+                "模型未返回完整正文，请重试；简短的引用说明未作为回答保存",
+            )
+        }
         try {
-            val userPrompt = messages.lastOrNull { it.role == "user" }?.content.orEmpty()
             val base = guardMissingEnglishActions(
-                guardMissingPlanActions(AssistantResponseParser.parse(answer, normalizeMarkdown = false), userPrompt),
+                guardMissingPlanActions(parsedAnswer.copy(reply = visibleAnswer), userPrompt),
                 userPrompt,
             ).copy(
                 truncated = output.finishReason == "length",
@@ -861,6 +884,7 @@ class AssistantModelClient @Inject constructor(
         previous: StreamOutput,
         onUsage: (UsageSample?) -> Unit,
         onEvent: suspend (AssistantStreamEvent) -> Unit,
+        instruction: String = "请基于前面的题目和分析，立即生成最终答案。不要再展开冗长的内部思考；正文保留用户需要看到的公式与推导。严格遵守系统要求，只输出完整 JSON 对象。",
     ): StreamOutput {
         currentCoroutineContext().ensureActive()
         // Keep the original picture with the original question, not the recovery instruction.
@@ -871,12 +895,12 @@ class AssistantModelClient @Inject constructor(
         } + listOf(
             AssistantMessage(
                 role = "assistant",
-                content = "上一轮内部分析的末尾如下，仅用于续写，不要逐字复述：\n\n" +
-                    previous.reasoning.takeLast(RECOVERY_REASONING_CHARS),
+                content = "上一轮回答与内部分析仅用于补全，不要逐字复述：\n\n" +
+                    previous.answer.takeLast(2000) + "\n\n" + previous.reasoning.takeLast(RECOVERY_REASONING_CHARS),
             ),
             AssistantMessage(
                 role = "user",
-                content = "请基于前面的题目和分析，立即生成最终答案。不要再展开冗长的内部思考；正文保留用户需要看到的公式与推导。严格遵守系统要求，只输出完整 JSON 对象。",
+                content = instruction,
             ),
         )
         val payload = buildChatPayload(
@@ -1698,16 +1722,17 @@ class AssistantModelClient @Inject constructor(
     - 每张图最多插入一次锚点；某张图如果在正文中没有对应讲解位置，可以不放锚点（客户端会把它排在末尾）
     - 没有画图需求时不要输出 plots；正文里也不要再重复粘贴公式图像的描述
 14. 需要画**框图**时（通信原理框图、系统组成图、信号流程图：调制/解调、编码/译码、滤波/抽样、放大器级联、分支与合流等），在顶层加一个 diagrams 数组，每项一张图，**客户端本地排版并绘制**；你只给拓扑，**不要给坐标、不要用 ASCII 画框**（禁止在代码块里用 ──→、│、┌──┐ 这类字符拼框图——手机窄屏上会换行散乱、完全读不出来）：
-     {"title":"相干解调框图","nodes":[{"id":"in","label":"接收信号 ${'$'}s(t)${'$'}","shape":"io"},{"id":"mix","label":"乘法器","shape":"mixer","glyph":"×"},{"id":"lpf","label":"低通滤波器","shape":"block"},{"id":"out","label":"${'$'}m_o(t)${'$'}","shape":"io"},{"id":"carrier","label":"本地载波 ${'$'}\\sin(2\\pi f_c t)${'$'}","shape":"io","row":1}],"edges":[{"from":"in","to":"mix"},{"from":"mix","to":"lpf"},{"from":"lpf","to":"out"},{"from":"carrier","to":"mix","toPort":"bottom"}]}
-     - shape：block（矩形功能框，默认）、mixer（圆形乘法器/相加器，glyph 写 × 或 +）、sum（求和点）、io（无框文字：输入/输出/说明）、junction（连线交点）
+     示例（上下双支路）：`{"title":"相干解调","nodes":[{"id":"in","label":"A ${'$'}s(t)${'$'}","shape":"io","column":0},{"id":"split","label":"A","shape":"junction","column":1,"row":0},{"id":"mi","label":"乘法器","shape":"mixer","glyph":"×","column":2,"row":0},{"id":"mq","label":"乘法器","shape":"mixer","glyph":"×","column":2,"row":1},{"id":"fi","label":"LPF","shape":"block","column":3,"row":0},{"id":"fq","label":"LPF","shape":"block","column":3,"row":1},{"id":"sum","label":"求和","shape":"sum","column":5,"row":0},{"id":"out","label":"G 输出","shape":"io","column":6,"row":0},{"id":"car","label":"载波提取","shape":"block","column":4,"row":2},{"id":"phase","label":"−90° 移相","shape":"block","column":1,"row":2}],"edges":[{"from":"in","to":"split","label":"A"},{"from":"split","to":"mi","fromPort":"top"},{"from":"split","to":"mq","fromPort":"bottom"},{"from":"mi","to":"fi","label":"B"},{"from":"fi","to":"sum","toPort":"top","label":"C"},{"from":"mq","to":"fq","label":"D"},{"from":"fq","to":"sum","toPort":"bottom","label":"F","polarity":"-"},{"from":"sum","to":"out","label":"G"},{"from":"car","to":"mi","toPort":"bottom","label":"cos 2πf_ct"},{"from":"car","to":"phase"},{"from":"phase","to":"mq","toPort":"bottom","label":"sin 2πf_ct"}]}`
+     - shape：block（矩形功能框，默认）、mixer（圆形乘法器，glyph 写 ×）、sum（带十字和输入符号的求和圆）、io（无框文字）、junction（黑色测试点；label 可写 A～G，客户端会显示在点上方）
      - 位置用 row / column 提示：**row 0 = 主链，1 = 主链下方一行**（本地载波这类支路就设 row:1）；column 显式指定次序（越大越靠右），不写则由连线自动推导
      - 连线端口 fromPort / toPort：left / right / top / bottom / auto。**从下方接进某个框**写 "toPort":"bottom"（本地载波 → 乘法器下方，箭头向上）；不写时按相对位置自动选
-     - 连线可带 label（如短标注）与 dashed:true（虚线，表示可选/反馈）
+     - 连线可带 label（如短标注）、polarity（求和器输入符号，只能写 + 或 -）与 dashed:true（虚线，表示可选/反馈）。求和器上下输入会自动显示 +/−，复杂情况用 polarity 明确指定。
      - 节点可带 subLabel 作为框内第二行小字（型号、参数）
      - 标签里**可以直接写中文，也可以写 LaTeX**（写成 ${'$'}...${'$'}），客户端用公式排版引擎渲染；公式里的 \frac 必须带花括号（\frac{B}{2}，不要写 \frac B2）
      - 规模限制：一张图最多 24 个节点、40 条连线，一次最多 4 张图；标签 60 字以内、标题 40 字以内
      - **节点 id 必须唯一、连线的 from/to 必须指向已定义的 id**，否则整张图会被丢弃；写之前先自查一遍
      - 分支与合流都能表达：同一个 from 写多条 edge 即分支，多条 edge 指向同一个 to 即合流
+     - 教材式通信框图应显式使用 junction 测试点、row/column 排出上下两条平行支路，并给每条关键线标 A～G 或信号公式；不要把所有内容压成一条链。载波提取、移相、滤波器等共享支路要用真实 edge 连接，不能只写在正文。
      - diagrams 与 plots **共用** [[FIGURE:n]] 编号：**plots 的图在前，diagrams 的图在后**。例如本轮 1 张曲线图 + 1 张框图，正文里分别写 [[FIGURE:1]] 与 [[FIGURE:2]]
 
 输出格式（必须是可以直接 JSON.parse 的单个对象，不要 Markdown 代码块）：
@@ -1790,7 +1815,7 @@ private fun looksLikeEnglishEntryRequest(prompt: String): Boolean {
     return listOf(
         "加入英语积累", "记入英语积累", "存入英语积累", "添加到英语积累", "加入积累",
         "记到英语", "保存到英语", "写进英语积累", "删掉英语积累", "删除英语积累",
-        "修改英语积累", "加入我的英语", "好词好句",
+        "修改英语积累", "加入我的英语", "好词好句", "帮我积累", "积累一下",
     ).any(compact::contains)
 }
 

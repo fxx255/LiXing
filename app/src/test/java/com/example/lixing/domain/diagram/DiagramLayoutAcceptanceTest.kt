@@ -81,4 +81,27 @@ class DiagramLayoutAcceptanceTest {
             }
         }
     }
+
+    @Test fun `textbook dual branch routes into signed summing circle`() {
+        fun n(id: String, shape: DiagramNodeShape = DiagramNodeShape.BLOCK, row: Int, column: Int) =
+            DiagramNode(id, id, shape, row = row, column = column)
+        val spec = DiagramSpec("", listOf(
+            n("in", DiagramNodeShape.IO, 0, 0), n("split", DiagramNodeShape.JUNCTION, 0, 1),
+            n("mi", DiagramNodeShape.MIXER, 0, 2), n("mq", DiagramNodeShape.MIXER, 1, 2),
+            n("fi", row = 0, column = 3), n("fq", row = 1, column = 3),
+            n("hilbert", row = 1, column = 4), n("sum", DiagramNodeShape.SUM, 0, 5),
+            n("out", DiagramNodeShape.IO, 0, 6), n("carrier", row = 2, column = 4),
+            n("phase", row = 2, column = 1)), listOf(
+            DiagramEdge("in", "split"), DiagramEdge("split", "mi", fromPort = DiagramPort.TOP),
+            DiagramEdge("split", "mq", fromPort = DiagramPort.BOTTOM),
+            DiagramEdge("mi", "fi"), DiagramEdge("fi", "sum", toPort = DiagramPort.TOP),
+            DiagramEdge("mq", "fq"), DiagramEdge("fq", "hilbert"),
+            DiagramEdge("hilbert", "sum", toPort = DiagramPort.BOTTOM, polarity = "−"),
+            DiagramEdge("sum", "out"), DiagramEdge("carrier", "mi", toPort = DiagramPort.BOTTOM),
+            DiagramEdge("carrier", "phase"), DiagramEdge("phase", "mq", toPort = DiagramPort.BOTTOM)))
+        val result = DiagramLayout.layout(spec)
+        assertEquals(2, result.edges.count { it.edge.to == "sum" })
+        assertTrue(result.edges.filter { it.edge.to == "sum" }.all { it.endPort in setOf(DiagramPort.TOP, DiagramPort.BOTTOM) })
+        assertTrue(result.nodes.single { it.node.id == "mq" }.row > result.nodes.single { it.node.id == "mi" }.row)
+    }
 }

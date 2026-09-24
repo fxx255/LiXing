@@ -30,7 +30,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Crop
-import androidx.compose.material.icons.filled.RotateRight
+import androidx.compose.material.icons.filled.RotateLeft
 import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
@@ -279,9 +279,9 @@ private fun PhotoPreviewDialog(
                             }
                         },
                     ) {
-                        Icon(Icons.Filled.RotateRight, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Icon(Icons.Filled.RotateLeft, contentDescription = null, modifier = Modifier.size(18.dp))
                         Spacer(Modifier.width(4.dp))
-                        Text(if (rotating) "旋转中…" else "顺时针 90°")
+                        Text(if (rotating) "旋转中…" else "逆时针 90°")
                     }
                 }
             }
@@ -379,7 +379,7 @@ fun PhotoCropDialog(
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                     Text("裁剪照片", style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))
                     TextButton(enabled = preview != null && !saving, onClick = {
-                        quarterTurns = (quarterTurns + 1) % 4
+                        quarterTurns = (quarterTurns + 3) % 4
                         zoom = 1f
                         imageOffset = Offset.Zero
                         val rotatedSize = preview?.let { IntSize(it.height, it.width) } ?: IntSize.Zero
@@ -387,8 +387,8 @@ fun PhotoCropDialog(
                             if (rotatedSize.height > 0) rotatedSize.width.toFloat() / rotatedSize.height else 1f)
                         error = null
                     }) {
-                        Icon(Icons.Filled.RotateRight, contentDescription = null, modifier = Modifier.size(18.dp))
-                        Text("顺时针 90°")
+                        Icon(Icons.Filled.RotateLeft, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Text("逆时针 90°")
                     }
                 }
                 Text(

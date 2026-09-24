@@ -1251,11 +1251,20 @@ class AssistantGenerationManager @Inject constructor(
                                 }
                             }
                         }
+                        AssistantStreamEvent.AnswerReset -> {
+                            decoder.reset()
+                            roundText.setLength(0)
+                            partial = confirmedText
+                            updateActive(owner) { it.copy(partialText = partial, answerStarted = false) }
+                        }
                     }
                 }
 
                 lastResult = reply
-                var part = stripControlMarkers(reply.reply)
+                val streamedReply = decoder.finish()
+                var part = stripControlMarkers(
+                    com.example.lixing.data.assistant.reconcileStreamedReply(streamedReply, reply.reply),
+                )
                 // 续写轮里模型不知道前面已画过几张图，锚点通常从 1 重新编号：
                 // 按已累积数量平移，保证 [[FIGURE:n]] 始终指向合并列表里的正确下标。
                 if (accumulatedFigures.isNotEmpty()) {
