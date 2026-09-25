@@ -85,7 +85,12 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
         // 冷启动场景：activity 是新建的，直接从 intent 取通知目标。
-        notificationNavigation.value = navigationFromIntent(intent)
+        // 重建（savedInstanceState != null）时导航栈已由系统恢复，**绝不重放**：
+        // 否则从相机返回时 ROM 重建界面，会把旧通知目标当成新事件再导航一次，
+        // 助手页随之重开会话、清空消息与输入。
+        if (savedInstanceState == null) {
+            notificationNavigation.value = consumeNavigationIntent(intent)
+        }
         setContent {
             val prefs by prefsRepository.preferences.collectAsStateWithLifecycle(
                 initialValue = UserPreferences(),
@@ -137,7 +142,22 @@ class MainActivity : ComponentActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         handleBaiduOAuthIntent(intent)
-        navigationFromIntent(intent)?.let { notificationNavigation.value = it }
+        consumeNavigationIntent(intent)?.let { notificationNavigation.value = it }
+    }
+
+    /**
+     * 解析通知目标并**从 intent 上移除**，保证同一次点击只导航一次。
+     *
+     * 从「最近任务」重新拉起时系统会重投启动时的旧 intent（带
+     * FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY）：那不是一次新的通知点击，忽略。
+     */
+    private fun consumeNavigationIntent(intent: Intent?): NotificationNavigation? {
+        intent ?: return null
+        val fromHistory = (intent.flags and Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY) != 0
+        val navigation = if (fromHistory) null else navigationFromIntent(intent)
+        intent.removeExtra(AssistantKeepAliveService.EXTRA_ROUTE)
+        intent.removeExtra(AssistantKeepAliveService.EXTRA_CONVERSATION_ID)
+        return navigation
     }
 
     /**

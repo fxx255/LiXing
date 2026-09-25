@@ -142,6 +142,33 @@ class AssistantViewModelSubmissionTest {
         assertEquals("已保存答案", vm.state.value.messages.single().content)
     }
 
+    /** 页面重建再次打开当前会话：历史、输入与待发图片都不能被清空/被旧草稿回填。 */
+    @Test fun reopeningCurrentConversationKeepsComposerAndHistory() = runTest(dispatcher) {
+        flow("A").value = listOf(
+            AssistantMessageEntity(id = "u1", conversationId = "A", role = "user", content = "第一题"),
+            AssistantMessageEntity(id = "a1", conversationId = "A", role = "assistant", content = "第一题答案"),
+        )
+        open("A")
+        vm.onPhotoTaken("/synthetic/second.png"); tick()
+        vm.updateInput("第二题文字"); tick()
+        // 草稿槽里存的是较旧的内容（只有图片）；重开若回填草稿就会丢掉文字。
+        drafts["A"] = AssistantDraftStore.Draft("", listOf("/synthetic/second.png"))
+        vm.openConversation("A")
+        assertEquals(2, vm.state.value.messages.size)
+        tick()
+        assertEquals(listOf("第一题", "第一题答案"), vm.state.value.messages.map { it.content })
+        assertEquals("第二题文字", vm.state.value.input)
+        assertEquals(listOf("/synthetic/second.png"), vm.state.value.pendingPhotoPaths)
+    }
+
+    /** 路由初始会话每个 VM 只打开一次：重建重跑效应不会把用户从历史切到的 B 拉回 A。 */
+    @Test fun initialConversationIsOpenedOnlyOncePerViewModel() = runTest(dispatcher) {
+        vm.openInitialConversation("A"); tick()
+        open("B")
+        vm.openInitialConversation("A"); tick()
+        assertEquals("B", vm.state.value.currentConversationId)
+    }
+
     @Test fun rapidABANavigationRestartsTheAuthoritativePageSubscription() = runTest(dispatcher) {
         flow("A").value = listOf(AssistantMessageEntity(
             id = "saved", conversationId = "A", role = "assistant", content = "A答案",

@@ -1047,6 +1047,13 @@ class AssistantViewModel @Inject constructor(
      * 「还没点确认就锁屏 / 切走再回来」时，方案和按钮都不该消失。
      */
     fun openConversation(id: String) {
+        // 目标就是当前已订阅的会话：什么都不清。否则页面重建/通知重放时会把
+        // 消息、输入与待发图片整页清空再从旧草稿回填 —— 第二轮图文提问会先
+        // 「变成新对话、只剩图片」，直到请求行更新才跳回原会话。
+        if (id == _state.value.currentConversationId && pageSelection.value.first == id) {
+            _state.update { it.copy(historyOpen = false) }
+            return
+        }
         // 导航轮次同步 +1：旧会话所有在途 DB 恢复协程从此失效（A/B/A 围栏）。
         navigationEpoch += 1
         val epoch = navigationEpoch
@@ -1128,6 +1135,22 @@ class AssistantViewModel @Inject constructor(
             _state.update { it.copy(input = draft?.text.orEmpty(), pendingPhotoPaths = draft?.photoPaths.orEmpty()) }
         }
         viewModelScope.launch { refreshRetryEntry() }
+    }
+
+    /** 本 VM 已经处理过的路由初始会话（见 [openInitialConversation]）。 */
+    private var initialConversationHandled: String? = null
+
+    /**
+     * 路由参数指定的初始会话：**每个 VM 只打开一次**。
+     *
+     * 页面重建（旋转、从相机返回时 ROM 重建界面）会让 Screen 的 LaunchedEffect 重跑；
+     * 若每次都 openConversation，用户期间经历史切到的会话会被拉回路由里的那个。
+     * VM 随进程死亡一起消失，重建后的新 VM 仍会正常打开。
+     */
+    fun openInitialConversation(id: String) {
+        if (initialConversationHandled == id) return
+        initialConversationHandled = id
+        openConversation(id)
     }
 
     /** 从落库的信封恢复出来的待确认方案。 */

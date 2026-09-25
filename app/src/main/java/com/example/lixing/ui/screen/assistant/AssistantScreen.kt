@@ -216,10 +216,10 @@ fun AssistantScreen(
     viewModel: AssistantViewModel = hiltViewModel(),
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
-    // 打开通知指向的会话。
+    // 打开通知指向的会话（每个 VM 只打开一次：页面重建重跑本效应时不会重置会话）。
     LaunchedEffect(initialConversationId) {
         if (!initialConversationId.isNullOrBlank()) {
-            viewModel.openConversation(initialConversationId)
+            viewModel.openInitialConversation(initialConversationId)
         }
     }
     val snackbar = remember { SnackbarHostState() }
