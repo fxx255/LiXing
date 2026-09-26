@@ -107,10 +107,10 @@ object DiagramParser {
         val raw = (element as? JsonPrimitive)?.contentOrNull?.trim()?.lowercase() ?: return DiagramNodeShape.BLOCK
         return when (raw) {
             "block", "box", "rect", "rectangle" -> DiagramNodeShape.BLOCK
-            "mixer", "multiply", "circle" -> DiagramNodeShape.MIXER
-            "sum", "adder", "add" -> DiagramNodeShape.SUM
-            "io", "text", "label", "plain" -> DiagramNodeShape.IO
-            "junction", "dot", "node" -> DiagramNodeShape.JUNCTION
+            "mixer", "multiply", "multiplier", "product", "circle" -> DiagramNodeShape.MIXER
+            "sum", "adder", "add", "summation", "merge" -> DiagramNodeShape.SUM
+            "io", "input", "output", "signal", "text", "label", "plain" -> DiagramNodeShape.IO
+            "junction", "point", "connector", "dot", "node" -> DiagramNodeShape.JUNCTION
             else -> error("不支持的节点形状：$raw")
         }
     }
@@ -118,10 +118,10 @@ object DiagramParser {
     private fun parsePort(element: JsonElement?): DiagramPort {
         val raw = (element as? JsonPrimitive)?.contentOrNull?.trim()?.lowercase() ?: return DiagramPort.AUTO
         return when (raw) {
-            "left", "l" -> DiagramPort.LEFT
-            "right", "r" -> DiagramPort.RIGHT
-            "top", "t" -> DiagramPort.TOP
-            "bottom", "b" -> DiagramPort.BOTTOM
+            "left", "west", "l" -> DiagramPort.LEFT
+            "right", "east", "r" -> DiagramPort.RIGHT
+            "top", "north", "t" -> DiagramPort.TOP
+            "bottom", "south", "b" -> DiagramPort.BOTTOM
             "auto" -> DiagramPort.AUTO
             else -> error("不支持的端口：$raw")
         }

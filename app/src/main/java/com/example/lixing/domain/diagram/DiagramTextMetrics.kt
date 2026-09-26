@@ -4,7 +4,10 @@ import android.graphics.Paint
 import ru.noties.jlatexmath.JLatexMathDrawable
 
 enum class DiagramTextRole(val fontSizePx: Float) {
-    TITLE(19f), LABEL(17f), SUB_LABEL(13f), EDGE_LABEL(14f),
+    // The bitmap is shown inside a phone-width message bubble.  The old
+    // values were legible at the renderer's native size but became tiny after
+    // the wide diagram was fitted into the bubble.
+    TITLE(24f), LABEL(25f), SUB_LABEL(20f), EDGE_LABEL(25f),
 }
 
 /** Layout and drawing share measured runs, including the height of fractions. */
@@ -25,6 +28,21 @@ internal data class DiagramTextBlock(val lines: List<DiagramTextLine>) {
 
 internal object DiagramText {
     private val tokens = Regex("""\$[^$\n]+\$|\n|[A-Za-z0-9]+|[^\n]""")
+    private val cosineCarrier = Regex("""(?i)\bcos\s*2\s*π\s*f_?\s*c\s*t\b""")
+    private val sineCarrier = Regex("""(?i)\bsin\s*2\s*π\s*f_?\s*c\s*t\b""")
+
+    /**
+     * Older model responses commonly wrote the carrier labels as plain text
+     * (`cos 2πfct`).  Turn that narrow, unambiguous notation into math before
+     * measuring and drawing it, so the c subscript is retained like it is in
+     * the textbook.
+     */
+    private fun normalizeCommonMath(text: String): String {
+        if ('$' in text) return text
+        return text
+            .replace(cosineCarrier) { "\$\\cos 2\\pi f_c t\$" }
+            .replace(sineCarrier) { "\$\\sin 2\\pi f_c t\$" }
+    }
 
     fun layout(text: String, role: DiagramTextRole, maxWidth: Float): DiagramTextBlock {
         val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply { textSize = role.fontSizePx }
@@ -36,7 +54,7 @@ internal object DiagramText {
             runs = mutableListOf()
             width = 0f
         }
-        tokens.findAll(text).forEach { match ->
+        tokens.findAll(normalizeCommonMath(text)).forEach { match ->
             val token = match.value
             if (token == "\n") { flush(); return@forEach }
             val formula = if (token.startsWith('$') && token.endsWith('$') && token.length > 2) {

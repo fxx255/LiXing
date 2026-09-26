@@ -60,6 +60,32 @@ data class DiagramNode(
     val role: String? = null,
 )
 
+/**
+ * Older model responses sometimes omitted `shape:"mixer"` and only sent a
+ * role or the `×` glyph.  Keep those diagrams visually compatible with the
+ * textbook profile instead of treating the multiplier as a rectangular block.
+ */
+internal fun DiagramNode.renderShape(): DiagramNodeShape {
+    if (shape == DiagramNodeShape.MIXER || shape == DiagramNodeShape.SUM) return shape
+    val roleKey = role.orEmpty().trim().lowercase()
+        .replace('-', '_').replace(' ', '_')
+    val labelKey = label.trim().lowercase()
+    val glyphKey = glyph.orEmpty().trim()
+    if (roleKey.contains("sum") || roleKey.contains("adder") || roleKey.contains("merge") ||
+        labelKey.contains("求和") || labelKey.contains("加法") || glyphKey in setOf("+", "＋", "Σ", "∑")) {
+        return DiagramNodeShape.SUM
+    }
+    if (roleKey.contains("mixer") || roleKey.contains("mult") ||
+        glyphKey in setOf("×", "x", "X", "✕", "⊗") || labelKey in setOf("乘法器", "乘法", "×", "⊗")) {
+        return DiagramNodeShape.MIXER
+    }
+    if (roleKey in setOf("input", "output", "source", "signal_in", "signal_out") ||
+        labelKey in setOf("输入", "输出", "input", "output", "source")) {
+        return DiagramNodeShape.IO
+    }
+    return shape
+}
+
 @Serializable
 data class DiagramEdge(
     val from: String,

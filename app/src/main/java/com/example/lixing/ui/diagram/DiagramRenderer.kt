@@ -7,98 +7,141 @@ import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.RectF
 import com.example.lixing.domain.diagram.*
+import ru.noties.jlatexmath.JLatexMathDrawable
 import kotlin.math.atan2
 import kotlin.math.min
 import kotlin.math.sqrt
 
 /** Textbook-style local diagrams. The stored image keeps its natural aspect ratio. */
 object DiagramRenderer {
-    private const val INK = 0xFF202B38.toInt()
-    private const val MUTED = 0xFF536274.toInt()
+    const val DARK_BACKGROUND = 0xFF1C1C1E.toInt()
+    private data class Palette(val background: Int, val ink: Int, val muted: Int)
+    private val LIGHT = Palette(Color.WHITE, 0xFF202B38.toInt(), 0xFF536274.toInt())
+    private val DARK = Palette(DARK_BACKGROUND, 0xFFC9C9CE.toInt(), 0xFF8E8E93.toInt())
     private const val LABEL_CANVAS_PADDING = 28f
 
-    fun render(spec: DiagramSpec, widthPx: Int = 4096, heightPx: Int = 4096): Bitmap =
-        renderLayout(DiagramLayout.layout(spec), widthPx, heightPx)
+    fun render(spec: DiagramSpec, widthPx: Int = 4096, heightPx: Int = 4096,
+               dark: Boolean = false): Bitmap =
+        renderLayout(DiagramLayout.layout(spec), widthPx, heightPx, dark)
 
-    fun renderLayout(layout: DiagramLayoutResult, widthPx: Int, heightPx: Int): Bitmap {
+    fun renderLayout(layout: DiagramLayoutResult, widthPx: Int, heightPx: Int,
+                     dark: Boolean = false): Bitmap {
+        val palette = if (dark) DARK else LIGHT
         val scale = minOf(3f, widthPx / layout.width, heightPx / layout.height,
             sqrt(8_000_000f / (layout.width * layout.height)))
         require(scale > 0)
         val bitmap = Bitmap.createBitmap((layout.width * scale).toInt().coerceAtLeast(1),
             (layout.height * scale).toInt().coerceAtLeast(1), Bitmap.Config.ARGB_8888)
         val canvas = Canvas(bitmap)
-        canvas.drawColor(Color.WHITE)
+        canvas.drawColor(palette.background)
         canvas.scale(scale, scale)
         drawText(canvas, DiagramText.layout(layout.title, DiagramTextRole.TITLE, 600f),
-            28f, 28f, DiagramTextRole.TITLE)
-        layout.edges.forEach { drawEdge(canvas, it) }
-        layout.nodes.forEach { drawNode(canvas, it, layout.edges) }
+            28f, 28f, DiagramTextRole.TITLE, palette = palette)
+        layout.edges.forEach { drawEdge(canvas, it, palette) }
+        layout.nodes.forEach { drawNode(canvas, it, layout.edges, palette) }
+        // Draw arrowheads after node fills/strokes.  Otherwise the node body
+        // hides the head at a top/bottom port, making the direction look
+        // missing or reversed even though the route itself is correct.
+        layout.edges.forEach {
+            if (shouldDrawArrowHead(it, layout.nodes)) drawArrowHead(canvas, it, palette)
+        }
         // Labels are laid on clear sections of their routed polyline.  Keep a
         // small occupancy list so adjacent branch labels cannot paint over
         // one another or over a node.  The list uses logical (pre-scale) px.
         val occupiedLabels = annotationOccupancy(layout)
         layout.edges.forEach {
-            drawEdgeLabel(canvas, it, layout.nodes, occupiedLabels, layout.width, layout.height)
+            drawEdgeLabel(canvas, it, layout.nodes, occupiedLabels, layout.width, layout.height, palette)
         }
-        return bitmap
+        val trimmed = bitmap
+        if (trimmed !== bitmap) bitmap.recycle()
+        return trimmed
     }
 
     /** Reserve marker/sign space before choosing edge-label locations. */
     private fun annotationOccupancy(layout: DiagramLayoutResult): MutableList<RectF> {
         val occupied = mutableListOf<RectF>()
-        layout.nodes.filter { it.node.shape == DiagramNodeShape.JUNCTION }.forEach { box ->
-            val marker = DiagramLayout.label(box.node)
-            if (marker.lines.isNotEmpty()) {
-                occupied += RectF(
-                    box.centerX - marker.width / 2f - 4f,
-                    box.y - marker.height - 9f,
-                    box.centerX + marker.width / 2f + 4f,
-                    box.y - 1f,
-                )
-            }
+        layout.nodes.filter { it.node.renderShape() == DiagramNodeShape.JUNCTION }.forEach { box ->
+            markerLabelRect(box)?.let { occupied += it }
         }
-        layout.nodes.filter { it.node.shape == DiagramNodeShape.SUM }.forEach { box ->
-            occupied += RectF(box.centerX - 14f, box.y - 26f, box.centerX + 14f, box.y + 2f)
-            occupied += RectF(box.centerX - 14f, box.y + box.height - 2f,
-                box.centerX + 14f, box.y + box.height + 30f)
+        layout.nodes.filter { it.node.renderShape() == DiagramNodeShape.SUM }.forEach { box ->
+            occupied += RectF(box.centerX - 46f, box.y - 30f, box.centerX - 16f, box.y + 2f)
+            occupied += RectF(box.centerX - 46f, box.y + box.height + 2f,
+                box.centerX - 16f, box.y + box.height + 38f)
         }
         return occupied
     }
 
-    private fun drawNode(canvas: Canvas, box: NodeBox, edges: List<EdgeRoute>) {
-        val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE }
+    private enum class MarkerSide { ABOVE, BELOW, RIGHT }
+
+    /** Match the textbook placement: A/F beside vertical wires, D below its rail. */
+    private fun markerSide(box: NodeBox): MarkerSide {
+        val role = box.node.role.orEmpty().trim().lowercase()
+        val id = box.node.id.trim().lowercase()
+        val label = box.node.label.trim().lowercase()
+        return when {
+            role == "test_a" || id == "test_a" || id == "a" || label == "a" -> MarkerSide.RIGHT
+            role == "test_d" || id == "test_d" || id == "d" || label == "d" -> MarkerSide.BELOW
+            role == "test_f" || id == "test_f" || id == "f" || label == "f" -> MarkerSide.RIGHT
+            else -> MarkerSide.ABOVE
+        }
+    }
+
+    private fun markerLabelOrigin(box: NodeBox, marker: DiagramTextBlock): Pair<Float, Float> =
+        when (markerSide(box)) {
+            MarkerSide.ABOVE -> box.centerX - marker.width / 2f to box.y - marker.height - 16f
+            MarkerSide.BELOW -> box.centerX - marker.width / 2f to box.y + box.height + 10f
+            MarkerSide.RIGHT -> box.x + box.width + 12f to box.centerY - marker.height / 2f
+        }
+
+    private fun markerLabelRect(box: NodeBox): RectF? {
+        val marker = DiagramLayout.label(box.node)
+        if (marker.lines.isEmpty()) return null
+        val (x, top) = markerLabelOrigin(box, marker)
+        return RectF(x - 4f, top - 3f, x + marker.width + 4f, top + marker.height + 3f)
+    }
+
+    private fun drawNode(canvas: Canvas, box: NodeBox, edges: List<EdgeRoute>, palette: Palette) {
+        val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = palette.background }
         val stroke = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = INK; style = Paint.Style.STROKE; strokeWidth = 1.6f
+            color = palette.ink; style = Paint.Style.STROKE; strokeWidth = 1.9f
         }
         val rect = RectF(box.x, box.y, box.x + box.width, box.y + box.height)
-        when (box.node.shape) {
+        when (box.node.renderShape()) {
             DiagramNodeShape.MIXER, DiagramNodeShape.SUM -> {
                 canvas.drawOval(rect, fill)
                 canvas.drawOval(rect, stroke)
-                if (box.node.shape == DiagramNodeShape.SUM) {
+                if (box.node.renderShape() == DiagramNodeShape.SUM) {
                     val cross = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                        color = INK; style = Paint.Style.STROKE; strokeWidth = 1.35f
+                        color = palette.ink; style = Paint.Style.STROKE; strokeWidth = 1.6f
                     }
                     canvas.drawLine(box.centerX, box.y + 8f, box.centerX, box.y + box.height - 8f, cross)
                     canvas.drawLine(box.x + 8f, box.centerY, box.x + box.width - 8f, box.centerY, cross)
-                    drawSumInputSigns(canvas, box, edges)
+                    drawSumInputSigns(canvas, box, edges, palette)
                 } else {
                     val glyph = box.node.glyph ?: "×"
-                    val text = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = INK; textSize = 29f; textAlign = Paint.Align.CENTER }
+                    // The circle is intentionally a little larger than the
+                    // surrounding text blocks.  Scale the operator glyph with
+                    // it so × remains unmistakable in compact previews.
+                    val text = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                        color = palette.ink
+                        textSize = (box.width * 0.68f).coerceIn(40f, 48f)
+                        textAlign = Paint.Align.CENTER
+                    }
                     canvas.drawText(glyph, box.centerX, box.centerY - (text.ascent() + text.descent()) / 2, text)
                 }
             }
             DiagramNodeShape.JUNCTION -> {
                 canvas.drawCircle(box.centerX, box.centerY, box.width / 2,
-                    Paint(Paint.ANTI_ALIAS_FLAG).apply { color = INK })
+                    Paint(Paint.ANTI_ALIAS_FLAG).apply { color = palette.ink })
                 val marker = DiagramLayout.label(box.node)
                 if (marker.lines.isNotEmpty()) {
-                    drawText(canvas, marker, box.centerX - marker.width / 2,
-                        box.y - marker.height - 5f, DiagramTextRole.EDGE_LABEL, centered = true)
+                    val (x, top) = markerLabelOrigin(box, marker)
+                    drawText(canvas, marker, x, top, DiagramTextRole.LABEL,
+                        centered = true, palette = palette)
                 }
             }
             else -> {
-                if (box.node.shape == DiagramNodeShape.BLOCK) {
+                if (box.node.renderShape() == DiagramNodeShape.BLOCK) {
                     canvas.drawRoundRect(rect, 4f, 4f, fill)
                     canvas.drawRoundRect(rect, 4f, 4f, stroke)
                 }
@@ -106,15 +149,16 @@ object DiagramRenderer {
                 val sub = DiagramLayout.subLabel(box.node)
                 val gap = if (sub.height > 0) 4f else 0f
                 val top = box.centerY - (main.height + sub.height + gap) / 2
-                drawText(canvas, main, box.centerX - main.width / 2, top, DiagramTextRole.LABEL, centered = true)
+                drawText(canvas, main, box.centerX - main.width / 2, top, DiagramTextRole.LABEL,
+                    centered = true, palette = palette)
                 drawText(canvas, sub, box.centerX - sub.width / 2, top + main.height + gap,
-                    DiagramTextRole.SUB_LABEL, centered = true)
+                    DiagramTextRole.SUB_LABEL, centered = true, palette = palette)
             }
         }
     }
 
-    private fun drawSumInputSigns(canvas: Canvas, box: NodeBox, edges: List<EdgeRoute>) {
-        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = INK; textSize = 17f; textAlign = Paint.Align.CENTER }
+    private fun drawSumInputSigns(canvas: Canvas, box: NodeBox, edges: List<EdgeRoute>, palette: Palette) {
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = palette.ink; textSize = 24f; textAlign = Paint.Align.CENTER }
         edges.filter { it.edge.to == box.node.id }.forEach { route ->
             val sign = route.edge.polarity ?: when (route.endPort) {
                 DiagramPort.TOP -> "+"
@@ -122,39 +166,79 @@ object DiagramRenderer {
                 else -> null
             } ?: return@forEach
             val (x, y) = when (route.endPort) {
-                DiagramPort.TOP -> box.centerX to box.y - 8f
-                DiagramPort.BOTTOM -> box.centerX to box.y + box.height + 22f
-                DiagramPort.LEFT -> box.x - 12f to box.centerY - 6f
-                DiagramPort.RIGHT -> box.x + box.width + 12f to box.centerY - 6f
+                // Keep the signs outside the circle, beside the incoming
+                // wires, as in the textbook.  They are offset laterally so
+                // neither sign sits on top of the vertical wire.
+                DiagramPort.TOP -> box.centerX - 30f to box.y - 8f
+                DiagramPort.BOTTOM -> box.centerX - 30f to box.y + box.height + 28f
+                DiagramPort.LEFT -> box.x - 20f to box.centerY - 6f
+                DiagramPort.RIGHT -> box.x + box.width + 20f to box.centerY - 6f
                 DiagramPort.AUTO -> return@forEach
             }
             canvas.drawText(sign, x, y, paint)
         }
     }
 
-    private fun drawEdge(canvas: Canvas, route: EdgeRoute) {
+    private fun drawEdge(canvas: Canvas, route: EdgeRoute, palette: Palette) {
         val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = if (route.edge.dashed) MUTED else INK
+            color = if (route.edge.dashed) palette.muted else palette.ink
             style = Paint.Style.STROKE; strokeWidth = 1.6f
             if (route.edge.dashed) pathEffect = android.graphics.DashPathEffect(floatArrayOf(6f, 4f), 0f)
         }
         val path = Path().apply {
-            route.points.forEachIndexed { index, point ->
+        route.points.forEachIndexed { index, point ->
                 if (index == 0) moveTo(point.x, point.y) else lineTo(point.x, point.y)
             }
         }
         canvas.drawPath(path, paint)
-        val previous = route.points.dropLast(1).lastOrNull() ?: route.start
+    }
+
+    private fun drawArrowHead(canvas: Canvas, route: EdgeRoute, palette: Palette) {
+        val previous = route.points.asReversed()
+            .drop(1)
+            .firstOrNull { it != route.end }
+            ?: route.start
         val angle = Math.toDegrees(atan2((route.end.y - previous.y).toDouble(),
             (route.end.x - previous.x).toDouble())).toFloat()
         canvas.save()
         canvas.translate(route.end.x, route.end.y)
         canvas.rotate(angle)
         canvas.drawPath(Path().apply {
-            moveTo(0f, 0f); lineTo(-9f, -4f); lineTo(-9f, 4f); close()
-        }, Paint(Paint.ANTI_ALIAS_FLAG).apply { color = paint.color })
+            moveTo(0f, 0f); lineTo(-11f, -5f); lineTo(-11f, 5f); close()
+        }, Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = if (route.edge.dashed) palette.muted else palette.ink
+        })
         canvas.restore()
     }
+
+    private fun shouldDrawArrowHead(route: EdgeRoute, nodes: List<NodeBox>): Boolean {
+        val target = nodes.firstOrNull { it.node.id == route.edge.to }?.node ?: return true
+        val role = target.role.orEmpty().trim().lowercase().replace('-', '_').replace(' ', '_')
+        val id = target.id.trim().lowercase()
+        val label = target.label.trim().lowercase()
+        // A–G (apart from the input point A) are passive probes on a wire;
+        // putting an arrowhead on their dot makes the signal look as though
+        // it stops there and creates the double-arrow seen around F.
+        val passiveProbe = role in setOf("test_b", "test_c", "test_d", "test_e", "test_f", "test_g") ||
+            id in setOf("test_b", "test_c", "test_d", "test_e", "test_f", "test_g") ||
+            (target.renderShape() == DiagramNodeShape.JUNCTION && label in setOf("b", "c", "d", "e", "f", "g"))
+        return !passiveProbe
+    }
+
+    private fun normalizedLabel(value: String): String = value.trim().lowercase()
+        .replace(" ", "").replace("−", "-")
+
+    private fun segmentLength(segment: Pair<DiagramPoint, DiagramPoint>): Float =
+        kotlin.math.abs(segment.first.x - segment.second.x) +
+            kotlin.math.abs(segment.first.y - segment.second.y)
+
+    private fun longestSegment(route: EdgeRoute, vertical: Boolean): Pair<DiagramPoint, DiagramPoint>? =
+        route.points.zipWithNext()
+            .filter { (a, b) ->
+                if (vertical) kotlin.math.abs(a.y - b.y) > kotlin.math.abs(a.x - b.x)
+                else kotlin.math.abs(a.x - b.x) >= kotlin.math.abs(a.y - b.y)
+            }
+            .maxByOrNull(::segmentLength)
 
     private fun drawEdgeLabel(
         canvas: Canvas,
@@ -163,32 +247,66 @@ object DiagramRenderer {
         occupied: MutableList<RectF>,
         canvasWidth: Float,
         canvasHeight: Float,
+        palette: Palette,
     ) {
         val label = route.edge.label?.trim()?.takeIf { it.isNotBlank() }
             ?.takeUnless { isDuplicateMarker(it, route, nodes) }
             ?: return
-        val segment = route.points.zipWithNext().maxByOrNull { (a, b) ->
-            kotlin.math.abs(a.x - b.x) + kotlin.math.abs(a.y - b.y)
+        val key = normalizedLabel(label)
+        val segment = when {
+            // The cosine label belongs above the horizontal carrier branch;
+            // the sine label belongs beside the vertical phase-shift branch.
+            key.contains("cos") ->
+                longestSegment(route, vertical = false) ?: longestSegment(route, vertical = true)
+            key.contains("sin") ->
+                longestSegment(route, vertical = true) ?: longestSegment(route, vertical = false)
+            key.contains("上支路") || key.contains("下支路") ||
+                key.contains("upper") || key.contains("lower") ->
+                longestSegment(route, vertical = false) ?: longestSegment(route, vertical = true)
+            else -> longestSegment(route, vertical = false) ?: longestSegment(route, vertical = true)
         } ?: return
         val (a, b) = segment
         val text = DiagramText.layout(label, DiagramTextRole.EDGE_LABEL, 140f)
         val horizontal = kotlin.math.abs(a.x - b.x) >= kotlin.math.abs(a.y - b.y)
         val midX = (a.x + b.x) / 2f
         val midY = (a.y + b.y) / 2f
-        val candidates = if (horizontal) {
-            listOf(
-                RectF(midX - text.width / 2f, midY - text.height - 9f,
-                    midX + text.width / 2f, midY - 9f),
-                RectF(midX - text.width / 2f, midY + 9f,
-                    midX + text.width / 2f, midY + 9f + text.height),
-            )
-        } else {
-            listOf(
-                RectF(midX + 9f, midY - text.height / 2f,
-                    midX + 9f + text.width, midY + text.height / 2f),
-                RectF(midX - 9f - text.width, midY - text.height / 2f,
-                    midX - 9f, midY + text.height / 2f),
-            )
+        val candidates = when {
+            // A point label on the split is printed beside the junction.
+            key == "a" -> {
+                val target = nodes.firstOrNull { it.node.id == route.edge.to }
+                if (target == null) emptyList()
+                else listOf(RectF(target.x + target.width + 12f,
+                    target.centerY - text.height / 2f,
+                    target.x + target.width + 12f + text.width,
+                    target.centerY + text.height / 2f))
+            }
+            // F belongs below the summing circle, beside the lower feed.
+            key == "f" -> {
+                val target = nodes.firstOrNull { it.node.id == route.edge.to }
+                if (target == null) emptyList()
+                else listOf(RectF(target.centerX + 12f,
+                    target.y + target.height + 8f,
+                    target.centerX + 12f + text.width,
+                    target.y + target.height + 8f + text.height))
+            }
+            horizontal -> {
+                val belowFirst = key == "d" || key.contains("下支路") || key.contains("lower")
+                val above = RectF(midX - text.width / 2f, midY - text.height - 9f,
+                    midX + text.width / 2f, midY - 9f)
+                val below = RectF(midX - text.width / 2f, midY + 9f,
+                    midX + text.width / 2f, midY + 9f + text.height)
+                if (belowFirst) listOf(below, above) else listOf(above, below)
+            }
+            else -> {
+                // Vertical annotations sit to the right of the feed by
+                // default, matching the cos/sin placement in the reference.
+                listOf(
+                    RectF(midX + 12f, midY - text.height / 2f,
+                        midX + 12f + text.width, midY + text.height / 2f),
+                    RectF(midX - 12f - text.width, midY - text.height / 2f,
+                        midX - 12f, midY + text.height / 2f),
+                )
+            }
         }
         fun clamped(rect: RectF): RectF {
             val dx = when {
@@ -218,13 +336,11 @@ object DiagramRenderer {
         occupied += RectF(chosen)
         val x = chosen.left
         val y = chosen.top
-        // A safe placement gets an opaque background to keep the wire out of
-        // the glyphs.  If no safe slot exists, omit this optional inline label
-        // rather than painting text over a node or another annotation.
-        canvas.drawRect(chosen.left - 3f, chosen.top - 2f,
-            chosen.right + 3f, chosen.bottom + 2f,
-            Paint().apply { color = Color.WHITE })
-        drawText(canvas, text, x, y, DiagramTextRole.EDGE_LABEL, centered = true)
+        // The label is offset from the wire and from all occupied annotations,
+        // so it can be drawn directly without masking or visually cutting the
+        // underlying line.
+        drawText(canvas, text, x, y, DiagramTextRole.EDGE_LABEL,
+            centered = true, palette = palette)
     }
 
     /**
@@ -251,16 +367,25 @@ object DiagramRenderer {
     }
 
     private fun drawText(canvas: Canvas, block: DiagramTextBlock, x: Float, top: Float,
-                         role: DiagramTextRole, centered: Boolean = false) {
+                         role: DiagramTextRole, centered: Boolean = false,
+                         palette: Palette) {
         val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = if (role == DiagramTextRole.SUB_LABEL) MUTED else INK
+            color = if (role == DiagramTextRole.SUB_LABEL) palette.muted else palette.ink
             textSize = role.fontSizePx
         }
         var y = top
         for (line in block.lines) {
             var cursor = x + if (centered) (block.width - line.width) / 2 else 0f
             for (run in line.runs) {
-                val drawable = run.formula
+                // Layout measures formulas without knowing the image theme.
+                // Rebuild only the few dark-theme glyphs with the plot's
+                // light text color; otherwise their default black disappears.
+                val drawable = if (palette === DARK && run.formula != null) {
+                    runCatching {
+                        JLatexMathDrawable.builder(run.text.removeSurrounding("$"))
+                            .textSize(role.fontSizePx).color(palette.ink).build()
+                    }.getOrNull() ?: run.formula
+                } else run.formula
                 if (drawable != null) {
                     canvas.save()
                     canvas.translate(cursor, y + (line.height - run.height) / 2)
@@ -275,5 +400,48 @@ object DiagramRenderer {
             }
             y += line.height + 4f
         }
+    }
+
+    /** Remove the bitmap-only whitespace left by the logical canvas bounds. */
+    private fun trimWhitespace(bitmap: Bitmap, scale: Float): Bitmap {
+        val width = bitmap.width
+        val height = bitmap.height
+        val pixels = IntArray(width * height)
+        bitmap.getPixels(pixels, 0, width, 0, 0, width, height)
+        var left = width
+        var top = height
+        var right = -1
+        var bottom = -1
+        for (y in 0 until height) {
+            val row = y * width
+            for (x in 0 until width) {
+                val color = pixels[row + x]
+                val red = color ushr 16 and 0xFF
+                val green = color ushr 8 and 0xFF
+                val blue = color and 0xFF
+                if (red < 245 || green < 245 || blue < 245) {
+                    left = min(left, x)
+                    top = min(top, y)
+                    right = maxOf(right, x)
+                    bottom = maxOf(bottom, y)
+                }
+            }
+        }
+        if (right < left || bottom < top) return bitmap
+        val padding = (10f * scale).toInt().coerceAtLeast(8)
+        val cropLeft = (left - padding).coerceAtLeast(0)
+        val cropTop = (top - padding).coerceAtLeast(0)
+        val cropRight = (right + padding + 1).coerceAtMost(width)
+        val cropBottom = (bottom + padding + 1).coerceAtMost(height)
+        if (cropLeft == 0 && cropTop == 0 && cropRight == width && cropBottom == height) return bitmap
+        val cropWidth = cropRight - cropLeft
+        val cropHeight = cropBottom - cropTop
+        // Copy pixels explicitly instead of relying on Bitmap.createBitmap's
+        // source-backed crop.  Some Android/Robolectric combinations preserve
+        // the crop dimensions but lose the source alpha/color buffer.
+        val cropped = Bitmap.createBitmap(cropWidth, cropHeight, Bitmap.Config.ARGB_8888)
+        cropped.setPixels(pixels, cropLeft + cropTop * width, width,
+            0, 0, cropWidth, cropHeight)
+        return cropped
     }
 }

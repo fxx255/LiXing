@@ -179,6 +179,29 @@ class DiagramParserTest {
         assertEquals(DiagramNodeShape.SUM, spec.nodes.first { it.id == "sum" }.shape)
     }
 
+    @Test fun commonDiagramShapeAndPortAliasesAreAccepted() {
+        val element = diagram(
+            nodes = """
+                [{"id":"in","label":"输入","shape":"input"},
+                 {"id":"mul","label":"乘法器","shape":"multiplier"},
+                 {"id":"sum","label":"求和","shape":"summation"},
+                 {"id":"out","label":"输出","shape":"output"}]
+            """.trimIndent(),
+            edges = """
+                [{"from":"in","to":"mul","toPort":"west"},
+                 {"from":"mul","to":"sum","toPort":"north"},
+                 {"from":"sum","to":"out","toPort":"east"}]
+            """.trimIndent(),
+        )
+        val spec = DiagramParser.parseOne(element)
+        assertEquals(DiagramNodeShape.IO, spec.nodes.first { it.id == "in" }.shape)
+        assertEquals(DiagramNodeShape.MIXER, spec.nodes.first { it.id == "mul" }.shape)
+        assertEquals(DiagramNodeShape.SUM, spec.nodes.first { it.id == "sum" }.shape)
+        assertEquals(DiagramPort.LEFT, spec.edges.first().toPort)
+        assertEquals(DiagramPort.TOP, spec.edges[1].toPort)
+        assertEquals(DiagramPort.RIGHT, spec.edges[2].toPort)
+    }
+
     /** 未知端口拒收该图。 */
     @Test fun summingInputPolarityIsPreserved() {
         val (list) = parse(

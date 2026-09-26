@@ -30,6 +30,13 @@ enum class DarkModePref(val label: String) {
     DARK("始终深色"),
 }
 
+/** Shared by Compose and off-screen image generation. */
+fun usesDarkColors(mode: DarkModePref, systemDark: Boolean): Boolean = when (mode) {
+    DarkModePref.FOLLOW_SYSTEM -> systemDark
+    DarkModePref.LIGHT -> false
+    DarkModePref.DARK -> true
+}
+
 /** 热力图色阶要按当前明暗切换，用 CompositionLocal 往下传，省得每层都塞参数。 */
 val LocalHeatColors: ProvidableCompositionLocal<List<Color>> =
     staticCompositionLocalOf { HeatLevels }
@@ -47,11 +54,7 @@ fun LiXingTheme(
     darkMode: DarkModePref = DarkModePref.FOLLOW_SYSTEM,
     content: @Composable () -> Unit,
 ) {
-    val dark = when (darkMode) {
-        DarkModePref.FOLLOW_SYSTEM -> isSystemInDarkTheme()
-        DarkModePref.LIGHT -> false
-        DarkModePref.DARK -> true
-    }
+    val dark = usesDarkColors(darkMode, isSystemInDarkTheme())
     val context = LocalContext.current
     val dynamicAvailable = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
 

@@ -11,16 +11,24 @@ internal object DiagramRouting {
     private data class Step(val state: Int, val distance: Float)
 
     fun route(start: DiagramPoint, end: DiagramPoint, from: DiagramPort, to: DiagramPort,
-              boxes: List<NodeBox>): List<DiagramPoint> {
-        fun stub(p: DiagramPoint, port: DiagramPort): DiagramPoint = when (port) {
-            DiagramPort.LEFT -> p.copy(x = p.x - 18f)
-            DiagramPort.RIGHT -> p.copy(x = p.x + 18f)
-            DiagramPort.TOP -> p.copy(y = p.y - 18f)
-            DiagramPort.BOTTOM -> p.copy(y = p.y + 18f)
-            DiagramPort.AUTO -> error("Unresolved port")
+              boxes: List<NodeBox>, fromIsJunction: Boolean = false,
+              toIsJunction: Boolean = false): List<DiagramPoint> {
+        fun stub(p: DiagramPoint, port: DiagramPort, isJunction: Boolean): DiagramPoint {
+            // A marker is itself the wire junction.  A short 8 px clearance
+            // keeps arrowheads outside its dot while leaving a segment when
+            // the marker sits between two compact blocks (especially E before
+            // the Hilbert filter).
+            val length = if (isJunction) 8f else 12f
+            return when (port) {
+                DiagramPort.LEFT -> p.copy(x = p.x - length)
+                DiagramPort.RIGHT -> p.copy(x = p.x + length)
+                DiagramPort.TOP -> p.copy(y = p.y - length)
+                DiagramPort.BOTTOM -> p.copy(y = p.y + length)
+                DiagramPort.AUTO -> error("Unresolved port")
+            }
         }
-        val a = stub(start, from)
-        val b = stub(end, to)
+        val a = stub(start, from, fromIsJunction)
+        val b = stub(end, to, toIsJunction)
         val obstacles = boxes.map { Obstacle(it.x - 6, it.y - 6, it.x + it.width + 6, it.y + it.height + 6) }
         fun clear(p: DiagramPoint, q: DiagramPoint): Boolean = obstacles.none { box ->
             if (p.x == q.x) p.x > box.left && p.x < box.right &&

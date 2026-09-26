@@ -1377,7 +1377,10 @@ internal fun InlineGeneratedImage(path: String, onClick: () -> Unit) {
  * 就会盖住靠后的图片与表格并吃掉它们的触摸（用户反馈的「越靠后越点不动」）。
  */
 private const val FIGURE_Z_INDEX = 1f
-private val DIAGRAM_MIN_INLINE_WIDTH = 640.dp
+// A 640dp minimum made the phone preview needlessly wide. The compact
+// textbook layout remains horizontally scrollable when needed, but exposes
+// more of the diagram in the initial viewport.
+private val DIAGRAM_MIN_INLINE_WIDTH = 520.dp
 
 /** The dimensions also cover diagrams restored into the generic backup folder. */
 internal fun shouldScrollGeneratedImage(file: File, width: Int, height: Int): Boolean =

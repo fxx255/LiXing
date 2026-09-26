@@ -260,5 +260,113 @@ class DiagramLayoutAcceptanceTest {
         assertEquals(DiagramPort.TOP, result.edges.single { it.edge.from == "phase" }.endPort)
         assertEquals(DiagramPort.BOTTOM, result.edges.single { it.edge.to == "f" }.endPort)
         assertEquals(DiagramPort.TOP, result.edges.single { it.edge.from == "f" }.startPort)
+        val carrierToUpper = result.edges.single { it.edge.from == "carrier" && it.edge.to == "upper" }
+        assertEquals(box.getValue("carrier").centerY, carrierToUpper.points[1].y, .1f)
+        assertEquals(box.getValue("phase").centerX, carrierToUpper.points[1].x, .1f)
+        assertEquals(box.getValue("upper").y + box.getValue("upper").height,
+            carrierToUpper.points.last().y, .1f)
+        val upperFeed = result.edges.single { it.edge.from == "c" && it.edge.to == "sum" }
+        assertEquals(box.getValue("c").centerY, upperFeed.points[1].y, .1f)
+        assertEquals(box.getValue("sum").centerX, upperFeed.points[1].x, .1f)
+        assertEquals(box.getValue("sum").centerX, upperFeed.points.last().x, .1f)
+        val lowerFeed = result.edges.single { it.edge.from == "hilbert" && it.edge.to == "f" }
+        assertEquals(box.getValue("lower").centerY, lowerFeed.points[1].y, .1f)
+        assertEquals(box.getValue("f").centerX, lowerFeed.points[1].x, .1f)
+    }
+
+    @Test
+    fun `legacy glyph-only multipliers still use circular geometry`() {
+        val spec = DiagramSpec("legacy", listOf(
+            DiagramNode("in", "in", DiagramNodeShape.IO),
+            DiagramNode("mix", "乘法器", DiagramNodeShape.BLOCK, glyph = "×", role = "upper_mixer"),
+            DiagramNode("sum", "求和", DiagramNodeShape.BLOCK, glyph = "+", role = "sum"),
+            DiagramNode("out", "out", DiagramNodeShape.IO),
+        ), listOf(
+            DiagramEdge("in", "mix"),
+            DiagramEdge("mix", "sum"),
+            DiagramEdge("sum", "out"),
+        ), profile = DiagramLayoutProfile.TEXTBOOK_DUAL_BRANCH)
+        val result = DiagramLayout.layout(spec).nodes.associateBy { it.node.id }
+        assertEquals(DiagramNodeShape.MIXER, result.getValue("mix").node.renderShape())
+        assertEquals(DiagramNodeShape.SUM, result.getValue("sum").node.renderShape())
+        assertEquals(DiagramMetrics.MIXER_DIAMETER, result.getValue("mix").width, .1f)
+        assertEquals(DiagramMetrics.MIXER_DIAMETER, result.getValue("mix").height, .1f)
+        assertEquals(DiagramMetrics.MIXER_DIAMETER, result.getValue("sum").width, .1f)
+        assertEquals(DiagramMetrics.MIXER_DIAMETER, result.getValue("sum").height, .1f)
+    }
+
+    @Test
+    fun `generic modulation chain keeps auxiliary source below mixer`() {
+        val spec = DiagramSpec("调制器", listOf(
+            DiagramNode("source", "基带输入", DiagramNodeShape.IO),
+            DiagramNode("mixer", "×", DiagramNodeShape.MIXER, glyph = "×"),
+            DiagramNode("carrier", "载波", DiagramNodeShape.IO),
+            DiagramNode("filter", "带通滤波器", DiagramNodeShape.BLOCK,
+                subLabel = "保留边带"),
+            DiagramNode("output", "已调信号", DiagramNodeShape.IO),
+        ), listOf(
+            DiagramEdge("source", "mixer"),
+            DiagramEdge("carrier", "mixer", toPort = DiagramPort.BOTTOM,
+                label = "cos(2πfct)"),
+            DiagramEdge("mixer", "filter"),
+            DiagramEdge("filter", "output"),
+        ))
+        val result = DiagramLayout.layout(spec)
+        val boxes = result.nodes.associateBy { it.node.id }
+        assertTrue("carrier must be below the mixer",
+            boxes.getValue("carrier").y > boxes.getValue("mixer").y + boxes.getValue("mixer").height)
+        assertEquals(DiagramPort.BOTTOM, result.edges.single { it.edge.from == "carrier" }.endPort)
+        result.edges.flatMap { it.points }.forEach { point ->
+            assertTrue("route x outside canvas: $point", point.x in 0f..result.width)
+            assertTrue("route y outside canvas: $point", point.y in 0f..result.height)
+        }
+    }
+
+    @Test
+    fun `semantic input and output roles use unboxed io geometry`() {
+        val spec = DiagramSpec("流程", listOf(
+            DiagramNode("in", "input", DiagramNodeShape.BLOCK, role = "input"),
+            DiagramNode("out", "output", DiagramNodeShape.BLOCK, role = "output"),
+        ), listOf(DiagramEdge("in", "out")))
+        val boxes = DiagramLayout.layout(spec).nodes.associateBy { it.node.id }
+        assertEquals(DiagramNodeShape.IO, boxes.getValue("in").node.renderShape())
+        assertEquals(DiagramNodeShape.IO, boxes.getValue("out").node.renderShape())
+    }
+
+    @Test
+    fun `generic branch and merge layout keeps blocks separated and dashed feedback`() {
+        val spec = DiagramSpec("双支路流程", listOf(
+            DiagramNode("input", "输入", DiagramNodeShape.IO),
+            DiagramNode("split", "分支", DiagramNodeShape.JUNCTION),
+            DiagramNode("upper", "上支路", DiagramNodeShape.BLOCK),
+            DiagramNode("lower", "下支路", DiagramNodeShape.BLOCK),
+            DiagramNode("merge", "合流", DiagramNodeShape.SUM, glyph = "+"),
+            DiagramNode("output", "输出", DiagramNodeShape.IO),
+        ), listOf(
+            DiagramEdge("input", "split"),
+            DiagramEdge("split", "upper", fromPort = DiagramPort.TOP),
+            DiagramEdge("split", "lower", fromPort = DiagramPort.BOTTOM),
+            DiagramEdge("upper", "merge", toPort = DiagramPort.TOP, polarity = "+"),
+            DiagramEdge("lower", "merge", toPort = DiagramPort.BOTTOM, polarity = "-"),
+            DiagramEdge("merge", "output"),
+            DiagramEdge("output", "input", fromPort = DiagramPort.BOTTOM,
+                toPort = DiagramPort.BOTTOM, dashed = true),
+        ))
+        val result = DiagramLayout.layout(spec)
+        result.nodes.forEachIndexed { index, first ->
+            result.nodes.drop(index + 1).forEach { second ->
+                val overlaps = first.x < second.x + second.width &&
+                    first.x + first.width > second.x &&
+                    first.y < second.y + second.height &&
+                    first.y + first.height > second.y
+                assertFalse("nodes overlap: ${first.node.id} and ${second.node.id}", overlaps)
+            }
+        }
+        assertTrue(result.edges.any { it.edge.dashed })
+        assertEquals(2, result.edges.count { it.edge.to == "merge" })
+        result.edges.flatMap { it.points }.forEach { point ->
+            assertTrue("route x outside canvas: $point", point.x in 0f..result.width)
+            assertTrue("route y outside canvas: $point", point.y in 0f..result.height)
+        }
     }
 }

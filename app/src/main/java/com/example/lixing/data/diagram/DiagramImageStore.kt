@@ -35,14 +35,15 @@ class DiagramImageStore @Inject constructor(
 
     private fun dir(): File = File(context.filesDir, "diagrams").apply { mkdirs() }
 
-    fun render(spec: DiagramSpec): String? {
+    fun render(spec: DiagramSpec, dark: Boolean = false): String? {
         val key = cacheKey(spec)
-        val png = File(dir(), "diagram_$key.png")
-        val sidecar = File(dir(), "spec_$key.json")
+        val variant = if (dark) "dark" else "light"
+        val png = File(dir(), "diagram_${variant}_$key.png")
+        val sidecar = File(dir(), "spec_${variant}_$key.json")
         if (png.isFile && png.length() > 0) return png.absolutePath
 
         return runCatching {
-            val bitmap = DiagramRenderer.render(spec)
+            val bitmap = DiagramRenderer.render(spec, dark = dark)
             try {
                 FileOutputStream(png).use { out ->
                     bitmap.compress(Bitmap.CompressFormat.PNG, 100, out)
@@ -74,13 +75,13 @@ class DiagramImageStore @Inject constructor(
         if (!sidecar.isFile) return null
         val spec = runCatching { json.decodeFromString<DiagramSpec>(sidecar.readText()) }.getOrNull()
             ?: return null
-        return render(spec)
+        return render(spec, dark = name.startsWith("diagram_dark_"))
     }
 
     private fun cacheKey(spec: DiagramSpec): String =
-        // Bump when layout geometry or label placement changes.  Otherwise a
+        // Bump when layout geometry, typography, or label placement changes.  Otherwise a
         // previously rendered PNG would mask the new deterministic template.
-        MessageDigest.getInstance("SHA-256").digest(("v3:" + json.encodeToString(spec)).toByteArray())
+        MessageDigest.getInstance("SHA-256").digest(("v6:" + json.encodeToString(spec)).toByteArray())
             .joinToString("") { "%02x".format(it) }
 
     private companion object {

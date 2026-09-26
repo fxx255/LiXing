@@ -7,11 +7,16 @@ import kotlin.math.max
 object DiagramLayout {
     private const val GAP_X = 64f
     private const val GAP_Y = 64f
-    private const val TEMPLATE_GAP_X = 84f
-    private const val TEMPLATE_GAP_Y = 92f
-    private const val TEMPLATE_COLUMN_WIDTH = 118f
-    private const val TEMPLATE_ROW_HEIGHT = 96f
-    private const val PADDING = 28f
+    // Keep the fixed textbook profile dense enough for a phone-sized preview.
+    // The previous values left the empty stage columns and three rails much
+    // farther apart than the reference diagrams, so labels became tiny after
+    // the bitmap was fitted into the message bubble.
+    private const val TEMPLATE_GAP_X = 52f
+    private const val TEMPLATE_GAP_Y = 62f
+    private const val TEMPLATE_COLUMN_WIDTH = 102f
+    private const val TEMPLATE_ROW_HEIGHT = 78f
+    private const val GENERIC_PADDING = 28f
+    private const val TEMPLATE_PADDING = 18f
     private data class Cell(val col: Int, val row: Int)
 
     fun layout(spec: DiagramSpec): DiagramLayoutResult {
@@ -31,8 +36,8 @@ object DiagramLayout {
         val edgeLabels = spec.edges.map { DiagramText.layout(it.label.orEmpty(), DiagramTextRole.EDGE_LABEL, 140f) }
         val gapX = max(GAP_X, (edgeLabels.maxOfOrNull { it.width } ?: 0f) + 24)
         val gapY = max(GAP_Y, (edgeLabels.maxOfOrNull { it.height } ?: 0f) + 24)
-        val x = starts(widths, PADDING, gapX)
-        val y = starts(heights, PADDING + title.height + (if (spec.title.isBlank()) 0f else 16f), gapY)
+        val x = starts(widths, GENERIC_PADDING, gapX)
+        val y = starts(heights, GENERIC_PADDING + title.height + (if (spec.title.isBlank()) 0f else 16f), gapY)
         val boxes = spec.nodes.map { node ->
             val cell = grid.getValue(node.id)
             val size = sizes.getValue(node.id)
@@ -50,7 +55,9 @@ object DiagramLayout {
             val start = anchor(from, departure)
             val end = anchor(to, arrival)
             EdgeRoute(edge, start, end, departure, arrival,
-                DiagramRouting.route(start, end, departure, arrival, boxes))
+                DiagramRouting.route(start, end, departure, arrival, boxes,
+                    from.node.renderShape() == DiagramNodeShape.JUNCTION,
+                    to.node.renderShape() == DiagramNodeShape.JUNCTION))
         }
         val maxX = max(boxes.maxOfOrNull { it.x + it.width } ?: 0f,
             routes.flatMap { it.points }.maxOfOrNull { it.x } ?: 0f)
@@ -59,9 +66,9 @@ object DiagramLayout {
         val maxLabelWidth = edgeLabels.maxOfOrNull { it.width } ?: 0f
         val maxLabelHeight = edgeLabels.maxOfOrNull { it.height } ?: 0f
         return DiagramLayoutResult(
-            maxOf(maxX + PADDING + maxLabelWidth / 2f + 8f,
-                title.width + PADDING * 2, DiagramMetrics.MIN_WIDTH),
-            maxOf(maxY + PADDING + maxLabelHeight + 16f, DiagramMetrics.MIN_HEIGHT),
+            maxOf(maxX + GENERIC_PADDING + maxLabelWidth / 2f + 8f,
+                title.width + GENERIC_PADDING * 2, DiagramMetrics.MIN_WIDTH),
+            maxOf(maxY + GENERIC_PADDING + maxLabelHeight + 16f, DiagramMetrics.MIN_HEIGHT),
             spec.title, boxes, routes,
             boxes.groupBy { it.row }.mapValues { (_, row) -> row.map { it.node.id } })
     }
@@ -163,14 +170,14 @@ object DiagramLayout {
                 spec.nodes.filter { cells[it.id]?.row == row }
                     .maxOfOrNull { sizes.getValue(it.id).height } ?: 0f)
         }
-        val gapX = max(TEMPLATE_GAP_X,
-            (spec.edges.map { DiagramText.layout(it.label.orEmpty(), DiagramTextRole.EDGE_LABEL, 140f) }
-                .maxOfOrNull { it.width } ?: 0f) + 36f)
-        val gapY = max(TEMPLATE_GAP_Y,
-            (spec.edges.map { DiagramText.layout(it.label.orEmpty(), DiagramTextRole.EDGE_LABEL, 140f) }
-                .maxOfOrNull { it.height } ?: 0f) + 36f)
-        val x = starts(widths, PADDING, gapX)
-        val y = starts(heights, PADDING + title.height + (if (spec.title.isBlank()) 0f else 16f), gapY)
+        // The carrier formula sits on the deliberately long control segment
+        // between the phase block and the carrier extractor.  Reserving its
+        // whole width between *every* pair of stages made the image sparse;
+        // the label placer already checks the actual segment for collisions.
+        val gapX = max(TEMPLATE_GAP_X, 96f)
+        val gapY = max(TEMPLATE_GAP_Y, 54f)
+        val x = starts(widths, TEMPLATE_PADDING, gapX)
+        val y = starts(heights, TEMPLATE_PADDING + title.height + (if (spec.title.isBlank()) 0f else 16f), gapY)
         fun railCenter(row: Int) = y.getValue(row) + heights.getValue(row) / 2f
         val upperRail = railCenter(0)
         val middleRail = railCenter(1.coerceAtMost(maxRow))
@@ -207,7 +214,11 @@ object DiagramLayout {
                     (leftEdge + rightEdge) / 2f
                 }
             } else {
-                (leftEdge + rightEdge) / 2f
+                // E is immediately before the Hilbert block in the reference.
+                // Keeping it slightly toward the preceding LPF leaves room for
+                // the marker dot, its letter, and the incoming arrowhead.
+                val fraction = if (role == "test_e") 0.55f else 0.5f
+                leftEdge + (rightEdge - leftEdge) * fraction
             }
             val centerY = when (role) {
                 "test_f" -> (carrierRail + lowerRail) / 2f
@@ -225,6 +236,8 @@ object DiagramLayout {
             byStageId[node.id] ?: byTestId.getValue(node.id)
         }
         val byId = boxes.associateBy { it.node.id }
+        val phaseBox = byRole["phase_shift"].orEmpty().firstOrNull()?.let { byId[it.id] }
+        val controlTrunkX = phaseBox?.centerX
         val routes = spec.edges.map { edge ->
             val from = byId.getValue(edge.from)
             val to = byId.getValue(edge.to)
@@ -237,13 +250,48 @@ object DiagramLayout {
             // older model supplied the generic carrier "bottom" hint.
             val arrival = when {
                 fromRole == "phase_shift" && toRole == "lower_mixer" -> DiagramPort.TOP
+                fromRole == "carrier" && toRole == "phase_shift" -> DiagramPort.TOP
                 toRole == "test_f" && fromRole in setOf("lower_hilbert", "lower_filter") -> DiagramPort.BOTTOM
                 else -> resolvePort(edge.toPort, to, from)
             }
             val start = anchor(from, departure)
             val end = anchor(to, arrival)
+            val textbookPoints = when {
+                // Keep the entire upper rail level through C.  The generic
+                // obstacle router can drop immediately after that marker,
+                // leaving an unintended step in the rectangular outline.
+                fromRole == "test_c" && toRole == "sum" -> listOf(
+                    start,
+                    DiagramPoint(to.centerX, start.y),
+                    end,
+                )
+                // The carrier extractor feeds one vertical trunk.  Both
+                // arrows share the horizontal carrier line, then split up to
+                // the upper mixer and down into the phase shifter, matching
+                // the reference drawing instead of creating two offset rails.
+                fromRole == "carrier" && toRole == "upper_mixer" && controlTrunkX != null -> listOf(
+                    start,
+                    DiagramPoint(controlTrunkX, start.y),
+                    end,
+                )
+                fromRole == "carrier" && toRole == "phase_shift" && controlTrunkX != null -> listOf(
+                    start,
+                    DiagramPoint(controlTrunkX, start.y),
+                    end,
+                )
+                // F is a point on the vertical feed into the summer.  The
+                // lower signal stays on its rail until the right-hand turn.
+                toRole == "test_f" && fromRole in setOf("lower_hilbert", "lower_filter") -> listOf(
+                    start,
+                    DiagramPoint(end.x, start.y),
+                    end,
+                )
+                else -> null
+            }
             EdgeRoute(edge, start, end, departure, arrival,
-                DiagramRouting.route(start, end, departure, arrival, boxes))
+                textbookPoints ?: DiagramRouting.route(start, end, departure, arrival, boxes,
+                    from.node.renderShape() == DiagramNodeShape.JUNCTION,
+                    to.node.renderShape() == DiagramNodeShape.JUNCTION))
         }
         val labelWidth = spec.edges.map { DiagramText.layout(it.label.orEmpty(), DiagramTextRole.EDGE_LABEL, 140f) }
             .maxOfOrNull { it.width } ?: 0f
@@ -254,9 +302,9 @@ object DiagramLayout {
         val maxY = max(boxes.maxOfOrNull { it.y + it.height } ?: 0f,
             routes.flatMap { it.points }.maxOfOrNull { it.y } ?: 0f)
         return DiagramLayoutResult(
-            maxOf(maxX + PADDING + labelWidth / 2f + 8f,
-                title.width + PADDING * 2, DiagramMetrics.MIN_WIDTH),
-            maxOf(maxY + PADDING + labelHeight / 2f + 8f, DiagramMetrics.MIN_HEIGHT),
+            maxOf(maxX + TEMPLATE_PADDING + labelWidth / 2f + 8f,
+                title.width + TEMPLATE_PADDING * 2, DiagramMetrics.MIN_WIDTH),
+            maxOf(maxY + TEMPLATE_PADDING + labelHeight / 2f + 8f, DiagramMetrics.MIN_HEIGHT),
             spec.title, boxes, routes,
             boxes.groupBy { it.row }.mapValues { (_, row) -> row.map { it.node.id } })
     }
@@ -278,7 +326,7 @@ object DiagramLayout {
         if (explicitRole != null && (explicitRole == "split" || explicitRole.contains("branch"))) {
             return "split"
         }
-        if (node.shape == DiagramNodeShape.SUM || has("sum", "adder", "merge")) return "sum"
+        if (node.renderShape() == DiagramNodeShape.SUM || has("sum", "adder", "merge")) return "sum"
         // Check split/branch before bare A~G labels.  Older prompts used a
         // junction labelled A as the branch node, not as test point A.
         if (has("split", "branch")) return "split"
@@ -379,14 +427,18 @@ object DiagramLayout {
     internal fun label(node: DiagramNode) = DiagramText.layout(node.label, DiagramTextRole.LABEL, 210f)
     internal fun subLabel(node: DiagramNode) = DiagramText.layout(node.subLabel.orEmpty(), DiagramTextRole.SUB_LABEL, 210f)
 
-    private fun sizeOf(node: DiagramNode): Size = when (node.shape) {
-        DiagramNodeShape.MIXER, DiagramNodeShape.SUM -> Size(54f, 54f)
+    private fun sizeOf(node: DiagramNode): Size = when (node.renderShape()) {
+        // Keep circular operators large enough to remain legible after the
+        // diagram is fitted into a message bubble.  DiagramMetrics is the
+        // single source of truth for the renderer and layout geometry.
+        DiagramNodeShape.MIXER, DiagramNodeShape.SUM ->
+            Size(DiagramMetrics.MIXER_DIAMETER, DiagramMetrics.MIXER_DIAMETER)
         DiagramNodeShape.JUNCTION -> Size(12f, 12f)
         else -> {
             val main = label(node)
             val sub = subLabel(node)
-            val padding = if (node.shape == DiagramNodeShape.IO) 8f else 16f
-            Size(maxOf(main.width, sub.width, if (node.shape == DiagramNodeShape.IO) 30f else 72f) + padding * 2,
+            val padding = if (node.renderShape() == DiagramNodeShape.IO) 8f else 16f
+            Size(maxOf(main.width, sub.width, if (node.renderShape() == DiagramNodeShape.IO) 30f else 72f) + padding * 2,
                 maxOf(main.height + sub.height + (if (sub.height > 0) 4f else 0f), 22f) + padding * 2)
         }
     }
