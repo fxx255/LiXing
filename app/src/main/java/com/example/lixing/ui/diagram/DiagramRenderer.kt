@@ -9,7 +9,6 @@ import android.graphics.RectF
 import com.example.lixing.domain.diagram.*
 import ru.noties.jlatexmath.JLatexMathDrawable
 import kotlin.math.atan2
-import kotlin.math.min
 import kotlin.math.sqrt
 
 /** Textbook-style local diagrams. The stored image keeps its natural aspect ratio. */
@@ -52,9 +51,7 @@ object DiagramRenderer {
         layout.edges.forEach {
             drawEdgeLabel(canvas, it, layout.nodes, occupiedLabels, layout.width, layout.height, palette)
         }
-        val trimmed = bitmap
-        if (trimmed !== bitmap) bitmap.recycle()
-        return trimmed
+        return bitmap
     }
 
     /** Reserve marker/sign space before choosing edge-label locations. */
@@ -400,48 +397,5 @@ object DiagramRenderer {
             }
             y += line.height + 4f
         }
-    }
-
-    /** Remove the bitmap-only whitespace left by the logical canvas bounds. */
-    private fun trimWhitespace(bitmap: Bitmap, scale: Float): Bitmap {
-        val width = bitmap.width
-        val height = bitmap.height
-        val pixels = IntArray(width * height)
-        bitmap.getPixels(pixels, 0, width, 0, 0, width, height)
-        var left = width
-        var top = height
-        var right = -1
-        var bottom = -1
-        for (y in 0 until height) {
-            val row = y * width
-            for (x in 0 until width) {
-                val color = pixels[row + x]
-                val red = color ushr 16 and 0xFF
-                val green = color ushr 8 and 0xFF
-                val blue = color and 0xFF
-                if (red < 245 || green < 245 || blue < 245) {
-                    left = min(left, x)
-                    top = min(top, y)
-                    right = maxOf(right, x)
-                    bottom = maxOf(bottom, y)
-                }
-            }
-        }
-        if (right < left || bottom < top) return bitmap
-        val padding = (10f * scale).toInt().coerceAtLeast(8)
-        val cropLeft = (left - padding).coerceAtLeast(0)
-        val cropTop = (top - padding).coerceAtLeast(0)
-        val cropRight = (right + padding + 1).coerceAtMost(width)
-        val cropBottom = (bottom + padding + 1).coerceAtMost(height)
-        if (cropLeft == 0 && cropTop == 0 && cropRight == width && cropBottom == height) return bitmap
-        val cropWidth = cropRight - cropLeft
-        val cropHeight = cropBottom - cropTop
-        // Copy pixels explicitly instead of relying on Bitmap.createBitmap's
-        // source-backed crop.  Some Android/Robolectric combinations preserve
-        // the crop dimensions but lose the source alpha/color buffer.
-        val cropped = Bitmap.createBitmap(cropWidth, cropHeight, Bitmap.Config.ARGB_8888)
-        cropped.setPixels(pixels, cropLeft + cropTop * width, width,
-            0, 0, cropWidth, cropHeight)
-        return cropped
     }
 }

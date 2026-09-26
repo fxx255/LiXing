@@ -1,50 +1,37 @@
 package com.example.lixing.ui.screen.assistant
 
 import android.Manifest
-import android.content.ComponentName
 import android.content.Context
-import android.content.Intent
 import android.content.pm.PackageManager
-import com.example.lixing.ui.photo.PhotoEdits
-import com.example.lixing.ui.photo.decodeUprightPhoto
-import com.example.lixing.ui.photo.rotatePhotoAndSave
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
-import androidx.compose.material.icons.filled.RotateRight
-import androidx.compose.material.icons.filled.RotateLeft
-import androidx.compose.ui.semantics.contentDescription
-import androidx.compose.ui.semantics.semantics
+import android.graphics.Canvas
+import android.graphics.ColorFilter
+import android.graphics.Paint
+import android.graphics.PixelFormat
+import android.graphics.drawable.Drawable
 import android.os.Bundle
 import android.os.SystemClock
 import android.speech.RecognitionListener
-import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
-import android.provider.Settings
 import android.text.Spannable
 import android.text.SpannableStringBuilder
 import android.text.Spanned
+import android.text.TextPaint
 import android.text.method.LinkMovementMethod
 import android.text.style.ClickableSpan
+import android.util.Log
 import android.view.MotionEvent
 import android.view.View
 import android.widget.TextView
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.awaitEachGesture
-import androidx.compose.foundation.gestures.awaitFirstDown
-import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.horizontalScroll
-import androidx.compose.foundation.pager.HorizontalPager
-import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -66,9 +53,9 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Send
@@ -76,26 +63,21 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AddComment
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Keyboard
+import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material.icons.filled.PhotoLibrary
-import androidx.compose.material.icons.filled.History
+import androidx.compose.material.icons.filled.RotateRight
 import androidx.compose.material.icons.filled.StopCircle
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
-import androidx.compose.material3.Checkbox
-import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalIconButton
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.HorizontalDivider
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
@@ -110,96 +92,61 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.mutableFloatStateOf
-import androidx.compose.runtime.mutableStateListOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.mutableIntStateOf
-import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
-import androidx.compose.ui.geometry.CornerRadius
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
-import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.viewinterop.AndroidView
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.zIndex
 import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.isActive
-import kotlinx.coroutines.launch
-import kotlin.math.abs
-import kotlin.math.sin
-import java.io.File
-import androidx.core.content.FileProvider
-import androidx.compose.ui.window.Dialog
-import androidx.compose.ui.window.DialogProperties
 import com.example.lixing.R
-import com.example.lixing.data.local.entity.AssistantConversationEntity
+import com.example.lixing.data.assistant.isPlaceholderReply
 import com.example.lixing.data.assistant.normalizeAssistantMarkdown
 import com.example.lixing.data.assistant.sanitizeAssistantLatex
 import com.example.lixing.data.assistant.wrapLongFormulas
-import com.example.lixing.data.assistant.isPlaceholderReply
+import com.example.lixing.data.local.entity.AssistantConversationEntity
 import com.example.lixing.domain.assistant.AssistantContextKind
-import com.example.lixing.ui.screen.assistant.PlanChangeScope.LONG_TERM
-import com.example.lixing.ui.screen.assistant.PlanChangeScope.TODAY
-import com.example.lixing.ui.theme.LiXingRadius
+import com.example.lixing.ui.photo.PhotoEdits
 import com.example.lixing.ui.screen.today.dialog.PhotoCropDialog
+import com.example.lixing.ui.theme.LiXingRadius
 import com.example.lixing.ui.util.ScreenOrientationGuard
 import io.noties.markwon.Markwon
-import ru.noties.jlatexmath.JLatexMathDrawable
 import io.noties.markwon.ext.latex.JLatexMathPlugin
 import io.noties.markwon.ext.tables.TablePlugin
 import io.noties.markwon.ext.tables.TableTheme
 import io.noties.markwon.inlineparser.MarkwonInlineParserPlugin
-import android.graphics.Canvas
-import android.graphics.ColorFilter
-import android.graphics.Paint
-import android.graphics.PixelFormat
-import android.graphics.drawable.Drawable
-import android.text.TextPaint
-import android.util.Log
+import java.io.File
 import java.time.Instant
 import java.time.format.DateTimeFormatter
-import java.util.Locale
 import java.util.concurrent.Executors
+import kotlin.math.sin
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import ru.noties.jlatexmath.JLatexMathDrawable
 
 private data class PhotoViewerState(val paths: List<String>, val initialIndex: Int)
-
-private enum class VoiceInputStatus { IDLE, LISTENING, PROCESSING }
-
-private class VoiceInputSession {
-    var inputBeforeListening: String = ""
-    var latestTranscript: String = ""
-    var hasRecognizedSpeech: Boolean = false
-    var cancelRequested: Boolean = false
-    var suppressNextError: Boolean = false
-    var segmentStopRequested: Boolean = false
-    var recoverableErrorRetries: Int = 0
-    // Xiaomi's recognition service can deliver onReadyForSpeech asynchronously.
-    // Do not call stopListening until that callback has established the session.
-    var recognizerReady: Boolean = false
-    var releaseRequested: Boolean = false
-}
 
 /** AI 学习助手页：对话 + 可选上下文 + 计划修改预览确认。 */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -935,95 +882,6 @@ fun AssistantScreen(
                     }
                 }
             }
-        }
-    }
-}
-
-private fun Bundle.bestSpeechResult(): String? =
-    getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-        ?.firstOrNull()
-        ?.trim()
-        ?.takeIf { it.isNotEmpty() }
-
-private fun speechRecognitionIntent(context: Context): Intent =
-    Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-        putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-        putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault().toLanguageTag())
-        putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
-        putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
-        putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, context.packageName)
-        putExtra(RecognizerIntent.EXTRA_PROMPT, "请说话")
-    }
-
-@Suppress("DEPRECATION")
-private fun configuredSpeechRecognitionService(context: Context): ComponentName? =
-    Settings.Secure.getString(context.contentResolver, "voice_recognition_service")
-        ?.let(ComponentName::unflattenFromString)
-
-internal fun mergeRecognizedSpeech(existingInput: String, transcript: String): String {
-    val recognized = transcript.trim()
-    if (recognized.isEmpty()) return existingInput
-    if (existingInput.isBlank()) return recognized
-    val separator = if (existingInput.last().isWhitespace()) "" else " "
-    return existingInput + separator + recognized
-}
-
-internal fun speechRecognitionErrorMessage(error: Int): String = when (error) {
-    SpeechRecognizer.ERROR_AUDIO -> "录音失败，请检查麦克风后重试"
-    SpeechRecognizer.ERROR_CLIENT -> "语音识别客户端初始化失败（错误码 $error）"
-    SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "没有麦克风权限，无法使用语音输入"
-    SpeechRecognizer.ERROR_NETWORK, SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> "语音识别网络异常，请稍后重试"
-    SpeechRecognizer.ERROR_NO_MATCH -> "没有听清，请再说一次"
-    SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> "语音识别正忙，请稍后重试"
-    SpeechRecognizer.ERROR_SERVER, SpeechRecognizer.ERROR_SERVER_DISCONNECTED -> "语音识别服务暂时不可用"
-    SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "没有检测到语音"
-    SpeechRecognizer.ERROR_TOO_MANY_REQUESTS -> "语音识别请求过于频繁，请稍后重试"
-    SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED -> "系统语音服务不支持当前语言"
-    SpeechRecognizer.ERROR_LANGUAGE_UNAVAILABLE -> "当前语言的语音识别暂时不可用"
-    else -> "语音识别失败（错误码 $error），请重试"
-}
-
-internal fun isRecoverableVoiceRecognitionError(error: Int): Boolean = when (error) {
-    SpeechRecognizer.ERROR_NETWORK,
-    SpeechRecognizer.ERROR_NETWORK_TIMEOUT,
-    SpeechRecognizer.ERROR_NO_MATCH,
-    SpeechRecognizer.ERROR_RECOGNIZER_BUSY,
-    SpeechRecognizer.ERROR_SERVER,
-    SpeechRecognizer.ERROR_SERVER_DISCONNECTED,
-    SpeechRecognizer.ERROR_SPEECH_TIMEOUT,
-    -> true
-    else -> false
-}
-
-// Xiaomi's bundled recognizer can terminate a single stream after roughly five seconds.
-private const val VOICE_RECOGNITION_SEGMENT_MS = 4_000L
-
-/** 按住说话时输入条内的声纹波形：右侧滚动显示最新振幅，静默时保持呼吸动画。 */
-@Composable
-private fun VoiceWaveform(levels: List<Float>, active: Boolean, modifier: Modifier = Modifier) {
-    val barColor = MaterialTheme.colorScheme.primary
-    val idleColor = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.35f)
-    Canvas(modifier = modifier) {
-        val barCount = 29
-        val gap = 2.dp.toPx()
-        val barWidth = (size.width - gap * (barCount - 1)) / barCount
-        val midY = size.height / 2f
-        val recent = levels.takeLast(barCount)
-        val startIndex = barCount - recent.size
-        val minBar = 5.dp.toPx()
-        for (i in 0 until barCount) {
-            val level = if (i < startIndex) 0f else recent[i - startIndex].coerceIn(0f, 1f)
-            val barHeight = if (level > 0f && active) {
-                minBar + (size.height - minBar * 2f) * level
-            } else {
-                minBar
-            }
-            drawRoundRect(
-                color = if (level > 0f && active) barColor else idleColor,
-                topLeft = Offset(i * (barWidth + gap), midY - barHeight / 2f),
-                size = Size(barWidth, barHeight),
-                cornerRadius = CornerRadius(barWidth / 2f),
-            )
         }
     }
 }
@@ -2379,626 +2237,6 @@ private fun formulaWidthMeasurer(view: TextView): (String) -> Int {
     return { latex ->
         runCatching { JLatexMathDrawable.builder(latex).textSize(textSizePx).build().intrinsicWidth }
             .getOrDefault((latex.length * textSizePx * 0.62f).toInt())
-    }
-}
-
-@Composable
-private fun AssistantThumbnail(
-    path: String,
-    modifier: Modifier,
-    onClick: () -> Unit,
-) {
-    val photoRevision by PhotoEdits.revision.collectAsStateWithLifecycle()
-    val bitmap = remember(path, photoRevision) { decodeSampledBitmap(path, 320) }
-    if (bitmap != null) {
-        Image(
-            bitmap = bitmap.asImageBitmap(),
-            contentDescription = "查看照片",
-            modifier = modifier.clip(LiXingRadius.Card).clickable(onClick = onClick),
-            contentScale = ContentScale.Crop,
-        )
-    } else {
-        Box(
-            modifier = modifier
-                .clip(LiXingRadius.Card)
-                .background(MaterialTheme.colorScheme.surfaceVariant),
-            contentAlignment = Alignment.Center,
-        ) {
-            Text("图片不可用", style = MaterialTheme.typography.labelSmall)
-        }
-    }
-}
-
-@Composable
-internal fun PhotoViewerDialog(paths: List<String>, initialIndex: Int, onDismiss: () -> Unit) {
-    val scope = rememberCoroutineScope()
-    var rotating by remember { mutableStateOf(false) }
-    var rotateError by remember { mutableStateOf<String?>(null) }
-    val pagerState = rememberPagerState(
-        initialPage = initialIndex.coerceIn(0, (paths.size - 1).coerceAtLeast(0)),
-        pageCount = { paths.size },
-    )
-    Dialog(
-        onDismissRequest = { if (!rotating) onDismiss() },
-        properties = DialogProperties(usePlatformDefaultWidth = false),
-    ) {
-        Box(
-            modifier = Modifier.fillMaxSize().background(Color.Black),
-            contentAlignment = Alignment.Center,
-        ) {
-            HorizontalPager(state = pagerState, modifier = Modifier.fillMaxSize(), userScrollEnabled = !rotating) { page ->
-                ZoomablePhoto(
-                    path = paths[page],
-                    pageLabel = "照片大图 ${page + 1}",
-                    onTapToClose = { if (!rotating) onDismiss() },
-                    onSwipeDownToClose = { if (!rotating) onDismiss() },
-                )
-            }
-            TextButton(
-                enabled = !rotating && paths.isNotEmpty(),
-                modifier = Modifier.align(Alignment.TopStart).padding(12.dp),
-                onClick = {
-                    val path = paths.getOrNull(pagerState.currentPage) ?: return@TextButton
-                    rotating = true
-                    rotateError = null
-                    scope.launch {
-                        val result = withContext(Dispatchers.IO) { runCatching { rotatePhotoAndSave(path) } }
-                        rotating = false
-                        result.onFailure { rotateError = it.message ?: "旋转失败，请重试" }
-                    }
-                },
-            ) {
-                Icon(Icons.Filled.RotateLeft, contentDescription = null, tint = Color.White)
-                Text(if (rotating) "旋转中…" else "逆时针 90°", color = Color.White)
-            }
-            rotateError?.let { Text(it, color = Color.White, modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 60.dp)) }
-            if (paths.size > 1) {
-                Text(
-                    text = "${pagerState.currentPage + 1}/${paths.size}",
-                    color = Color.White,
-                    modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 24.dp),
-                )
-            }
-            IconButton(
-                onClick = onDismiss,
-                enabled = !rotating,
-                modifier = Modifier.align(Alignment.TopEnd).padding(12.dp),
-            ) {
-                Icon(Icons.Filled.Close, contentDescription = "关闭", tint = Color.White)
-            }
-        }
-    }
-}
-
-private const val VIEWER_MAX_SCALE = 5f
-private const val VIEWER_DOUBLE_TAP_SCALE = 2.5f
-/** 未放大时向下拖动超过这个距离就关闭查看器。 */
-private const val VIEWER_DRAG_DISMISS_PX = 140f
-
-/**
- * 可缩放的照片页：双指捏合缩放、双击放大/还原、放大后单指拖动平移，
- * 边界与缩放下限都做夹取，越界自动回弹（缩小到 1 时位移归零）。
- * 未放大时：轻点关闭、向下拖动关闭；这两种手势可以并存，不会和 Pager 横滑打架
- * （横滑由 HorizontalPager 自己消费，纵向位移才会被这里接管）。
- */
-@Composable
-private fun ZoomablePhoto(
-    path: String,
-    pageLabel: String,
-    onTapToClose: () -> Unit,
-    onSwipeDownToClose: () -> Unit,
-) {
-    val scope = rememberCoroutineScope()
-    val scale = remember { Animatable(1f) }
-    val offsetX = remember { Animatable(0f) }
-    val offsetY = remember { Animatable(0f) }
-    var boxSize by remember { mutableStateOf(IntSize.Zero) }
-    // 未放大时的下拉位移（用于「下拉关闭」）。放在 pointerInput 外面：
-    // detectTransformGestures 是挂起函数，手势回调里读写局部变量会随重组丢失。
-    var dragDown by remember { mutableFloatStateOf(0f) }
-    val photoRevision by PhotoEdits.revision.collectAsStateWithLifecycle()
-    val bitmap = remember(path, photoRevision) { decodeSampledBitmap(path, 2400) }
-
-    // 换页时复位，避免上一张的缩放/位移带到下一张
-    LaunchedEffect(path, photoRevision) {
-        scale.snapTo(1f)
-        offsetX.snapTo(0f)
-        offsetY.snapTo(0f)
-        dragDown = 0f
-    }
-
-    fun maxOffset(currentScale: Float, dimension: Int): Float =
-        (dimension * (currentScale - 1f) / 2f).coerceAtLeast(0f)
-
-    fun clampX(value: Float, atScale: Float): Float {
-        val bound = maxOffset(atScale, boxSize.width)
-        return value.coerceIn(-bound, bound)
-    }
-
-    fun clampY(value: Float, atScale: Float): Float {
-        val bound = maxOffset(atScale, boxSize.height)
-        return value.coerceIn(-bound, bound)
-    }
-
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .onSizeChanged { boxSize = it }
-            // v1.0.23 的回归：当时把手指路径拆成「未放大只挂 detectVerticalDragGestures、
-            // 放大后才挂 detectTransformGestures」，人为造出「缩放死区」——
-            // 未放大时没有任何人处理 zoom，双指捏合因此完全失效。
-            //
-            // 但不能简单地改回 detectTransformGestures：它一旦到达 touch slop 就会
-            // **消费掉所有位移**，HorizontalPager 再也收不到横滑，左右翻页又废了。
-            // 官方 API 也没有「按条件不消费」的开关。
-            //
-            // 所以这里自己写检测循环，按手势意图决定消费谁：
-            // - 双指（捏合）：消费 → 缩放
-            // - 单指且已放大：消费 → 平移
-            // - 单指未放大、以横向为主：**不消费** → 事件下发给 HorizontalPager 翻页
-            // - 单指未放大、以纵向为主：消费 → 下拉关闭
-            .pointerInput(Unit) {
-                awaitEachGesture {
-                    awaitFirstDown(requireUnconsumed = false)
-                    var lastCentroid = Offset.Zero
-                    var totalPanX = 0f
-                    var totalPanY = 0f
-                    while (true) {
-                        val event = awaitPointerEvent()
-                        val pressed = event.changes.filter { it.pressed }
-                        if (pressed.isEmpty()) break
-
-                        val centroid = pressed.fold(Offset.Zero) { acc, c -> acc + c.position } /
-                            pressed.size.toFloat()
-                        val pan = if (lastCentroid == Offset.Zero) Offset.Zero else centroid - lastCentroid
-                        lastCentroid = centroid
-                        val zoom = event.calculateZoom()
-                        val zooming = abs(zoom - 1f) > 0.001f
-                        val multiTouch = pressed.size >= 2
-
-                        totalPanX += pan.x
-                        totalPanY += pan.y
-
-                        // 单指、未放大、且横向占优 → 让给 Pager，什么都不做也不消费
-                        if (!multiTouch && scale.value <= 1.0005f && !zooming &&
-                            abs(totalPanX) > abs(totalPanY)
-                        ) {
-                            continue
-                        }
-
-                        val next = (scale.value * zoom).coerceIn(1f, VIEWER_MAX_SCALE)
-                        if (scale.value <= 1.0005f && !multiTouch && !zooming) {
-                            // 未放大的单指纵向拖动：下拉关闭
-                            dragDown = (dragDown + pan.y).coerceAtLeast(0f)
-                            if (dragDown > VIEWER_DRAG_DISMISS_PX) {
-                                dragDown = 0f
-                                onSwipeDownToClose()
-                            } else {
-                                // 不能在 awaitEachGesture 这个受限挂起作用域里直接调
-                                // Animatable.snapTo/animateTo（它俩是挂起成员函数），
-                                // 必须丢到 scope 里执行；snapTo 会打断上一次动画，天然幂等。
-                                val target = dragDown
-                                scope.launch { offsetY.snapTo(target) }
-                            }
-                        } else {
-                            // 捏合或已放大：缩放 + 平移，位移夹取在边界内
-                            dragDown = 0f
-                            val panX = pan.x
-                            val panY = pan.y
-                            scope.launch {
-                                scale.snapTo(next)
-                                offsetX.snapTo(clampX(offsetX.value + panX, next))
-                                offsetY.snapTo(clampY(offsetY.value + panY, next))
-                            }
-                        }
-                        // 到这里说明这一支手势归我们管，消费掉避免上层/父级再处理
-                        event.changes.forEach { it.consume() }
-                    }
-                    // 松手：下拉没到阈值就回弹
-                    if (dragDown > 0f) {
-                        dragDown = 0f
-                        scope.launch { offsetY.animateTo(0f) }
-                    }
-                }
-            }
-            .pointerInput(Unit) {
-                detectTapGestures(
-                    onTap = { if (scale.value <= 1.0005f) onTapToClose() },
-                    onDoubleTap = { tap ->
-                        val current = scale.value
-                        val target = if (current > 1.0005f) 1f else VIEWER_DOUBLE_TAP_SCALE
-                        val center = Offset(boxSize.width / 2f, boxSize.height / 2f)
-                        // 让双击点保持不动：offset2 = offset1 + (T - center - offset1) * (1 - s2/s1)
-                        val rel = tap - center - Offset(offsetX.value, offsetY.value)
-                        val ratio = target / current
-                        val nextX = if (target == 1f) 0f else clampX(offsetX.value + rel.x * (1f - ratio), target)
-                        val nextY = if (target == 1f) 0f else clampY(offsetY.value + rel.y * (1f - ratio), target)
-                        scope.launch {
-                            scale.animateTo(target)
-                            offsetX.animateTo(nextX)
-                            offsetY.animateTo(nextY)
-                        }
-                    },
-                )
-            },
-        contentAlignment = Alignment.Center,
-    ) {
-        if (bitmap != null) {
-            Image(
-                bitmap = bitmap.asImageBitmap(),
-                contentDescription = pageLabel,
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(16.dp)
-                    .graphicsLayer(
-                        scaleX = scale.value,
-                        scaleY = scale.value,
-                        translationX = offsetX.value,
-                        translationY = offsetY.value,
-                    ),
-                contentScale = ContentScale.Fit,
-            )
-        } else {
-            Text("图片文件不可用", color = Color.White)
-        }
-    }
-}
-
-private fun decodeSampledBitmap(path: String, maxDimension: Int): android.graphics.Bitmap? =
-    decodeUprightPhoto(path, maxDimension * 2)
-
-/**
- * 挂在产生待确认项的那条 assistant 气泡下面的入口按钮。
- *
- * 计划与英语积累各一个、互不合并；对应类别没有待确认内容时该按钮整体不渲染，
- * 两个计数都是 0 时本组件不输出任何内容。
- */
-@Composable
-private fun AssistantMessageActionBar(
-    planCount: Int,
-    englishCount: Int,
-    onOpenPlan: () -> Unit,
-    onOpenEnglish: () -> Unit,
-    /**
-     * 已确认应用过的条数。
-     *
-     * 有它才能把入口留成**灰态**而不是让按钮凭空消失：用户点完确认、锁屏或切走
-     * 再回来时，需要看得出「那次确认确实生效了」。以前这里什么都没有，
-     * 用户只能看到按钮没了，无从判断。
-     */
-    planAppliedCount: Int = 0,
-) {
-    if (planCount == 0 && englishCount == 0 && planAppliedCount == 0) return
-    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        if (planCount > 0) {
-            FilledTonalButton(
-                onClick = onOpenPlan,
-                modifier = Modifier.fillMaxWidth(),
-                shape = LiXingRadius.Pill,
-            ) {
-                Text("📋 确认计划调整（$planCount 项）")
-            }
-        } else if (planAppliedCount > 0) {
-            // 不可点的灰态留痕，不是错误提示，所以不用 errorContainer
-            OutlinedButton(
-                onClick = {},
-                enabled = false,
-                modifier = Modifier.fillMaxWidth(),
-                shape = LiXingRadius.Pill,
-            ) {
-                Text("✅ 已应用 $planAppliedCount 项修改")
-            }
-        }
-        if (englishCount > 0) {
-            FilledTonalButton(
-                onClick = onOpenEnglish,
-                modifier = Modifier.fillMaxWidth(),
-                shape = LiXingRadius.Pill,
-            ) {
-                Text("📖 确认英语积累（$englishCount 条）")
-            }
-        }
-    }
-}
-
-@Composable
-private fun PlanChangeReviewPage(
-    items: List<PendingPlanAction>,
-    reviewDate: java.time.LocalDate?,
-    applying: Boolean,
-    onToggle: (Int) -> Unit,
-    onApply: () -> Unit,
-    onRejectAll: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    val indexedItems = items.withIndex().toList()
-    val todayItems = indexedItems.filter { it.value.scope == TODAY }
-    val longTermItems = indexedItems.filter { it.value.scope == LONG_TERM }
-    val selectableCount = items.count { it.problem == null }
-    val selectedCount = items.count { it.selected && it.problem == null }
-    val dateText = reviewDate?.format(DateTimeFormatter.ofPattern("M月d日")) ?: "当天"
-
-    Column(modifier) {
-        LazyColumn(
-            modifier = Modifier.weight(1f),
-            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 16.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp),
-        ) {
-            item(key = "review-summary") {
-                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Text(
-                        "逐项核对后再决定",
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.SemiBold,
-                    )
-                    Text(
-                        "未勾选的修改不会执行。存在校验问题的项目已自动禁用。",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-            }
-            if (todayItems.isNotEmpty()) {
-                item(key = "today-heading") {
-                    PlanChangeSectionHeading(
-                        title = "仅今日生效",
-                        description = "只调整 $dateText 的任务，不改变任务模板和之后的安排。",
-                    )
-                }
-                itemsIndexed(todayItems, key = { _, entry -> "today-${entry.index}" }) { _, entry ->
-                    PlanChangeReviewItem(
-                        item = entry.value,
-                        applying = applying,
-                        onToggle = { onToggle(entry.index) },
-                    )
-                }
-            }
-            if (longTermItems.isNotEmpty()) {
-                item(key = "long-term-heading") {
-                    PlanChangeSectionHeading(
-                        title = "长期计划",
-                        description = "会修改时段或任务模板，并影响之后生成的任务。",
-                    )
-                }
-                itemsIndexed(longTermItems, key = { _, entry -> "long-term-${entry.index}" }) { _, entry ->
-                    PlanChangeReviewItem(
-                        item = entry.value,
-                        applying = applying,
-                        onToggle = { onToggle(entry.index) },
-                    )
-                }
-            }
-            item(key = "review-safety-note") {
-                Text(
-                    "接受前会自动创建 before_ai_apply 恢复点；历史任务、积分和成就不会被修改。",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-        }
-
-        Surface(tonalElevation = 3.dp) {
-            Column(
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp),
-                verticalArrangement = Arrangement.spacedBy(6.dp),
-            ) {
-                Text(
-                    "已选择 $selectedCount/$selectableCount 项可应用修改",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    OutlinedButton(
-                        onClick = onRejectAll,
-                        enabled = !applying,
-                        modifier = Modifier.weight(1f),
-                    ) { Text("全部拒绝") }
-                    Button(
-                        onClick = onApply,
-                        enabled = selectedCount > 0 && !applying,
-                        modifier = Modifier.weight(1f),
-                    ) {
-                        Text(if (applying) "正在应用" else "接受所选")
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun PlanChangeSectionHeading(title: String, description: String) {
-    Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
-        Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-        Text(
-            description,
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-    }
-}
-
-@Composable
-private fun PlanChangeReviewItem(
-    item: PendingPlanAction,
-    applying: Boolean,
-    onToggle: () -> Unit,
-) {
-    val enabled = item.problem == null && !applying
-    Surface(
-        color = MaterialTheme.colorScheme.surfaceVariant,
-        shape = LiXingRadius.Card,
-    ) {
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(start = 4.dp, top = 12.dp, end = 14.dp, bottom = 14.dp),
-            verticalAlignment = Alignment.Top,
-        ) {
-            Checkbox(
-                checked = item.selected && item.problem == null,
-                onCheckedChange = { onToggle() },
-                enabled = enabled,
-            )
-            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text(item.title, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
-                Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                    Text(
-                        "修改前",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                    Text(item.before, style = MaterialTheme.typography.bodyMedium)
-                }
-                HorizontalDivider()
-                Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                    Text(
-                        "修改后",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.primary,
-                    )
-                    Text(item.after, style = MaterialTheme.typography.bodyMedium)
-                }
-                if (item.action.reason.isNotBlank()) {
-                    Text(
-                        "调整原因：${item.action.reason}",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-                item.problem?.let { problem ->
-                    Text(
-                        "无法应用：$problem",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.error,
-                    )
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun EnglishChangeReviewPage(
-    items: List<PendingEnglishAction>,
-    applying: Boolean,
-    onToggle: (Int) -> Unit,
-    onApply: () -> Unit,
-    onRejectAll: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    val selectableCount = items.count { it.problem == null }
-    val selectedCount = items.count { it.selected && it.problem == null }
-
-    Column(modifier) {
-        LazyColumn(
-            modifier = Modifier.weight(1f),
-            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 16.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp),
-        ) {
-            item(key = "english-review-summary") {
-                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Text(
-                        "逐项核对后再写入英语积累",
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.SemiBold,
-                    )
-                    Text(
-                        "未勾选的不会执行。删除只有在这里勾选并接受后才会真正生效。",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-            }
-            itemsIndexed(items, key = { index, _ -> "english-$index" }) { index, item ->
-                EnglishChangeReviewItem(
-                    item = item,
-                    applying = applying,
-                    onToggle = { onToggle(index) },
-                )
-            }
-        }
-
-        Surface(tonalElevation = 3.dp) {
-            Column(
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp),
-                verticalArrangement = Arrangement.spacedBy(6.dp),
-            ) {
-                Text(
-                    "已选择 $selectedCount/$selectableCount 项",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    OutlinedButton(
-                        onClick = onRejectAll,
-                        enabled = !applying,
-                        modifier = Modifier.weight(1f),
-                    ) { Text("全部拒绝") }
-                    Button(
-                        onClick = onApply,
-                        enabled = selectedCount > 0 && !applying,
-                        modifier = Modifier.weight(1f),
-                    ) { Text(if (applying) "正在写入" else "接受所选") }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun EnglishChangeReviewItem(
-    item: PendingEnglishAction,
-    applying: Boolean,
-    onToggle: () -> Unit,
-) {
-    val enabled = item.problem == null && !applying
-    Surface(
-        color = MaterialTheme.colorScheme.surfaceVariant,
-        shape = LiXingRadius.Card,
-    ) {
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(start = 4.dp, top = 12.dp, end = 14.dp, bottom = 14.dp),
-            verticalAlignment = Alignment.Top,
-        ) {
-            Checkbox(
-                checked = item.selected && item.problem == null,
-                onCheckedChange = { onToggle() },
-                enabled = enabled,
-            )
-            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text(item.title, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
-                Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                    Text(
-                        "变更前",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                    Text(item.before, style = MaterialTheme.typography.bodyMedium)
-                }
-                HorizontalDivider()
-                Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                    Text(
-                        "变更后",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.primary,
-                    )
-                    Text(item.after, style = MaterialTheme.typography.bodyMedium)
-                }
-                if (item.action.reason.isNotBlank()) {
-                    Text(
-                        "调整原因：${item.action.reason}",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-                item.problem?.let { problem ->
-                    Text(
-                        "无法应用：$problem",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.error,
-                    )
-                }
-            }
-        }
     }
 }
 
