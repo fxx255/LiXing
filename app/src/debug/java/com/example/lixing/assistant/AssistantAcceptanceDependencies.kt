@@ -8,6 +8,7 @@ import com.example.lixing.data.prefs.UserPreferencesRepository
 import com.example.lixing.data.repository.*
 import com.example.lixing.domain.assistant.PlanChangeApplier
 import com.example.lixing.ui.screen.assistant.AssistantViewModel
+import com.example.lixing.ui.screen.assistant.AssistantReviewPreviewBuilder
 import dagger.hilt.EntryPoint
 import dagger.hilt.InstallIn
 import dagger.hilt.components.SingletonComponent
@@ -36,8 +37,26 @@ interface AssistantAcceptanceDependencies {
     fun reviews(): AssistantReviewTransactionRepository
 }
 
-fun AssistantAcceptanceDependencies.newAcceptanceViewModel() = AssistantViewModel(
-    prefs(), client(), contextBuilder(), applier(), backups(), plans(), tasks(), chats(),
-    english(), credentials(), guard(), plots(), diagrams(), manager(), requests(), diagnostics(),
-    drafts(), reviews(),
-)
+fun AssistantAcceptanceDependencies.newAcceptanceViewModel(): AssistantViewModel {
+    val preferences = prefs()
+    val englishEntries = english()
+    return AssistantViewModel(
+        prefsRepository = preferences,
+        modelClient = client(),
+        contextBuilder = contextBuilder(),
+        applier = applier(),
+        versionedBackupRepository = backups(),
+        reviewPreviewBuilder = AssistantReviewPreviewBuilder(preferences, plans(), tasks(), englishEntries),
+        chatRepository = chats(),
+        englishEntryRepository = englishEntries,
+        aiCredentialStore = credentials(),
+        generationGuard = guard(),
+        plotImageStore = plots(),
+        diagramImageStore = diagrams(),
+        generationManager = manager(),
+        requestRepository = requests(),
+        diagnostics = diagnostics(),
+        draftStore = drafts(),
+        reviewTransactions = reviews(),
+    )
+}

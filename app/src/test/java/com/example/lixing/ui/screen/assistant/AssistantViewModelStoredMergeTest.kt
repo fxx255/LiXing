@@ -21,6 +21,7 @@ import com.example.lixing.data.prefs.UserPreferences
 import com.example.lixing.data.prefs.UserPreferencesRepository
 import com.example.lixing.data.repository.AssistantChatRepository
 import com.example.lixing.data.repository.AssistantRequestRepository
+import com.example.lixing.data.repository.EnglishEntryRepository
 import com.example.lixing.data.repository.PlanRepository
 import com.example.lixing.data.repository.PlanReviewTransactionResult
 import com.example.lixing.domain.assistant.AssistantFailureKind
@@ -304,16 +305,17 @@ class AssistantViewModelStoredMergeTest {
         coEvery { reviewBoundary.applyEnglish(any(), any(), any()) } coAnswers {
             requireNotNull(reviewDelegate).applyEnglish(firstArg(), secondArg(), thirdArg())
         }
+        val englishEntryRepository = mockk<EnglishEntryRepository>(relaxed = true)
         viewModel = AssistantViewModel(
             prefsRepository = prefsRepository,
             modelClient = mockk(relaxed = true),
             contextBuilder = contextBuilder,
             applier = mockk(relaxed = true),
             versionedBackupRepository = mockk(relaxed = true),
-            planRepository = planRepository,
-            taskRepository = mockk(relaxed = true),
+            reviewPreviewBuilder = AssistantReviewPreviewBuilder(
+                prefsRepository, planRepository, mockk(relaxed = true), englishEntryRepository),
             chatRepository = chatRepository,
-            englishEntryRepository = mockk(relaxed = true),
+            englishEntryRepository = englishEntryRepository,
             aiCredentialStore = aiCredentialStore,
             generationGuard = mockk(relaxed = true),
             plotImageStore = mockk(relaxed = true),

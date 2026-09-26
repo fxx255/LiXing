@@ -11,6 +11,7 @@ import com.example.lixing.data.prefs.UserPreferences
 import com.example.lixing.data.prefs.UserPreferencesRepository
 import com.example.lixing.data.repository.AssistantChatRepository
 import com.example.lixing.data.repository.AssistantRequestRepository
+import com.example.lixing.data.repository.EnglishEntryRepository
 import com.example.lixing.domain.assistant.AssistantContextKind
 import com.example.lixing.domain.assistant.AssistantRequestStatus
 import io.mockk.*
@@ -116,11 +117,13 @@ class AssistantViewModelSubmissionTest {
             submissionGate?.await()
             record
         }
+        val englishEntryRepository = mockk<EnglishEntryRepository>(relaxed = true)
         vm = AssistantViewModel(
             prefsRepository = prefs, modelClient = mockk(relaxed = true), contextBuilder = mockk(relaxed = true),
             applier = mockk(relaxed = true), versionedBackupRepository = mockk(relaxed = true),
-            planRepository = mockk(relaxed = true), taskRepository = mockk(relaxed = true),
-            chatRepository = chats, englishEntryRepository = mockk(relaxed = true),
+            reviewPreviewBuilder = AssistantReviewPreviewBuilder(
+                prefs, mockk(relaxed = true), mockk(relaxed = true), englishEntryRepository),
+            chatRepository = chats, englishEntryRepository = englishEntryRepository,
             aiCredentialStore = mockk(relaxed = true), generationGuard = mockk(relaxed = true),
             plotImageStore = mockk(relaxed = true), diagramImageStore = mockk(relaxed = true),
             generationManager = manager, requestRepository = requests, diagnostics = AssistantDiagnostics(),
