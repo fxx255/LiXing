@@ -24,6 +24,9 @@ object DiagramLayout {
         if (spec.profile == DiagramLayoutProfile.TEXTBOOK_DUAL_BRANCH) {
             return textbookDualBranch(spec)
         }
+        if (spec.profile == DiagramLayoutProfile.IQ_DEMODULATOR && IqDemodulatorLayout.supports(spec)) {
+            return IqDemodulatorLayout.layout(spec)
+        }
         val grid = grid(spec)
         val sizes = spec.nodes.associate { it.id to sizeOf(it) }
         val widths = grid.values.map { it.col }.distinct().associateWith { col ->
@@ -427,7 +430,7 @@ object DiagramLayout {
     internal fun label(node: DiagramNode) = DiagramText.layout(node.label, DiagramTextRole.LABEL, 210f)
     internal fun subLabel(node: DiagramNode) = DiagramText.layout(node.subLabel.orEmpty(), DiagramTextRole.SUB_LABEL, 210f)
 
-    private fun sizeOf(node: DiagramNode): Size = when (node.renderShape()) {
+    internal fun sizeOf(node: DiagramNode): Size = when (node.renderShape()) {
         // Keep circular operators large enough to remain legible after the
         // diagram is fitted into a message bubble.  DiagramMetrics is the
         // single source of truth for the renderer and layout geometry.
@@ -443,7 +446,7 @@ object DiagramLayout {
         }
     }
 
-    private fun resolvePort(port: DiagramPort, self: NodeBox, other: NodeBox): DiagramPort {
+    internal fun resolvePort(port: DiagramPort, self: NodeBox, other: NodeBox): DiagramPort {
         if (port != DiagramPort.AUTO) return port
         val dx = other.centerX - self.centerX
         val dy = other.centerY - self.centerY
@@ -452,7 +455,7 @@ object DiagramLayout {
         } else if (dx >= 0) DiagramPort.RIGHT else DiagramPort.LEFT
     }
 
-    private fun anchor(box: NodeBox, port: DiagramPort) = when (port) {
+    internal fun anchor(box: NodeBox, port: DiagramPort) = when (port) {
         DiagramPort.LEFT -> DiagramPoint(box.x, box.centerY)
         DiagramPort.RIGHT -> DiagramPoint(box.x + box.width, box.centerY)
         DiagramPort.TOP -> DiagramPoint(box.centerX, box.y)

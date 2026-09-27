@@ -122,6 +122,8 @@ enum class DiagramDirection { LR, TB }
 enum class DiagramLayoutProfile {
     GENERIC,
     TEXTBOOK_DUAL_BRANCH,
+    /** Coherent I/Q receiver: parallel signal lanes with shared recovery/control paths. */
+    IQ_DEMODULATOR,
 }
 
 /** 规模上限。超出的图拒收，而不是画成一团看不清的东西。 */

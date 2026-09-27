@@ -1724,8 +1724,11 @@ class AssistantModelClient @Inject constructor(
     14. 需要画**框图**时（通信原理框图、系统组成图、信号流程图：调制/解调、编码/译码、滤波/抽样、放大器级联、分支与合流等），在顶层加一个 diagrams 数组，每项一张图，**客户端本地排版并绘制**；你只给拓扑和语义角色，**不要给绝对坐标、不要用 ASCII 画框**（禁止在代码块里用 ──→、│、┌──┐ 这类字符拼框图——手机窄屏上会换行散乱、完全读不出来）：
        示例（上下双支路）：`{"title":"相干解调","profile":"textbook_dual_branch","nodes":[{"id":"in","label":"A ${'$'}s(t)${'$'}","shape":"io"},{"id":"split","label":"A","shape":"junction"},{"id":"mi","label":"乘法器","shape":"mixer","glyph":"×"},{"id":"mq","label":"乘法器","shape":"mixer","glyph":"×"},{"id":"fi","label":"LPF","shape":"block"},{"id":"fq","label":"LPF","shape":"block"},{"id":"sum","label":"求和","shape":"sum"},{"id":"out","label":"G 输出","shape":"io"},{"id":"car","label":"载波提取","shape":"block"},{"id":"phase","label":"−90° 移相","shape":"block"}],"edges":[{"from":"in","to":"split","label":"A"},{"from":"split","to":"mi","fromPort":"top"},{"from":"split","to":"mq","fromPort":"bottom"},{"from":"mi","to":"fi","label":"B"},{"from":"fi","to":"sum","toPort":"top","label":"C"},{"from":"mq","to":"fq","label":"D"},{"from":"fq","to":"sum","toPort":"bottom","label":"F","polarity":"-"},{"from":"sum","to":"out","label":"G"},{"from":"car","to":"mi","toPort":"bottom","label":"cos 2πf_ct"},{"from":"car","to":"phase"},{"from":"phase","to":"mq","toPort":"bottom","label":"sin 2πf_ct"}]}`
      - shape：block（矩形功能框，默认）、mixer（圆形乘法器，glyph 写 ×）、sum（带十字和输入符号的求和圆）、io（无框文字）、junction（黑色测试点；label 可写 A～G，客户端会显示在点上方）
-      - 对教材式 SSB/IQ 双支路请设置 `profile:"textbook_dual_branch"`，并给节点加 role：`input`、`split`、`upper_mixer`、`lower_mixer`、`upper_filter`、`lower_filter`、`lower_hilbert`、`carrier`、`phase_shift`、`sum`、`output`；A～G 测试点可写 `role:"test_a"` 等。客户端会按固定列和上下轨道排版，保证方正清晰，此时不要自行猜 row/column。
-      - 其它结构（调制/解调链、编码译码、滤波与抽样、放大器级联、控制流程、分支/合流和反馈）使用默认的 `profile:"generic"`，通过节点和连线表达真实拓扑；需要时用 row/column 只提示上下支路和阶段顺序，不要把不相关的图硬套成 SSB 模板。
+      - 教材式 SSB 双支路使用 `profile:"textbook_dual_branch"`，并给节点加 role：`input`、`split`、`upper_mixer`、`lower_mixer`、`upper_filter`、`lower_filter`、`lower_hilbert`、`carrier`、`phase_shift`、`sum`、`output`；A～G 测试点可写 `role:"test_a"` 等。这一固定结构只适合 SSB，不要拿它画 QPSK/16QAM 判决链。
+      - QPSK、16QAM 等相干 I/Q 解调使用 `profile:"iq_demodulator"`。节点仍须完整给出真实拓扑和 edge，不能只写模板名。输入和分路点分别标 `role:"input"`、`role:"split"`；I、Q 两路节点依次用 `i_`、`q_` 前缀标角色，例如 `i_mixer`/`q_mixer`、`i_filter`/`q_filter`、`i_sampler`/`q_sampler`、`i_decision`/`q_decision`。共享的载波、移相、定时恢复可用 `local_oscillator`、`phase_shift`、`carrier_recovery`、`timing_recovery`；汇合后的符号映射/解映射、输出用 `symbol_demapper`、`output`。客户端根据两路信号连线确定处理阶段、对齐同级模块，并把控制支路和虚线反馈安排在下方。不要给这类图猜 row/column。
+      - 最小 I/Q 解调连线应有 `input → split → i_mixer → i_filter → i_sampler → i_decision → symbol_demapper → output` 和从 split 经对应 `q_` 节点到同一解映射器的 Q 路；本振接 I 乘法器，并经移相接 Q 乘法器。实际题目若省略某一级，就省略该节点并把前后级接通，不能留下悬空框或把两路过早合成一条线。
+      - 16QAM 的 I/Q 判决各有四个幅度电平；按题目需要标出多电平判决、符号解映射等模块。QPSK 的判决通常是两路二值判决。两种图共用 I/Q 布局，但节点与连线必须反映题目给出的实际接收机结构；定时恢复或载波恢复若画出，就用 edge 连到它控制的模块，反馈 edge 用 `dashed:true`。
+      - 其它结构（普通调制/解调链、编码译码、滤波与抽样、放大器级联、控制流程、分支/合流和反馈）使用默认的 `profile:"generic"`，通过节点和连线表达真实拓扑；需要时用 row/column 提示上下支路和阶段顺序。
        - A～G 测试点只在节点标签或对应 edge.label 中出现一次；如果使用 `test_a` 等节点角色，相关 edge 不要再次重复同一个字母。edge.label 优先只写载波、公式和信号名称，避免出现 `s(t) s(t)`、`G → G 输出` 这样的重复标注。
       - 通用框图才使用 row / column 提示：row 0 = 主链，1 = 主链下方一行；column 越大越靠右。不写则由连线自动推导。
      - 连线端口 fromPort / toPort：left / right / top / bottom / auto。**从下方接进某个框**写 "toPort":"bottom"（本地载波 → 乘法器下方，箭头向上）；不写时按相对位置自动选
@@ -1735,7 +1738,7 @@ class AssistantModelClient @Inject constructor(
      - 规模限制：一张图最多 24 个节点、40 条连线，一次最多 4 张图；标签 60 字以内、标题 40 字以内
      - **节点 id 必须唯一、连线的 from/to 必须指向已定义的 id**，否则整张图会被丢弃；写之前先自查一遍
      - 分支与合流都能表达：同一个 from 写多条 edge 即分支，多条 edge 指向同一个 to 即合流
-      - 教材式通信框图应使用 `textbook_dual_branch` profile、semantic role 和 junction 测试点排出上下两条平行支路，并给每条关键线标 A～G 或信号公式；不要把所有内容压成一条链。载波提取、移相、滤波器等共享支路要用真实 edge 连接，不能只写在正文。
+      - 教材式 SSB 框图可使用 `textbook_dual_branch` 和 junction 测试点排出上下两条平行支路；I/Q 数字解调框图使用 `iq_demodulator`。载波提取、移相、滤波器等共享支路要用真实 edge 连接，不能只写在正文。
      - diagrams 与 plots **共用** [[FIGURE:n]] 编号：**plots 的图在前，diagrams 的图在后**。例如本轮 1 张曲线图 + 1 张框图，正文里分别写 [[FIGURE:1]] 与 [[FIGURE:2]]
 
 输出格式（必须是可以直接 JSON.parse 的单个对象，不要 Markdown 代码块）：

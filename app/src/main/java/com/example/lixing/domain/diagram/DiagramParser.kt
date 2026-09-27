@@ -145,6 +145,8 @@ object DiagramParser {
             "textbook_dual_branch", "textbook-dual-branch", "dual_branch",
             "dual-branch", "ssb", "ssb_demodulator", "ssb-demodulator" ->
                 DiagramLayoutProfile.TEXTBOOK_DUAL_BRANCH
+            "iq_demodulator", "iq-demodulator", "iq_demod", "iq-demod",
+            "qpsk_demodulator", "16qam_demodulator" -> DiagramLayoutProfile.IQ_DEMODULATOR
             "generic", "auto" -> DiagramLayoutProfile.GENERIC
             else -> DiagramLayoutProfile.GENERIC
         }
