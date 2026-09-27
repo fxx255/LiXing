@@ -1187,7 +1187,11 @@ private fun looksLikeInlineMath(raw: String): Boolean {
     if ('\\' in value) return true
     if (value.any { it in "=<>^_{}()[]+-*/|!≤≥≠≈∞∈∉⊂⊆⊃⊇∪∩∑∏∫√±×÷→⇒∂" }) return true
     if (value.all { it.isDigit() || it == '.' }) return true
-    if (Regex("""^(?:[A-Za-z]|[A-Za-z]_[A-Za-z0-9]+)$""").matches(value)) return true
+    // Multi-letter symbols such as $QPSK$ or $abc$ are still explicitly
+    // delimited mathematics. Leaving them untouched exposes the dollar signs
+    // because the Markdown renderer only recognizes the normalized $$ form.
+    if (Regex("""^[A-Za-z][A-Za-z0-9]*$""").matches(value)) return true
+    if (Regex("""^[A-Za-z]_[A-Za-z0-9]+$""").matches(value)) return true
     return Regex("""^(?:sin|cos|tan|log|ln|lim|max|min)\s+[A-Za-z]$""").matches(value)
 }
 

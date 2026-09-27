@@ -102,6 +102,21 @@ class AssistantTableNormalizeTest {
         assertTrue("单元格里的数值公式也要渲染，实际：\n$out", out.contains("\$\$0\$\$"))
     }
 
+    @Test
+    fun `连续字母公式也要进入公式渲染管线`() {
+        val out = normalizeAssistantMarkdown("信号为 \$QPSK\$，分量为 \$abc\$ 和 \$x_1\$。")
+        assertTrue(out.contains("\$\$QPSK\$\$"))
+        assertTrue(out.contains("\$\$abc\$\$"))
+        assertTrue(out.contains("\$\$x_1\$\$"))
+    }
+
+    @Test
+    fun `代码中的美元符号保持原样`() {
+        val out = normalizeAssistantMarkdown("`\$abc\$`\n```\n\$QPSK\$\n```")
+        assertTrue(out.contains("`\$abc\$`"))
+        assertTrue(out.contains("\n\$QPSK\$\n"))
+    }
+
     /** 反例：货币写法不能被误判成公式（body 里有空格，仍被挡住）。 */
     @Test
     fun `货币写法不会被误判为公式`() {

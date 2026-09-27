@@ -14,6 +14,7 @@ import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -90,6 +91,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.zIndex
@@ -1223,6 +1225,7 @@ internal fun MessageBubble(
     onImageClick: (List<String>, Int) -> Unit,
 ) {
     val isUser = role == "user"
+    var showAnswerCopyDialog by remember { mutableStateOf(false) }
     // BoxWithConstraints 拿的是「父容器实际给到的最大宽度」，
     // 比 LocalConfiguration 的屏幕宽度更准（含列表内边距、分屏/多窗口）。
     // 注意：align 必须直接用在 BoxWithConstraints 作用域里——中间不能再包一层
@@ -1244,7 +1247,14 @@ internal fun MessageBubble(
                         bottomStart = if (isUser) 14.dp else 4.dp,
                         bottomEnd = if (isUser) 4.dp else 14.dp,
                     ),
-                ),
+                )
+                .then(if (!isUser && content.isNotBlank()) {
+                    Modifier.combinedClickable(
+                        onClick = {},
+                        onLongClickLabel = "选择并复制回答",
+                        onLongClick = { showAnswerCopyDialog = true },
+                    ).testTag("assistant-answer-bubble")
+                } else Modifier),
         ) {
             Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 // 用户拍的题图：小缩略图排在文字上方（拍照问答的既有形态不变）
@@ -1267,7 +1277,7 @@ internal fun MessageBubble(
                     // 它会安装自己的 pointerInput 并把事件标记为已消费，
                     // 结果内层的表格 horizontalScroll 拖不动、图片的 clickable 也失效
                     // （用户反馈「表格无法拖动、图片点不开」）。
-                    // 现在只把「可选择的长按复制」限制在文字上，图片与滚动容器放在外面。
+                    // 回答的长按复制由外层气泡打开独立选择视图，避免干扰图片和表格。
                     if (isUser) {
                         SelectionContainer {
                             Text(content, style = MaterialTheme.typography.bodyLarge,
@@ -1283,6 +1293,13 @@ internal fun MessageBubble(
                 }
             }
         }
+    }
+    if (showAnswerCopyDialog) {
+        AssistantAnswerCopyDialog(
+            content = content,
+            imageCount = imagePaths.size,
+            onDismiss = { showAnswerCopyDialog = false },
+        )
     }
 }
 
