@@ -154,9 +154,11 @@ object DiagramParser {
 
     private fun JsonObject.text(key: String): String? = (this[key] as? JsonPrimitive)?.contentOrNull
 
-    private fun JsonObject.boundedText(key: String, max: Int): String? = text(key)?.trim()?.also {
-        require(it.length <= max) { "$key 超过 $max 字符，请精简标签" }
-    }?.takeIf { it.isNotEmpty() }
+    private fun JsonObject.boundedText(key: String, max: Int): String? = text(key)
+        ?.let(DiagramText::normalizeEscapedLineBreaks)
+        ?.trim()?.also {
+            require(it.length <= max) { "$key 超过 $max 字符，请精简标签" }
+        }?.takeIf { it.isNotEmpty() }
 
     private fun JsonObject.index(key: String, max: Int): Int? {
         if (this[key] == null) return null

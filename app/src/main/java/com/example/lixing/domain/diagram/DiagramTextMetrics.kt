@@ -37,6 +37,40 @@ internal object DiagramText {
      * measuring and drawing it, so the c subscript is retained like it is in
      * the textbook.
      */
+    /** Convert model-emitted literal line-break escapes without touching TeX commands. */
+    internal fun normalizeEscapedLineBreaks(raw: String): String {
+        val result = StringBuilder(raw.length)
+        var inFormula = false
+        var index = 0
+        while (index < raw.length) {
+            val current = raw[index]
+            if (current == '$') {
+                inFormula = !inFormula
+                result.append(current)
+                index++
+                continue
+            }
+            if (!inFormula && current == '\\' && index + 1 < raw.length) {
+                when (raw[index + 1]) {
+                    'n' -> {
+                        result.append('\n')
+                        index += 2
+                        continue
+                    }
+                    'r' -> {
+                        result.append('\n')
+                        index += if (index + 3 < raw.length &&
+                            raw[index + 2] == '\\' && raw[index + 3] == 'n') 4 else 2
+                        continue
+                    }
+                }
+            }
+            result.append(current)
+            index++
+        }
+        return result.toString()
+    }
+
     private fun normalizeCommonMath(text: String): String {
         if ('$' in text) return text
         return text
@@ -54,7 +88,7 @@ internal object DiagramText {
             runs = mutableListOf()
             width = 0f
         }
-        tokens.findAll(normalizeCommonMath(text)).forEach { match ->
+        tokens.findAll(normalizeCommonMath(normalizeEscapedLineBreaks(text))).forEach { match ->
             val token = match.value
             if (token == "\n") { flush(); return@forEach }
             val formula = if (token.startsWith('$') && token.endsWith('$') && token.length > 2) {

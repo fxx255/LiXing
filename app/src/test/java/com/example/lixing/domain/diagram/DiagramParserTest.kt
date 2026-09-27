@@ -83,6 +83,21 @@ class DiagramParserTest {
         assertEquals("二极管＋RC", list.single().nodes.first { it.id == "env" }.subLabel)
     }
 
+    @Test fun literalEscapedNewlinesInLabelsBecomeLineBreaksWithoutChangingLatex() {
+        val (list, warnings) = parse(
+            diagram(
+                nodes = """[
+                    {"id":"block","label":"12路SSB调制器\\n(载波 $\\nu$)","shape":"block",
+                     "subLabel":"参数\\r\\n$\\neq 0$"}
+                ]""",
+            ),
+        )
+        assertTrue("不应有警告: $warnings", warnings.isEmpty())
+        val node = list.single().nodes.single()
+        assertEquals("12路SSB调制器\n(载波 $\\nu$)", node.label)
+        assertEquals("参数\n$\\neq 0$", node.subLabel)
+    }
+
     /** 重复 id：无法唯一寻址，整张拒收。 */
     @Test fun duplicateNodeIdRejectsThatDiagramOnly() {
         val (list, warnings) = parse(
