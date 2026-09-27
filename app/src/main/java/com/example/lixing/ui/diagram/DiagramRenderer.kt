@@ -37,6 +37,7 @@ object DiagramRenderer {
         drawText(canvas, DiagramText.layout(layout.title, DiagramTextRole.TITLE, 600f),
             28f, 28f, DiagramTextRole.TITLE, palette = palette)
         layout.edges.forEach { drawEdge(canvas, it, palette) }
+        drawFeedbackCrossingGaps(canvas, layout.edges, palette)
         layout.nodes.forEach { drawNode(canvas, it, layout.edges, palette) }
         // Draw arrowheads after node fills/strokes.  Otherwise the node body
         // hides the head at a top/bottom port, making the direction look
@@ -188,6 +189,50 @@ object DiagramRenderer {
             }
         }
         canvas.drawPath(path, paint)
+    }
+
+    /** A dashed feedback wire passing a solid control feed is not a junction. */
+    private fun drawFeedbackCrossingGaps(canvas: Canvas, edges: List<EdgeRoute>, palette: Palette) {
+        val background = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = palette.background }
+        val solid = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = palette.ink; style = Paint.Style.STROKE; strokeWidth = 1.6f
+        }
+        val bridge = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            // The feedback edge is normally dashed. Keep the bridge itself
+            // continuous so it reads as one connected wire over the crossing.
+            color = palette.muted; style = Paint.Style.STROKE; strokeWidth = 1.6f
+        }
+        edges.filter { it.edge.dashed }.forEach { dashed ->
+            dashed.points.zipWithNext().forEach { (a, b) ->
+                edges.filterNot { it.edge.dashed }.forEach { route ->
+                    route.points.zipWithNext().forEach { (c, d) ->
+                        val dashHorizontal = a.y == b.y
+                        val solidHorizontal = c.y == d.y
+                        if (dashHorizontal == solidHorizontal) return@forEach
+                        val x = if (dashHorizontal) c.x else a.x
+                        val y = if (dashHorizontal) a.y else c.y
+                        val h1 = if (dashHorizontal) a.x else c.x
+                        val h2 = if (dashHorizontal) b.x else d.x
+                        val v1 = if (dashHorizontal) c.y else a.y
+                        val v2 = if (dashHorizontal) d.y else b.y
+                        if (x <= minOf(h1, h2) + 6f || x >= maxOf(h1, h2) - 6f ||
+                            y <= minOf(v1, v2) + 6f || y >= maxOf(v1, v2) - 6f) return@forEach
+                        canvas.drawCircle(x, y, 5f, background)
+                        if (solidHorizontal) canvas.drawLine(x - 6f, y, x + 6f, y, solid)
+                        else canvas.drawLine(x, y - 6f, x, y + 6f, solid)
+                        val bridgeBox = RectF(x - 5f, y - 5f, x + 5f, y + 5f)
+                        if (dashHorizontal) {
+                            // Horizontal feedback: arch over the vertical wire.
+                            canvas.drawArc(bridgeBox, 180f, 180f, false, bridge)
+                        } else {
+                            // Vertical feedback: arch to the right of the
+                            // horizontal wire.
+                            canvas.drawArc(bridgeBox, 270f, 180f, false, bridge)
+                        }
+                    }
+                }
+            }
+        }
     }
 
     private fun drawArrowHead(canvas: Canvas, route: EdgeRoute, palette: Palette) {

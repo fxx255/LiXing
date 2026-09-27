@@ -21,6 +21,16 @@ internal object IqDemodulatorLayout {
     fun layout(spec: DiagramSpec): DiagramLayoutResult {
         val lanes = spec.nodes.associate { it.id to lane(it) }
         val controls = spec.nodes.filter(::isControl).mapTo(mutableSetOf()) { it.id }
+        // Recovery fits in the opening between the split and the mixers. It
+        // cannot occupy the split's grid cell: that puts its wire on the split trunk.
+        val recovery = spec.nodes.firstOrNull(::isCarrierRecovery)
+            ?.takeIf {
+                val splitId = spec.nodes.firstOrNull { node -> key(node) == "split" }?.id
+                val mixerId = spec.nodes.firstOrNull { node ->
+                    node.renderShape() == DiagramNodeShape.MIXER && lane(node) == Lane.I
+                }?.id
+                spec.edges.any { edge -> edge.from == splitId && edge.to == mixerId }
+            }
         val signalIds = spec.nodes.map { it.id }.filterTo(mutableSetOf()) { it !in controls }
         val stages = signalStages(spec, signalIds)
 
@@ -46,7 +56,7 @@ internal object IqDemodulatorLayout {
         val occupied = mutableSetOf<Placement>()
         // Reserve signal stages first. The model may list a carrier before the
         // input/split; JSON order must not let that control box move the chain.
-        spec.nodes.sortedWith(compareBy<DiagramNode>(
+        spec.nodes.filter { it.id != recovery?.id }.sortedWith(compareBy<DiagramNode>(
             { it.id in controls }, { stages[it.id] ?: 0 },
             { lanes.getValue(it.id).row }, { it.id },
         )).forEach { node ->
@@ -68,16 +78,22 @@ internal object IqDemodulatorLayout {
         val maxColumn = placements.values.maxOfOrNull { it.column } ?: 0
         val maxRow = placements.values.maxOfOrNull { it.lane.row } ?: 2
         val widths = (0..maxColumn).associateWith { column ->
-            maxOf(MIN_STAGE_WIDTH, spec.nodes.filter { placements.getValue(it.id).column == column }
+            maxOf(MIN_STAGE_WIDTH, spec.nodes.filter { placements[it.id]?.column == column }
                 .maxOfOrNull { sizes.getValue(it.id).width } ?: 0f)
         }
         val heights = (0..maxRow).associateWith { row ->
-            maxOf(MIN_LANE_HEIGHT, spec.nodes.filter { placements.getValue(it.id).lane.row == row }
+            maxOf(MIN_LANE_HEIGHT, spec.nodes.filter { placements[it.id]?.lane?.row == row }
                 .maxOfOrNull { sizes.getValue(it.id).height } ?: 0f)
         }
+        val mixerColumn = spec.nodes.filter {
+            it.renderShape() == DiagramNodeShape.MIXER && lanes[it.id] == Lane.I
+        }.mapNotNull { placements[it.id]?.column }.minOrNull()
         val x = mutableMapOf<Int, Float>()
         var cursor = PADDING
         widths.forEach { (column, width) ->
+            if (recovery != null && column == mixerColumn) {
+                cursor += maxOf(130f, sizes.getValue(recovery.id).width + 10f)
+            }
             x[column] = cursor
             cursor += width + STAGE_GAP
         }
@@ -87,7 +103,7 @@ internal object IqDemodulatorLayout {
             y[row] = cursor
             cursor += height + LANE_GAP
         }
-        val boxes = spec.nodes.map { node ->
+        val gridBoxes = spec.nodes.filter { it.id != recovery?.id }.map { node ->
             val place = placements.getValue(node.id)
             val size = sizes.getValue(node.id)
             NodeBox(
@@ -97,13 +113,22 @@ internal object IqDemodulatorLayout {
                 size.width, size.height, place.column, place.lane.row,
             )
         }
+        val gridById = gridBoxes.associateBy { it.node.id }
+        val recoveryBox = recovery?.let { node ->
+            val split = gridBoxes.first { key(it.node) == "split" }
+            val size = sizes.getValue(node.id)
+            NodeBox(node, split.x + split.width + 56f,
+                y.getValue(Lane.COMMON.row) + (heights.getValue(Lane.COMMON.row) - size.height) / 2f,
+                size.width, size.height, split.column, Lane.COMMON.row)
+        }
+        val boxes = spec.nodes.map { node ->
+            if (node.id == recovery?.id) recoveryBox!! else gridById.getValue(node.id)
+        }
         val boxById = boxes.associateBy { it.node.id }
         val mergeIds = spec.nodes.filter { target ->
             val sources = spec.edges.filter { it.to == target.id }.mapNotNull { lanes[it.from] }.toSet()
             Lane.I in sources && Lane.Q in sources
         }.mapTo(mutableSetOf()) { it.id }
-        var feedbackIndex = 0
-        val bottom = boxes.maxOf { it.y + it.height }
         val routes = spec.edges.map { edge ->
             val from = boxById.getValue(edge.from)
             val to = boxById.getValue(edge.to)
@@ -112,17 +137,17 @@ internal object IqDemodulatorLayout {
             val split = key(from.node) == "split" && toLane in setOf(Lane.I, Lane.Q)
             val merge = edge.to in mergeIds && fromLane in setOf(Lane.I, Lane.Q)
             val controlFeed = edge.from in controls && toLane in setOf(Lane.I, Lane.Q)
-            val returnPath = edge.dashed && fromLane in setOf(Lane.I, Lane.Q) &&
-                toLane == Lane.AUX && from.x > to.x
+            val returnPath = edge.dashed && edge.to == recovery?.id &&
+                fromLane == Lane.I && from.x > to.x
 
             val departure = when {
-                returnPath -> if (fromLane == Lane.I) DiagramPort.TOP else DiagramPort.BOTTOM
+                returnPath -> DiagramPort.BOTTOM
                 split || merge -> DiagramPort.RIGHT
                 controlFeed -> if (from.centerY < to.centerY) DiagramPort.BOTTOM else DiagramPort.TOP
                 else -> DiagramLayout.resolvePort(edge.fromPort, from, to)
             }
             val arrival = when {
-                returnPath -> DiagramPort.BOTTOM
+                returnPath -> DiagramPort.TOP
                 split -> DiagramPort.LEFT
                 merge -> if (fromLane == Lane.I) DiagramPort.TOP else DiagramPort.BOTTOM
                 controlFeed -> if (from.centerY < to.centerY) DiagramPort.TOP else DiagramPort.BOTTOM
@@ -132,23 +157,21 @@ internal object IqDemodulatorLayout {
             val end = DiagramLayout.anchor(to, arrival)
             val proposed = when {
                 returnPath -> {
-                    val channelY = bottom + 48f + feedbackIndex++ * 22f
-                    if (fromLane == Lane.I) {
-                        val topY = maxOf(8f, boxes.minOf { it.y } - 30f)
-                        val outerX = boxes.maxOf { it.x + it.width } + STAGE_GAP / 2f
-                        listOf(start, DiagramPoint(start.x, topY), DiagramPoint(outerX, topY),
-                            DiagramPoint(outerX, channelY), DiagramPoint(end.x, channelY), end)
-                    } else {
-                        listOf(start, DiagramPoint(start.x, channelY),
-                            DiagramPoint(end.x, channelY), end)
-                    }
+                    val channelY = (start.y + end.y) / 2f
+                    listOf(start, DiagramPoint(start.x, channelY),
+                        DiagramPoint(end.x, channelY), end)
                 }
                 split && start.x < end.x -> {
-                    val trunkX = (start.x + end.x) / 2f
+                    val trunkX = start.x + 32f
                     listOf(start, DiagramPoint(trunkX, start.y), DiagramPoint(trunkX, end.y), end)
                 }
                 merge && start.x < to.centerX ->
                     listOf(start, DiagramPoint(to.centerX, start.y), end)
+                key(from.node).contains("phase_shift") && toLane == Lane.Q -> {
+                    val channelY = (start.y + end.y) / 2f
+                    listOf(start, DiagramPoint(start.x, channelY),
+                        DiagramPoint(end.x, channelY), end)
+                }
                 else -> null
             }
             val points = if (proposed != null && clearOfOtherNodes(proposed, boxes, from, to)) {
@@ -202,7 +225,7 @@ internal object IqDemodulatorLayout {
             role.startsWith("q_") || role.startsWith("lower_") ||
                 role.startsWith("quadrature_") || role.endsWith("_q") -> Lane.Q
             role.contains("phase_shift") || role.contains("carrier_recovery") ||
-                role.contains("timing") || role.contains("clock") -> Lane.AUX
+                role.contains("timing") || role.contains("clock") -> Lane.COMMON
             node.row == 0 -> Lane.I
             node.row == 2 -> Lane.Q
             node.row == 3 -> Lane.AUX
@@ -215,6 +238,9 @@ internal object IqDemodulatorLayout {
         return listOf("carrier", "oscillator", "phase_shift", "timing", "clock", "recovery", "nco")
             .any(role::contains)
     }
+
+    private fun isCarrierRecovery(node: DiagramNode): Boolean =
+        key(node).contains("recovery") && !key(node).contains("timing")
 
     private fun key(node: DiagramNode): String = node.role.orEmpty().ifBlank { node.id }
         .trim().lowercase().replace('-', '_').replace(' ', '_')

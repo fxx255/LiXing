@@ -1,0 +1,36 @@
+SIZE	1426.0	408.0	QPSK 解调
+EDGE	input	split	false	98.0,214.0;229.0,214.0
+EDGE	split	mi	false	241.0,214.0;273.0,214.0;273.0,80.0;498.0,80.0
+EDGE	split	mq	false	241.0,214.0;273.0,214.0;273.0,348.0;498.0,348.0
+EDGE	mi	fi	false	562.0,80.0;648.0,80.0
+EDGE	fi	si	false	752.0,80.0;818.0,80.0
+EDGE	si	di	false	922.0,80.0;988.0,80.0
+EDGE	di	demap	false	1092.0,80.0;1210.0,80.0;1210.0,187.0
+EDGE	mq	fq	false	562.0,348.0;648.0,348.0
+EDGE	fq	sq	false	752.0,348.0;818.0,348.0
+EDGE	sq	dq	false	922.0,348.0;988.0,348.0
+EDGE	dq	demap	false	1092.0,348.0;1210.0,348.0;1210.0,241.0
+EDGE	demap	out	false	1262.0,214.0;1352.0,214.0
+EDGE	carrier	mi	false	530.0,187.0;530.0,112.0
+EDGE	carrier	phase	false	582.0,214.0;648.0,214.0
+EDGE	phase	mq	false	700.0,241.0;700.0,278.5;530.0,278.5;530.0,316.0
+EDGE	recovery	carrier	false	401.0,214.0;478.0,214.0
+EDGE	timing	si	false	870.0,187.0;870.0,107.0
+EDGE	timing	sq	false	870.0,241.0;870.0,321.0
+EDGE	di	recovery	true	1040.0,107.0;1040.0,147.0;349.0,147.0;349.0,187.0
+NODE	input	IO	52.0	195.0	46.0	38.0	input
+NODE	split	JUNCTION	229.0	208.0	12.0	12.0	split
+NODE	mi	MIXER	498.0	48.0	64.0	64.0	mi
+NODE	mq	MIXER	498.0	316.0	64.0	64.0	mq
+NODE	fi	BLOCK	648.0	53.0	104.0	54.0	I 路匹配滤波
+NODE	fq	BLOCK	648.0	321.0	104.0	54.0	Q 路匹配滤波
+NODE	si	BLOCK	818.0	53.0	104.0	54.0	抽样
+NODE	sq	BLOCK	818.0	321.0	104.0	54.0	抽样
+NODE	di	BLOCK	988.0	53.0	104.0	54.0	二值判决
+NODE	dq	BLOCK	988.0	321.0	104.0	54.0	二值判决
+NODE	demap	BLOCK	1158.0	187.0	104.0	54.0	符号解映射
+NODE	out	IO	1352.0	195.0	46.0	38.0	out
+NODE	carrier	BLOCK	478.0	187.0	104.0	54.0	carrier
+NODE	phase	BLOCK	648.0	187.0	104.0	54.0	phase
+NODE	recovery	BLOCK	297.0	187.0	104.0	54.0	recovery
+NODE	timing	BLOCK	818.0	187.0	104.0	54.0	timing

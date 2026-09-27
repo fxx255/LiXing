@@ -1,6 +1,7 @@
 package com.example.lixing.domain.diagram
 
 import android.app.Application
+import java.io.File
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
 import org.junit.Assert.assertEquals
@@ -66,7 +67,10 @@ class IqDemodulatorLayoutTest {
         assertEquals(boxes.getValue("mi").centerX, boxes.getValue("carrier").centerX, 0.1f)
         assertEquals(boxes.getValue("mi").centerY, boxes.getValue("fi").centerY, 0.1f)
         assertEquals(boxes.getValue("mq").centerY, boxes.getValue("fq").centerY, 0.1f)
-        assertTrue(boxes.getValue("timing").centerY > boxes.getValue("sq").centerY)
+        assertTrue(boxes.getValue("timing").centerY > boxes.getValue("si").centerY)
+        assertTrue(boxes.getValue("timing").centerY < boxes.getValue("sq").centerY)
+        assertTrue(boxes.getValue("recovery").centerX > boxes.getValue("split").centerX)
+        assertTrue(boxes.getValue("recovery").centerX < boxes.getValue("carrier").centerX)
         assertTrue(boxes.getValue("demap").centerX > boxes.getValue("di").centerX)
         assertTrue(boxes.getValue("demap").centerY > boxes.getValue("di").centerY)
         assertTrue(boxes.getValue("demap").centerY < boxes.getValue("dq").centerY)
@@ -82,8 +86,9 @@ class IqDemodulatorLayoutTest {
         assertEquals(DiagramPort.TOP, result.edges.single { it.edge.from == "di" && it.edge.to == "demap" }.endPort)
         assertEquals(DiagramPort.BOTTOM, result.edges.single { it.edge.from == "dq" && it.edge.to == "demap" }.endPort)
         val feedback = result.edges.single { it.edge.dashed }
-        assertEquals(DiagramPort.TOP, feedback.startPort)
-        assertTrue(feedback.points.maxOf { it.y } > result.nodes.maxOf { it.y + it.height })
+        assertEquals(DiagramPort.BOTTOM, feedback.startPort)
+        assertEquals(DiagramPort.TOP, feedback.endPort)
+        assertTrue(feedback.points.maxOf { it.y } < boxes.getValue("dq").y)
         assertGeometry(result)
     }
 
@@ -106,6 +111,26 @@ class IqDemodulatorLayoutTest {
             DiagramParser.parseOne(Json.parseToJsonElement(json).jsonObject).profile)
         assertEquals(DiagramLayoutProfile.GENERIC,
             DiagramParser.parseOne(Json.parseToJsonElement(json.replace("iq_demodulator", "future_profile")).jsonObject).profile)
+    }
+
+    @Test fun `export compact I Q preview layouts when requested`() {
+        if (System.getenv("DIAGRAM_EXPORT_SAMPLES") != "1") return
+        val directory = File("diagram-samples/iq").apply { mkdirs() }
+        listOf(false to "qpsk.layout", true to "qam16.layout").forEach { (qam, filename) ->
+            val result = DiagramLayout.layout(receiver(qam))
+            val lines = buildList {
+                add("SIZE\t${result.width}\t${result.height}\t${result.title}")
+                result.edges.forEach { route ->
+                    add("EDGE\t${route.edge.from}\t${route.edge.to}\t${route.edge.dashed}\t" +
+                        route.points.joinToString(";") { "${it.x},${it.y}" })
+                }
+                result.nodes.forEach { box ->
+                    add("NODE\t${box.node.id}\t${box.node.renderShape()}\t${box.x}\t${box.y}\t" +
+                        "${box.width}\t${box.height}\t${box.node.label.replace("\n", "\\n")}")
+                }
+            }
+            File(directory, filename).writeText(lines.joinToString("\n", postfix = "\n"))
+        }
     }
 
     private fun assertGeometry(result: DiagramLayoutResult) {
@@ -137,5 +162,42 @@ class IqDemodulatorLayoutTest {
                     }
             }
         }
+        // In this compact layout the feedback crosses two control feeds. The
+        // renderer marks those passes as wire gaps; signal and control wires
+        // must not intersect or run on top of each other.
+        val feedbackCrossings = mutableSetOf<String>()
+        result.edges.forEachIndexed { index, first ->
+            result.edges.drop(index + 1).forEach { second ->
+                if (first.edge.from == second.edge.from || first.edge.to == second.edge.to) return@forEach
+                first.points.zipWithNext().forEach { (a, b) ->
+                    second.points.zipWithNext().forEach { (c, d) ->
+                        val horizontalA = a.y == b.y
+                        val horizontalB = c.y == d.y
+                        val cross = if (horizontalA != horizontalB) {
+                            val h1 = if (horizontalA) a else c
+                            val h2 = if (horizontalA) b else d
+                            val v1 = if (horizontalA) c else a
+                            val v2 = if (horizontalA) d else b
+                            v1.x > minOf(h1.x, h2.x) && v1.x < maxOf(h1.x, h2.x) &&
+                                h1.y > minOf(v1.y, v2.y) && h1.y < maxOf(v1.y, v2.y)
+                        } else if (horizontalA) {
+                            a.y == c.y && minOf(maxOf(a.x, b.x), maxOf(c.x, d.x)) >
+                                maxOf(minOf(a.x, b.x), minOf(c.x, d.x))
+                        } else {
+                            a.x == c.x && minOf(maxOf(a.y, b.y), maxOf(c.y, d.y)) >
+                                maxOf(minOf(a.y, b.y), minOf(c.y, d.y))
+                        }
+                        if (cross) {
+                            val dashed = listOf(first, second).singleOrNull { it.edge.dashed }
+                            assertTrue("${first.edge.from}->${first.edge.to} intersects ${second.edge.from}->${second.edge.to}",
+                                dashed?.edge?.from == "di" && dashed.edge.to == "recovery")
+                            feedbackCrossings += listOf(first, second).first { !it.edge.dashed }
+                                .let { "${it.edge.from}->${it.edge.to}" }
+                        }
+                    }
+                }
+            }
+        }
+        assertEquals(setOf("carrier->mi", "timing->si"), feedbackCrossings)
     }
 }
