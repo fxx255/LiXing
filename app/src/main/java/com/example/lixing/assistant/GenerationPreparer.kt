@@ -28,6 +28,9 @@ import kotlinx.serialization.builtins.serializer
 import javax.inject.Inject
 import javax.inject.Singleton
 
+private const val HISTORY_IMAGE_LOOKBACK_MESSAGES = 8
+private const val HISTORY_IMAGE_LIMIT = 2
+
 /**
  * 生成前的**准备阶段**：选上下文、转写照片、裁历史、取偏好。
  *
@@ -156,7 +159,7 @@ class GenerationPreparer @Inject constructor(
         val planRetryContext = planRetryContextFor(kinds, today)
         val note = contextNote(kinds, auto, manual)
         // **初始历史**来自快照，绝不重读当前会话（用户此刻的编辑不能改变这轮的上下文）。
-        val history = initial.originalHistory.map { AssistantMessage(it.role, it.text, id = it.id) } +
+        val history = historyFromSnapshot(initial) +
             AssistantMessage("user", outgoing)
         // 客户端会解析**同一份**身份；这里沿用初始快照的安全身份做展示/归组。
         val effectiveWeb = policy.effectiveWebSearchEnabled
@@ -241,11 +244,14 @@ class GenerationPreparer @Inject constructor(
             effectiveWebSearchEnabled = prefs.aiWebSearchEnabled,
             maxContinuations = prefs.assistantAutoContinue.coerceAtLeast(0),
             primaryProfileId = identity?.profileId.orEmpty(),
+            primaryVisionEnabled = visionDirect,
             visionProfileId = recognizer?.profileId.orEmpty(),
             visionModel = recognizer?.model.orEmpty(),
             visionEndpointIdentity = recognizer?.let { endpointIdentityOf(it.baseUrl) }.orEmpty(),
             photoRoute = route,
-            originalHistory = bounded.map { SnapshotHistoryMessage(it.id.orEmpty(), it.role, it.content) },
+            originalHistory = bounded.map {
+                SnapshotHistoryMessage(it.id.orEmpty(), it.role, it.content, it.imagePaths)
+            },
             manualContextKinds = submission.contextKinds.map { it.name },
             inPlanChangeFlow = submission.inPlanChangeFlow,
         ).let { snapshot ->
@@ -322,7 +328,7 @@ class GenerationPreparer @Inject constructor(
         refreshedContext: String?,
     ): Prepared {
         val outgoing = snapshot.sourceUserText
-        val history = snapshot.originalHistory.map { AssistantMessage(it.role, it.text, id = it.id) } +
+        val history = historyFromSnapshot(snapshot) +
             AssistantMessage("user", outgoing)
         // **易变上下文以传入的为准**（重试时刚重建的计划/任务数据、当天日期），
         // null 表示没有刷新结果；空字符串也是有效刷新，不能复活已删除的旧计划数据。
@@ -507,14 +513,48 @@ class GenerationPreparer @Inject constructor(
         userMessageId: String,
         answerMessageId: String,
     ): List<AssistantMessage> {
-        val messages = runCatching { chatRepository.messages(conversationId) }
-            .getOrElse { error -> if (error is kotlinx.coroutines.CancellationException) throw error else emptyList() }
+        val messages = chatRepository.messages(conversationId)
         val trimmed = messages.filterNot { message ->
             message.id == answerMessageId ||
                 message.id == userMessageId ||
                 (message.role == "assistant" && message.content.isBlank())
         }
-        return buildModelHistory(trimmed.map { AssistantMessage(it.role, it.content, id = it.id) })
+        return buildModelHistory(trimmed.map {
+            AssistantMessage(
+                role = it.role,
+                content = it.content,
+                imagePaths = chatRepository.decodeImagePaths(it.imagePaths),
+                id = it.id,
+            )
+        })
+    }
+
+    private suspend fun historyFromSnapshot(snapshot: AssistantRequestSnapshot): List<AssistantMessage> {
+        val imagePathsByIndex = if (snapshot.primaryVisionEnabled) {
+            snapshot.originalHistory.withIndex().toList().takeLast(HISTORY_IMAGE_LOOKBACK_MESSAGES).asReversed()
+                .filter { it.value.role == "user" }
+                .flatMap { message ->
+                    message.value.imagePaths.asReversed().map { message.index to it }
+                }
+                .take(HISTORY_IMAGE_LIMIT)
+                .groupBy({ it.first }, { it.second })
+                .mapValues { (_, paths) -> paths.asReversed() }
+        } else emptyMap()
+        val imagesByIndex = if (imagePathsByIndex.isEmpty()) emptyMap() else withContext(Dispatchers.Default) {
+            imagePathsByIndex.mapValues { (_, paths) ->
+                paths.mapNotNull { path ->
+                    AssistantImagePrep.encodeForVision(path, maxDim = 1280, quality = 82)
+                }
+            }
+        }
+        return snapshot.originalHistory.mapIndexed { index, message ->
+            val images = imagesByIndex[index].orEmpty()
+            val text = if (message.role == "user" && message.imagePaths.isNotEmpty() && images.isEmpty()) {
+                val note = "（此前附有图片；原图内容请参考当轮回答）"
+                if (message.text.isBlank()) note else "${message.text}\n$note"
+            } else message.text
+            AssistantMessage(message.role, text, imageBase64s = images, id = message.id)
+        }
     }
 
     private fun contextNote(

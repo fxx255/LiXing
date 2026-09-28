@@ -732,7 +732,7 @@ class AssistantGenerationManager @Inject constructor(
             // **准备结果必须先落库再发主请求**：转写文本/上下文/路由补写进同一
             // request+attempt 的快照；补写被拒（attempt 已换/已终态）就中断，
             // 不能"补写失败也继续花钱发网络"。
-            val persisted = requestRepository.saveSnapshotForAttempt(record.requestId, record.attemptId, prepared.snapshot)
+            val persisted = requestRepository.saveSnapshotForAttempt(record.requestId, record.attemptId, prepared.snapshot, record)
             if (!persisted) {
                 settleFailureOnce(
                     owner, record,
@@ -848,7 +848,7 @@ class AssistantGenerationManager @Inject constructor(
                 settleFailureOnce(owner, record, prepared.failure, AssistantFailureKind.ATTACHMENT_MISSING, "")
                 return
             }
-            val persisted = requestRepository.saveSnapshotForAttempt(record.requestId, attemptId, prepared.snapshot)
+            val persisted = requestRepository.saveSnapshotForAttempt(record.requestId, attemptId, prepared.snapshot, record)
             if (!persisted) {
                 settleFailureOnce(
                     owner, record,

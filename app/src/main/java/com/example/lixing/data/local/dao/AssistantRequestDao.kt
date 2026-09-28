@@ -193,6 +193,37 @@ interface AssistantRequestDao {
         updatedAt: Instant,
     ): Int
 
+    @Query(
+        "UPDATE assistant_message SET content = :modelText, " +
+            "display_content = COALESCE(display_content, :displayText) " +
+            "WHERE id = :userMessageId AND conversation_id = :conversationId AND role = 'user'",
+    )
+    suspend fun updateTranscribedUserMessage(
+        userMessageId: String,
+        conversationId: String,
+        modelText: String,
+        displayText: String,
+    ): Int
+
+    @Transaction
+    suspend fun savePreparedSnapshot(
+        requestId: String,
+        attemptId: String,
+        snapshotJson: String,
+        updatedAt: Instant,
+        userMessageId: String?,
+        conversationId: String?,
+        modelText: String?,
+        displayText: String?,
+    ): Boolean {
+        if (updateSnapshotForAttempt(requestId, attemptId, snapshotJson, updatedAt) != 1) return false
+        if (modelText != null) {
+            check(userMessageId != null && conversationId != null && displayText != null)
+            check(updateTranscribedUserMessage(userMessageId, conversationId, modelText, displayText) == 1)
+        }
+        return true
+    }
+
     /** 记录失败归类与说明。单独一条语句，便于在状态迁移之后补充原因。 */
     @Query(
         "UPDATE assistant_request SET failure_kind = :kind, failure_message = :message, " +

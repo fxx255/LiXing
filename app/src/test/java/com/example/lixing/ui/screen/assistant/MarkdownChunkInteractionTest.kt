@@ -73,6 +73,16 @@ class MarkdownChunkInteractionTest {
         以上就是全部数据。
     """.trimIndent()
 
+    @Test
+    fun `stale first character is redrawn from the complete answer`() {
+        val view = createMarkdownTextView(RuntimeEnvironment.getApplication(), AwtColor.BLACK, AwtColor.BLUE)
+        val answer = "祈霖你好，今天的英语阅读和翻译内容都在这里。"
+        renderMarkdownIfChanged(view, answer, 300, AwtColor.BLACK, AwtColor.BLUE)
+        view.text = "祈"
+        renderMarkdownIfChanged(view, answer, 300, AwtColor.BLACK, AwtColor.BLUE)
+        assertEquals(answer, view.text.toString())
+    }
+
     /**
      * 按生产路径独立量出内容的真实高度（与 MarkdownChunk 内部同一套规则）。
      *

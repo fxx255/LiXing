@@ -66,6 +66,7 @@ class AssistantViewModelStoredMergeTest {
     // 按会话可控的 DB 消息流（DB 落库 / 迟到发射都由测试直接写 value）。
     private val messagesA = MutableStateFlow<List<AssistantMessageEntity>>(emptyList())
     private val messagesB = MutableStateFlow<List<AssistantMessageEntity>>(emptyList())
+    private val requestsA = MutableSharedFlow<List<AssistantRequestEntity>>(extraBufferCapacity = 8)
 
     private val activeState = MutableStateFlow(AssistantGenerationManager.ActiveState())
     private val events = MutableSharedFlow<AssistantGenerationManager.GenerationEvent>(extraBufferCapacity = 64)
@@ -229,7 +230,8 @@ class AssistantViewModelStoredMergeTest {
             }
         }
         requestRepository = mockk<AssistantRequestRepository> {
-            every { observeForConversation(any()) } returns emptyFlow()
+            every { observeForConversation("A") } returns requestsA
+            every { observeForConversation("B") } returns emptyFlow()
             // 请求表同样可控：按会话读 map，并支持用门闩制造「请求表迟到」。
             coEvery { forConversation(any()) } coAnswers {
                 val conversationId = firstArg<String>()
@@ -385,6 +387,75 @@ class AssistantViewModelStoredMergeTest {
         }
 
     // ---------------- 场景 3：短终态覆盖长 partial；overlay 只认运行中的当前身份 ----------------
+
+    @Test
+    fun `late request update cannot erase a completed answer`() = runTest(dispatcher) {
+        val oldRows = listOf(
+            row("A", "u1", "user", "第一问"),
+            row("A", "a1", "assistant", "第一答"),
+            row("A", "u2", "user", "第二问"),
+            row("A", "a2", "assistant", ""),
+        )
+        messagesA.value = oldRows
+        viewModel.openConversation("A")
+        awaitState { it.messages.size == 4 }
+        messagesA.value = oldRows.dropLast(1) + oldRows.last().copy(content = "完整的第二答")
+        awaitState { it.messages.last().content == "完整的第二答" }
+
+        // The request flow can still hold the earlier message snapshot while IO catches up.
+        AssistantViewModel::class.java.getDeclaredField("currentPageMessageRows").apply {
+            isAccessible = true
+            set(viewModel, oldRows)
+        }
+        requestsA.emit(listOf(requestRow("r2", "A", "u2", "a2", status = AssistantRequestStatus.COMPLETED)))
+        runToIdle()
+        assertEquals("完整的第二答", viewModel.state.value.messages.last().content)
+    }
+
+    @Test
+    fun `late request update cannot remove a newly appended turn`() = runTest(dispatcher) {
+        val oldRows = listOf(
+            row("A", "u1", "user", "第一问"),
+            row("A", "a1", "assistant", "第一答"),
+        )
+        messagesA.value = oldRows
+        viewModel.openConversation("A")
+        awaitState { it.messages.size == 2 }
+        messagesA.value = oldRows + row("A", "u2", "user", "第二问") +
+            row("A", "a2", "assistant", "完整的第二答")
+        awaitState { it.messages.size == 4 }
+
+        AssistantViewModel::class.java.getDeclaredField("currentPageMessageRows").apply {
+            isAccessible = true
+            set(viewModel, oldRows)
+        }
+        requestsA.emit(listOf(requestRow("r2", "A", "u2", "a2", status = AssistantRequestStatus.COMPLETED)))
+        runToIdle()
+        assertEquals(listOf("u1", "a1", "u2", "a2"), viewModel.state.value.messages.map { it.id })
+    }
+
+    @Test
+    fun `old message emission does not hide prior conversation during generation`() = runTest(dispatcher) {
+        val fullRows = listOf(
+            row("A", "u1", "user", "之前的问题"),
+            row("A", "a1", "assistant", "之前的完整回答"),
+            row("A", "u2", "user", "刚发送的照片", imagePaths = """["/photo.png"]"""),
+            row("A", "a2", "assistant", ""),
+        )
+        messagesA.value = fullRows
+        viewModel.openConversation("A")
+        awaitState { it.messages.size == 4 }
+        activeState.value = AssistantGenerationManager.ActiveState(
+            requestId = "r2", attemptId = "t2", conversationId = "A",
+            phase = AssistantRequestStatus.RUNNING, answerMessageId = "a2",
+        )
+        runToIdle()
+
+        messagesA.value = fullRows.takeLast(2)
+        runToIdle()
+        assertEquals(listOf("u1", "a1", "u2", "a2"), viewModel.state.value.messages.map { it.id })
+        assertEquals("之前的完整回答", viewModel.state.value.messages[1].content)
+    }
 
     @Test
     fun `short terminal db content replaces longer partial once manager is idle`() =

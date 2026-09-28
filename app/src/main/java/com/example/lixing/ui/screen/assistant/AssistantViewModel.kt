@@ -183,6 +183,7 @@ class AssistantViewModel @Inject constructor(
     /** 当前页**消息行缓存**：供请求流先到时也能立即重算合并（partial 恢复）。 */
     @Volatile
     private var currentPageMessageRows: List<com.example.lixing.data.local.entity.AssistantMessageEntity>? = null
+    private var messageApplyRevision = 0L
 
     /**
      * 重试入口的**代围栏**：每次重算前同步 +1，异步读库返回后只有代数仍匹配
@@ -285,11 +286,12 @@ class AssistantViewModel @Inject constructor(
                     }
                 }
                 launch {
-                    chatRepository.observeMessages(conversationId).collect { stored ->
-                        if (navigationEpoch != pageEpoch) return@collect
+                    chatRepository.observeMessages(conversationId).collectLatest { stored ->
+                        if (navigationEpoch != pageEpoch) return@collectLatest
                         applyStoredMessages(conversationId, stored)
                         // 消息流到达：更新「最新用户消息」并重算重试入口。
-                        if (_state.value.currentConversationId != conversationId) return@collect
+                        if (_state.value.currentConversationId != conversationId) return@collectLatest
+                        if (currentPageMessageRows !== stored) return@collectLatest
                         currentPageMessagesLoaded = true
                         latestUserMessageIdByPage = stored.lastOrNull { it.role == "user" }?.id
                         refreshRetryEntry()
@@ -446,6 +448,7 @@ class AssistantViewModel @Inject constructor(
     private suspend fun reconcileAnswerFromDatabase(answerMessageId: String) {
         val conversationId = _state.value.currentConversationId ?: return
         val epoch = navigationEpoch
+        val revision = messageApplyRevision
         val messages = try {
             chatRepository.messages(conversationId)
         } catch (e: CancellationException) {
@@ -455,7 +458,7 @@ class AssistantViewModel @Inject constructor(
         }
         // 挂起返回后的完整围栏：会话 / 导航轮次 / 生成身份 任一变化 ⇒ 放弃本次恢复。
         if (_state.value.currentConversationId != conversationId) return
-        if (navigationEpoch != epoch) return
+        if (navigationEpoch != epoch || messageApplyRevision != revision) return
         if (generationManager.isRunning()) return
         val restoredImages = withContext(io) {
             buildMap {
@@ -469,12 +472,15 @@ class AssistantViewModel @Inject constructor(
         }
         _state.update { state ->
             // state.update 的 lambda 内也可能与并发更新交错，再围栏一次。
-            if (state.currentConversationId != conversationId || navigationEpoch != epoch) return@update state
+            if (state.currentConversationId != conversationId || navigationEpoch != epoch ||
+                messageApplyRevision != revision) return@update state
             state.copy(messages = mergeStoredMessagesIntoUi(messages, state.messages, restoredImages))
         }
-        restorePendingReviewFromStored(messages, conversationId, epoch)
+        if (messageApplyRevision != revision) return
+        restorePendingReviewFromStored(messages, conversationId, epoch, revision)
         // 信封恢复也会挂起；最后一次挂起之后再次核验归属。
-        if (navigationEpoch != epoch || _state.value.currentConversationId != conversationId) return
+        if (navigationEpoch != epoch || messageApplyRevision != revision ||
+            _state.value.currentConversationId != conversationId) return
         if (generationManager.state.value.let { it.isRunning && it.conversationId == conversationId }) return
         _state.update { it.copy(busy = false, retrying = false) }
         refreshRetryEntry()
@@ -501,6 +507,7 @@ class AssistantViewModel @Inject constructor(
         // 读取前固定归属；挂起后逐项校验（见围栏说明）。
         val epoch = navigationEpoch
         if (_state.value.currentConversationId != conversationId) return
+        val revision = ++messageApplyRevision
         val restoredImages = withContext(io) {
             buildMap {
                 for (row in stored) {
@@ -513,11 +520,14 @@ class AssistantViewModel @Inject constructor(
         }
         _state.update { state ->
             // 围栏：会话切走 / 新导航开始后，迟到 DB 流一个字段都不许写。
-            if (state.currentConversationId != conversationId || navigationEpoch != epoch) return@update state
+            if (state.currentConversationId != conversationId || navigationEpoch != epoch ||
+                messageApplyRevision != revision) return@update state
             currentPageMessageRows = stored
             state.copy(messages = mergeStoredMessagesIntoUi(stored, state.messages, restoredImages))
         }
-        restorePendingReviewFromStored(stored, conversationId, epoch)
+        if (messageApplyRevision != revision) return
+        restorePendingReviewFromStored(stored, conversationId, epoch, revision)
+        if (messageApplyRevision != revision) return
         refreshRetryEntry()
     }
 
@@ -534,8 +544,8 @@ class AssistantViewModel @Inject constructor(
      *   **有意不写进** `assistant_message`（避免同步/备份半成品），只存在请求记录里；
      *   按 answerMessageId 恢复进空正文行，让重启后用户仍能看到已生成的部分回答；
      *   **已完成请求的 DB 正文永远权威**，绝不复活旧 partial；
-     * - 界面上不在库里的**无 id 乐观消息**追加保留（不静默丢用户刚发的内容）；
-     *   有 id 而不在库里的一律丢弃（DB 是消息集合的权威）。
+     * - 生成中保留旧 DB 快照缺席的已有消息，避免新照片和历史突然消失；
+     *   任务结束后以 DB 行集合为准，无 id 乐观消息仍保留。
      */
     private fun mergeStoredMessagesIntoUi(
         storedRows: List<com.example.lixing.data.local.entity.AssistantMessageEntity>,
@@ -589,7 +599,16 @@ class AssistantViewModel @Inject constructor(
                 id = row.id,
             )
         }
-        // ② 界面上不在库里的**无 id 乐观消息**追加保留；有 id 的以 DB 为准丢弃。
+        // ② DB 在新请求落盘后的旧快照可能晚到。生成中保留已有消息的顺序与缺席行，
+        //    直到下一次权威消息发射；终态仍严格按 DB 行删除不存在的消息。
+        if (active.isRunning && active.conversationId == _state.value.currentConversationId) {
+            val mergedById = merged.associateBy { it.id }
+            val uiIds = uiMessages.mapNotNull { it.id }.toSet()
+            return uiMessages.map { existing ->
+                existing.id?.let(mergedById::get) ?: existing
+            } + merged.filter { it.id !in uiIds }
+        }
+        // 界面上不在库里的无 id 乐观消息仍要保留。
         val appended = uiMessages.filter { it.id == null }
         return if (appended.isEmpty()) merged else merged + appended
     }
@@ -624,9 +643,10 @@ class AssistantViewModel @Inject constructor(
         stored: List<com.example.lixing.data.local.entity.AssistantMessageEntity>,
         conversationId: String,
         epoch: Long = navigationEpoch,
+        revision: Long = messageApplyRevision,
     ) {
         if (_state.value.currentConversationId != conversationId) return
-        if (navigationEpoch != epoch) return
+        if (navigationEpoch != epoch || messageApplyRevision != revision) return
         // **不 `?: return`**：没有非空信封行时也必须走到清除分支，撤掉旧预览，
         // 否则用户已放弃/已取消的信封会在 DB 流每次重放时复活。
         val ownerRow = stored.lastOrNull { it.pendingReview.isNotBlank() }
@@ -645,7 +665,7 @@ class AssistantViewModel @Inject constructor(
             today = today,
         )
         if (_state.value.currentConversationId != conversationId) return
-        if (navigationEpoch != epoch) return
+        if (navigationEpoch != epoch || messageApplyRevision != revision) return
         if (restored == null) {
             // 信封解析不出任何待确认项（损坏/为空）：与空信封一致，撤掉旧预览。
             clearPendingReviewState()
@@ -654,6 +674,8 @@ class AssistantViewModel @Inject constructor(
         // 围栏内才登记键。
         lastEnvelopeKey = ownerRow.id to ownerRow.pendingReview
         _state.update { state ->
+            if (state.currentConversationId != conversationId || navigationEpoch != epoch ||
+                messageApplyRevision != revision) return@update state
             state.copy(
                 pendingActions = restored.previews,
                 pendingActionsOwnerIndex = indexOfMessage(restored.ownerMessageId.orEmpty(), state)
@@ -674,39 +696,33 @@ class AssistantViewModel @Inject constructor(
 
     /**
      * 当前页**请求行缓存**：由 init 里当前会话的请求观察流维护。[refreshRetryEntry]
-     * 以它为请求行权威来源（已加载时**绝不**回退一次性读库），[applyStoredRequests]
-     * 用它 + [currentPageMessageRows] 重算合并；与消息流**任意到达顺序**下都收敛。
+     * 以它为请求行权威来源（已加载时**绝不**回退一次性读库）。
      * 导航时清空，新页首个发射重建。
      */
     private var currentPageRequests: List<com.example.lixing.data.local.entity.AssistantRequestEntity> =
         emptyList()
 
-    /**
-     * **请求流到达**时的消息重算：partial 恢复（[mergeStoredMessagesIntoUi]）同时
-     * 依赖消息行与请求行，请求行变化（如 manager 收尾落库/回滚中断）必须重算合并，
-     * 而不只是刷新重试入口 —— 否则「消息先到、请求后到」的顺序下 partial 永远不出现。
-     */
+    /** 请求流只恢复空回答的 partial；消息集合始终由消息流维护。 */
     private suspend fun applyStoredRequests(
         conversationId: String,
         requests: List<com.example.lixing.data.local.entity.AssistantRequestEntity>,
     ) {
         val epoch = navigationEpoch
         if (_state.value.currentConversationId != conversationId) return
-        // 未有消息行缓存（消息流还没首射）⇒ 本轮只刷新入口，等消息流到达再合并。
-        val stored = currentPageMessageRows ?: run { refreshRetryEntry(); return }
-        val restoredImages = withContext(io) {
-            buildMap {
-                for (row in stored) {
-                    put(row.id, chatRepository.decodeImagePaths(row.imagePaths).map(::restoreFigurePath))
-                }
-            }
-        }
+        val partials = requests.filter {
+            it.status != com.example.lixing.domain.assistant.AssistantRequestStatus.COMPLETED.name &&
+                it.partialText.isNotBlank()
+        }.associateBy { it.answerMessageId }
         _state.update { state ->
-            // 围栏：会话切走 / 新导航开始后，迟到流一个字段都不许写。
             if (state.currentConversationId != conversationId || navigationEpoch != epoch) return@update state
-            state.copy(messages = mergeStoredMessagesIntoUi(stored, state.messages, restoredImages, requests))
+            val rows = currentPageMessageRows?.associateBy { it.id } ?: return@update state
+            state.copy(messages = state.messages.map { message ->
+                val partial = partials[message.id]?.partialText
+                if (message.role == "assistant" && message.content.isBlank() &&
+                    rows[message.id]?.content?.isBlank() == true && !partial.isNullOrBlank()
+                ) message.copy(content = partial) else message
+            })
         }
-        restorePendingReviewFromStored(stored, conversationId, epoch)
         refreshRetryEntry()
     }
 

@@ -508,6 +508,23 @@ internal fun MarkdownAnswer(content: String) {
  * 不能用固定 height 缓存截住该请求，也不能在 Compose 布局之外反复 measure 同一个 View：
  * 前者留下陈旧的兄弟节点位置，后者让 View 的 measuredHeight 与 Compose 的格位不一致。
  */
+private data class MarkdownRenderStamp(val key: String, val renderedText: String)
+
+internal fun renderMarkdownIfChanged(
+    view: android.widget.TextView,
+    content: String,
+    widthPx: Int,
+    textColor: Int,
+    linkColor: Int,
+) {
+    if (widthPx <= 0) return
+    val renderKey = "$content|$widthPx|$textColor|$linkColor"
+    val stamp = view.getTag(R.id.markdown_render_key) as? MarkdownRenderStamp
+    if (stamp?.key == renderKey && stamp.renderedText == view.text.toString()) return
+    renderMarkdown(view, content, widthPx, textColor, linkColor)
+    view.setTag(R.id.markdown_render_key, MarkdownRenderStamp(renderKey, view.text.toString()))
+}
+
 @Composable
 internal fun MarkdownChunk(
     content: String,
@@ -530,12 +547,8 @@ internal fun MarkdownChunk(
             createMarkdownTextView(context, textColor, linkColor, selectable = selectable)
         },
         update = { view ->
-            // 同一份内容只渲染一次，避免思考面板更新/滚动时重新排队异步公式。
-            val renderKey = "$content|$renderWidthPx|$textColor|$linkColor"
-            if (renderWidthPx > 0 && view.getTag(R.id.markdown_render_key) != renderKey) {
-                renderMarkdown(view, content, renderWidthPx, textColor, linkColor)
-                view.setTag(R.id.markdown_render_key, renderKey)
-            }
+            // A detached TextView can return with stale text even when its content key is unchanged.
+            renderMarkdownIfChanged(view, content, renderWidthPx, textColor, linkColor)
         },
     )
 }

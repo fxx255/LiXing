@@ -292,10 +292,23 @@ class AssistantRequestRepository @Inject constructor(
         requestId: String,
         attemptId: String,
         snapshot: com.example.lixing.data.assistant.AssistantRequestSnapshot,
+        owner: AssistantRequestEntity? = null,
     ): Boolean = withContext(io) {
         val encoded = com.example.lixing.data.assistant.AssistantSnapshotCodec.encode(snapshot)
         if (encoded.isBlank()) return@withContext false
-        dao.updateSnapshotForAttempt(requestId, attemptId, encoded, Instant.now()) > 0
+        val transcribed = snapshot.prepared &&
+            snapshot.photoRoute == com.example.lixing.data.assistant.AssistantRequestSnapshot.PHOTO_ROUTE_TRANSCRIBE
+        if (transcribed) require(owner?.requestId == requestId && owner.attemptId == attemptId)
+        dao.savePreparedSnapshot(
+            requestId = requestId,
+            attemptId = attemptId,
+            snapshotJson = encoded,
+            updatedAt = Instant.now(),
+            userMessageId = if (transcribed) owner?.userMessageId else null,
+            conversationId = if (transcribed) owner?.conversationId else null,
+            modelText = if (transcribed) snapshot.sourceUserText else null,
+            displayText = if (transcribed) owner?.userText else null,
+        )
     }
 
     suspend fun delete(requestId: String) = withContext(io) { dao.deleteRequest(requestId) }

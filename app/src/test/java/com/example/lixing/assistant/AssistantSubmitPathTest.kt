@@ -252,6 +252,88 @@ class AssistantSubmitPathTest {
         Unit
     }
 
+    @Test
+    fun `photo transcription remains available to a later question`() = runBlocking {
+        stubCapturing()
+        every { aiCredentialStore.questionVisionProfileId() } returns "vision-1"
+        coEvery { modelClient.completeWithProfile(any(), any(), any(), any()) } returns
+            "原题：求 x^2 的导数"
+        val photo = java.io.File.createTempFile("history-transcribed", ".png")
+        val bitmap = android.graphics.Bitmap.createBitmap(16, 16, android.graphics.Bitmap.Config.ARGB_8888)
+        photo.outputStream().use { bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it) }
+        bitmap.recycle()
+        try {
+            val first = manager.submit(AssistantGenerationManager.Submission(
+                conversationId = "c1", userText = "", attachmentPaths = listOf(photo.absolutePath),
+            ))
+            assertEquals(AssistantRequestStatus.COMPLETED.name, awaitTerminal(first.requestId))
+            val saved = chatRepository.messages("c1").first { it.id == first.userMessageId }
+            assertTrue(saved.content.contains("求 x^2 的导数"))
+            assertEquals("", saved.displayContent)
+
+            val followUp = manager.submit(AssistantGenerationManager.Submission(
+                conversationId = "c1", userText = "刚才那道题怎样求导？", attachmentPaths = emptyList(),
+            ))
+            assertEquals(AssistantRequestStatus.COMPLETED.name, awaitTerminal(followUp.requestId))
+            assertTrue(capturedMessages.last().any {
+                it.id == first.userMessageId && it.content.contains("求 x^2 的导数")
+            })
+        } finally {
+            photo.delete()
+        }
+    }
+
+    @Test
+    fun `vision follow up includes a bounded prior photo`() = runBlocking {
+        stubCapturing(visionEnabled = true)
+        every { aiCredentialStore.resolveActiveIdentity(any(), any()) } returns
+            primaryIdentity.copy(visionEnabled = true)
+        val photo = java.io.File.createTempFile("history-vision", ".png")
+        val bitmap = android.graphics.Bitmap.createBitmap(16, 16, android.graphics.Bitmap.Config.ARGB_8888)
+        photo.outputStream().use { bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it) }
+        bitmap.recycle()
+        try {
+            val first = manager.submit(AssistantGenerationManager.Submission(
+                conversationId = "c1", userText = "看图作答",
+                attachmentPaths = List(3) { photo.absolutePath },
+            ))
+            assertEquals(AssistantRequestStatus.COMPLETED.name, awaitTerminal(first.requestId))
+            val followUp = manager.submit(AssistantGenerationManager.Submission(
+                conversationId = "c1", userText = "图上横轴代表什么？", attachmentPaths = emptyList(),
+            ))
+            assertEquals(AssistantRequestStatus.COMPLETED.name, awaitTerminal(followUp.requestId))
+            val prior = capturedMessages.last().single { it.id == first.userMessageId }
+            assertEquals(2, prior.imageBase64s.size)
+            assertTrue(prior.content.contains("看图作答"))
+        } finally {
+            photo.delete()
+        }
+    }
+
+    @Test
+    fun `failed history read stops submission before a request is stored`() = runBlocking {
+        val brokenChat = mockk<AssistantChatRepository> {
+            coEvery { messages("c1") } throws IllegalStateException("history unavailable")
+        }
+        val brokenPreparer = GenerationPreparer(
+            modelClient = modelClient,
+            contextBuilder = mockk(relaxed = true),
+            chatRepository = brokenChat,
+            prefsRepository = mockk(relaxed = true) {
+                coEvery { current() } returns com.example.lixing.data.prefs.UserPreferences()
+            },
+            aiCredentialStore = aiCredentialStore,
+        )
+        val failure = runCatching {
+            brokenPreparer.captureInitialSnapshot(
+                AssistantGenerationManager.Submission("c1", "接着上一题回答", emptyList()),
+                "c1", "new-user", "new-answer",
+            )
+        }.exceptionOrNull()
+        assertTrue(failure is IllegalStateException)
+        assertEquals("history unavailable", failure?.message)
+    }
+
     /**
      * **重试：原问题必须重新发送。**
      *

@@ -77,6 +77,8 @@ data class AssistantRequestSnapshot(
     val maxContinuations: Int = 0,
     /** 主模型的配置档案 id（为空表示走旧式偏好配置）。 */
     val primaryProfileId: String = "",
+    /** 提交时主模型是否能看图；后续追问按这个能力恢复有限的历史图片。 */
+    val primaryVisionEnabled: Boolean = false,
     /** 题目识别模型的配置档案 id（仅转写路由时非空）。 */
     val visionProfileId: String = "",
     /** 题目识别模型的模型名（安全身份，重试校验用）。 */
@@ -140,12 +142,13 @@ fun AssistantRequestSnapshot.toPolicy(): AssistantRequestPolicy = AssistantReque
     effectiveWebSearchEnabled = effectiveWebSearchEnabled,
 )
 
-/** 快照里的一条历史消息：角色 + 正文 + 消息 id（用于定位，不含附件内容）。 */
+/** 历史只保存本机图片路径；发送时才重新压缩，不持久化 base64。 */
 @kotlinx.serialization.Serializable
 data class SnapshotHistoryMessage(
     val id: String = "",
     val role: String = "",
     val text: String = "",
+    val imagePaths: List<String> = emptyList(),
 )
 
 /**

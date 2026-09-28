@@ -57,6 +57,8 @@ internal fun createMarkdownTextView(
             return super.onTouchEvent(event)
         }
     }.apply {
+        // The database owns answer text; restoring a detached View's saved text can revive a partial.
+        isSaveEnabled = false
         setTextColor(textColor)
         setLinkTextColor(linkColor)
         // selectable=false 用于表格块：setTextIsSelectable(true) 会顺带 setClickable(true)
