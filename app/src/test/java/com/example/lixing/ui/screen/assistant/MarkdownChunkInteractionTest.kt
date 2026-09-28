@@ -264,9 +264,8 @@ class MarkdownChunkInteractionTest {
             "PROBE create clickable=${view.isClickable} longClickable=${view.isLongClickable} " +
                 "focusable=${view.isFocusable} movement=${view.movementMethod}",
         )
-        assertTrue("文本块不应是 clickable（会抢占触摸）", !view.isClickable)
-        assertTrue("文本块不应是 longClickable（会抢占触摸）", !view.isLongClickable)
-        assertTrue("文本块不应是 focusable", !view.isFocusable)
+        assertTrue("回答正文必须支持长按选字", view.isLongClickable)
+        assertTrue("回答正文必须可聚焦以显示选区", view.isFocusable)
         // 长按选中/复制能力必须保留：MovementMethod 仍需就位
         assertTrue("文本块需保留 LinkMovementMethod 以支持链接与长按选中", view.movementMethod != null)
     }
@@ -300,14 +299,13 @@ class MarkdownChunkInteractionTest {
                 "focusable=${view.isFocusable} movement=${view.movementMethod}",
         )
         assertTrue(
-            "渲染后文本块被重新打开为 clickable（会抢占触摸）",
-            !view.isClickable,
+            "渲染后文本块必须支持长按选字",
+            view.isLongClickable,
         )
         assertTrue(
-            "渲染后文本块被重新打开为 longClickable（会抢占触摸）",
-            !view.isLongClickable,
+            "渲染后文本块必须可聚焦",
+            view.isFocusable,
         )
-        assertTrue("渲染后文本块不应是 focusable", !view.isFocusable)
         assertTrue(
             "渲染后需保留 LinkMovementMethod 以支持链接与长按选中",
             view.movementMethod != null,
@@ -384,9 +382,9 @@ class MarkdownChunkInteractionTest {
                 "height=${view.measuredHeight}",
         )
 
-        // 左边角落属于普通文字（首字符是「普」），必须放行
-        assertFalse(
-            "落在普通文字上的 ACTION_DOWN 必须放行（否则下方图片点不开）",
+        // 普通文字的 ACTION_DOWN 必须交给 TextView，长按才能创建选择区。
+        assertTrue(
+            "落在普通文字上的 ACTION_DOWN 必须由 TextView 接管",
             dispatchTouch(view, MotionEvent.ACTION_DOWN, 1f, 1f),
         )
     }

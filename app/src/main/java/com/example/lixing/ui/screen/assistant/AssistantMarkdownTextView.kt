@@ -33,14 +33,19 @@ internal fun createMarkdownTextView(
 ): TextView =
     object : TextView(context) {
         /**
-         * 只在**真的按在链接/可点片段上**时才消费触摸，其余一律放行。
-         *
-         * 这一段是「文本块不得抢占触摸」的**真正兜底**，不能省。原因见下方 `apply {}`
-         * 块内的长注释：`isClickable` / `isLongClickable` 这些属性会被 AOSP 框架随时
-         * 改回来，靠「设一次属性」是不可靠的；而在 `onTouchEvent` 这一层按落点判定，
-         * 才是与框架无关的最终裁决点。
+         * 表格块不得抢占触摸：它没有文本选区，普通落点交给外层横向/纵向滚动。
+         * 可选中的回答正文直接走 TextView 默认处理，以保留长按选字和链接点击。
          */
         override fun onTouchEvent(event: MotionEvent): Boolean {
+            // 可选中文本必须让 TextView 自己收到文字区域内的 ACTION_DOWN/MOVE/UP；
+            // 如果公式异步加载导致原生 View 比 Compose 格位更高，超出实际文字行的
+            // ACTION_DOWN 仍要放行，避免把下方图片的点击区域吃掉。
+            if (selectable) {
+                if (event.actionMasked == MotionEvent.ACTION_DOWN && !isPointInsideText(event)) {
+                    return false
+                }
+                return super.onTouchEvent(event)
+            }
             val text = text as? Spannable
             if (text != null &&
                 (event.actionMasked == MotionEvent.ACTION_DOWN ||
@@ -67,35 +72,9 @@ internal fun createMarkdownTextView(
         // 表格以「读 + 横向拖动」为主，牺牲单元格内的长按选中是划算的。
         if (selectable) {
             setTextIsSelectable(true)
-            // ⚠️ 顺序至关重要：**先**设 MovementMethod，**再**关属性。
-            //
-            // AOSP `TextView.setMovementMethod()` 内部会调用
-            // `fixFocusableAndClickableSettings()`，而它在 `mMovement != null` 时会
-            // **重新打开** focusable/clickable/longClickable：
-            //
-            //     private void fixFocusableAndClickableSettings() {
-            //         if (mMovement != null) {
-            //             setFocusable(FOCUSABLE);
-            //             setClickable(true);       // ← 又被打开
-            //             setLongClickable(true);   // ← 又被打开
-            //         } else { … }
-            //     }
-            //
-            // v1.0.36 里我们把这三行写在了 `setMovementMethod()` **之前**，于是刚关掉就
-            // 立刻被框架翻回来，「文本块不抢占触摸」这条修复实际上从未生效 ——
-            // 这正是用户反馈「靠后的图还是点不开」迟迟不愈的原因。测试也因此在
-            // `!view.isClickable` 上稳定变红（AOSP 源码为证，不是测试环境失真）。
-            //
-            // 因此这里把顺序倒过来：先挂 MovementMethod（长按选中/复制、链接点击靠它），
-            // 再把框架顺手打开的三个属性关掉。
-            //
-            // 但仅靠「关属性」仍然脆弱：任何插件在 setText 之后重新 setMovementMethod
-            // 都会再次触发 fix。所以真正的保障在上面的 `onTouchEvent` 覆写里 ——
-            // 那里按「落点是否在可点片段上」决定是否消费触摸，与属性值无关。
+            // TextView 的可聚焦/长按属性必须保留，系统才能在原气泡中显示选区和复制菜单。
+            // 图片和表格是独立的 Compose 子项，不会再被气泡级长按处理器拦截。
             movementMethod = LinkMovementMethod.getInstance()
-            isClickable = false
-            isLongClickable = false
-            isFocusable = false
         } else {
             // 表格块：**尽量不给 MovementMethod**。
             // LinkMovementMethod 继承 ScrollingMovementMethod，只要表格内容比格位高，
@@ -177,6 +156,13 @@ private fun TextView.isPointInsideClickableSpan(text: Spannable, event: MotionEv
         val offset = textLayout.getOffsetForHorizontal(line, x.toFloat())
         text.getSpans(offset, offset, ClickableSpan::class.java).isNotEmpty()
     }.getOrDefault(false)
+}
+
+/** 只判断触点是否落在实际文字布局的垂直范围内，横向空白仍允许选中邻近字符。 */
+private fun TextView.isPointInsideText(event: MotionEvent): Boolean {
+    val textLayout = layout ?: return false
+    val y = event.y.toInt() - totalPaddingTop + scrollY
+    return y >= 0 && y < textLayout.height
 }
 
 /**

@@ -55,6 +55,11 @@ data class Axis(
     val ticks: List<Double>? = null,
     /** 刻度文案覆盖，例如把 5.0 显示成 "f_c"。 */
     val tickLabels: Map<Double, String> = emptyMap(),
+    /**
+     * 坐标轴位置策略。仅横轴当前使用：auto 在显示范围包含 0 时穿过 y=0，
+     * 否则放在绘图区底部；bottom 强制放在底部；origin 要求尽量放在原点。
+     */
+    val position: String = "auto",
 )
 
 data class MarkLine(val x: Double? = null, val y: Double? = null, val label: String? = null)

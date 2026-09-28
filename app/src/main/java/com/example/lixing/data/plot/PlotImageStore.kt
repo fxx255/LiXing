@@ -72,7 +72,9 @@ class PlotImageStore @Inject constructor(
     }
 
     private fun cacheKey(spec: PlotSpec, widthPx: Int, heightPx: Int): String =
-        "%08x_%d_%d".format(spec.hashCode(), widthPx, heightPx)
+        // 坐标轴布局属于渲染结果的一部分；改过 renderer 后必须让旧 PNG
+        // 失效，否则相同 PlotSpec 会继续命中旧的底部横轴图片。
+        "v2_%08x_%d_%d".format(spec.hashCode(), widthPx, heightPx)
 
     private companion object {
         const val TAG = "PlotImageStore"

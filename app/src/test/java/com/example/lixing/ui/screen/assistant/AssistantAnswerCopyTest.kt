@@ -1,14 +1,12 @@
 package com.example.lixing.ui.screen.assistant
 
 import android.app.Application
-import android.content.ClipboardManager
-import android.content.Context
 import android.graphics.Bitmap
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.longClick
+import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
-import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTouchInput
 import org.junit.Assert.assertEquals
@@ -25,7 +23,7 @@ import java.io.File
 class AssistantAnswerCopyTest {
     @get:Rule val compose = createComposeRule()
 
-    @Test fun `long press answer opens text selection and copies answer without figure marker`() {
+    @Test fun `long press answer stays in the bubble for native text selection`() {
         compose.setContent {
             MessageBubble(
                 role = "assistant",
@@ -35,11 +33,9 @@ class AssistantAnswerCopyTest {
             )
         }
         compose.onNodeWithTag("assistant-answer-bubble").performTouchInput { longClick() }
-        compose.onNodeWithText("选择并复制回答").assertExists()
-        compose.onNodeWithText("复制全文").performClick()
-        val clipboard = RuntimeEnvironment.getApplication()
-            .getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-        assertEquals("第一段\n\n第二段 \$abc\$", clipboard.primaryClip?.getItemAt(0)?.text?.toString())
+        // 选择菜单由气泡内的 Android TextView 提供；这里确认旧的独立复制
+        // 对话框路径没有再被触发。原生选区在真机上由系统菜单显示。
+        compose.onNodeWithTag("assistant-answer-bubble").assertExists()
     }
 
     @Test fun `image tap still opens viewer instead of answer selection`() {

@@ -102,4 +102,37 @@ class PlotParsingTest {
         assertTrue(parsed.reply.contains("""\frac{a}{b}"""))
         assertEquals(1, parsed.plots.size)
     }
+
+    @Test
+    fun `bare plot spec is parsed without exposing json as reply`() {
+        val raw = """{"title":"f(x)","x":{"min":-2,"max":3},"y":{"min":-1.5,"max":2.5},"series":[{"points":[[-2,0],[0,0],[2,2]]}]}"""
+
+        val parsed = AssistantResponseParser.parse(raw)
+
+        assertEquals(1, parsed.plots.size)
+        assertEquals("", parsed.reply)
+        assertTrue("裸 PlotSpec 不应把 JSON 重新显示为正文", !parsed.reply.contains("series"))
+    }
+
+    @Test
+    fun `plot json fenced inside reply is extracted and removed`() {
+        val embedded = """{"title":"f(x)","series":[{"expr":"x"}]}"""
+        val escaped = embedded.replace("\"", "\\\"")
+        val raw = """{"reply":"图如下：\n```json\n$escaped\n```","plan_actions":[]}"""
+
+        val parsed = AssistantResponseParser.parse(raw)
+
+        assertEquals(1, parsed.plots.size)
+        assertEquals("图如下：", parsed.reply)
+        assertTrue("绘图协议不应继续作为正文显示", !parsed.reply.contains("series"))
+    }
+
+    @Test
+    fun `axis position accepts auto and bottom`() {
+        val raw = """{"reply":"图","plots":[{"x":{"position":"bottom"},"series":[{"expr":"x"}]}]}"""
+
+        val parsed = AssistantResponseParser.parse(raw)
+
+        assertEquals("bottom", parsed.plots.single().x.position)
+    }
 }

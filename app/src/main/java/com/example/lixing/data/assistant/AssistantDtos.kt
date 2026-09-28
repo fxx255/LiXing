@@ -296,9 +296,15 @@ object AssistantResponseParser {
 
     private fun fromRoot(root: JsonObject, trimmed: String, normalizeMarkdown: Boolean): ParsedAssistantReply {
         val warnings = mutableListOf<String>()
-        val reply = (root["reply"] as? JsonPrimitive)?.contentOrNull
-            ?.let { if (normalizeMarkdown) normalizeAssistantMarkdown(it).trim() else it }
-            .orEmpty()
+        val rawReply = (root["reply"] as? JsonPrimitive)?.contentOrNull.orEmpty()
+        val rootPlots = parsePlots(root, warnings)
+        val embedded = extractEmbeddedPlots(rawReply, warnings)
+        val plotSlots = (rootPlots + embedded.plots).take(MAX_PLOTS)
+        val reply = if (embedded.cleanedReply.isNotBlank()) {
+            if (normalizeMarkdown) normalizeAssistantMarkdown(embedded.cleanedReply).trim() else embedded.cleanedReply.trim()
+        } else {
+            rawReply.let { if (normalizeMarkdown) normalizeAssistantMarkdown(it).trim() else it }
+        }
         val actionsArray = root["plan_actions"] as? JsonArray
         val actions = actionsArray
             ?.mapIndexedNotNull { index, element -> parseAction(element, index, warnings) }
@@ -315,18 +321,19 @@ object AssistantResponseParser {
         val rawEnglishActionsJson = englishArray
             ?.takeIf { it.isNotEmpty() && englishActions.isNotEmpty() }
             ?.toString()
-        val plots = parsePlots(root, warnings)
         val diagrams = DiagramParser.parseSlots(root["diagrams"] as? JsonArray, warnings)
 
         return ParsedAssistantReply(
-            reply = reply.ifEmpty { trimmed },
+            // 裸 PlotSpec 或只有 plots 的协议包没有可展示的正文；不要把整段 JSON
+            // 重新放回气泡，否则用户会看到绘图操作参数。
+            reply = reply.ifEmpty { if (plotSlots.isNotEmpty()) "" else trimmed },
             actions = actions,
             warnings = warnings,
             englishActions = englishActions,
             rawEnglishActionsJson = rawEnglishActionsJson,
-            plots = plots.filterNotNull(),
+            plots = plotSlots.filterNotNull(),
             diagrams = diagrams.filterNotNull(),
-            plotSlots = plots,
+            plotSlots = plotSlots,
             diagramSlots = diagrams,
             rawPlanActionsJson = rawPlanActionsJson,
         )
@@ -351,6 +358,9 @@ object AssistantResponseParser {
         val items: List<JsonElement> = when {
             array != null -> array.take(MAX_PLOTS)
             single != null -> listOf(single)
+            // 兼容模型直接返回单个 PlotSpec（title/x/y/series），而不是包在
+            // {"plot": {...}} 或 {"plots": [...]} 里。
+            root["series"] is JsonArray -> listOf(root)
             else -> return emptyList()
         }
         return items.map { element ->
@@ -362,6 +372,43 @@ object AssistantResponseParser {
                 .onFailure { warnings += "有一张图表没能生成：${it.message ?: "参数不合法"}" }
                 .getOrNull()
         }
+    }
+
+    private data class EmbeddedPlots(
+        val plots: List<PlotSpec?> = emptyList(),
+        val cleanedReply: String,
+    )
+
+    /**
+     * 从 reply 正文中识别绘图 JSON 围栏。普通 JSON 代码块不处理；只有通过
+     * PlotSpec 的结构校验后才会从正文移走，避免误吞用户给出的代码示例。
+     */
+    private fun extractEmbeddedPlots(reply: String, warnings: MutableList<String>): EmbeddedPlots {
+        if (reply.isBlank()) return EmbeddedPlots(cleanedReply = reply)
+        var cleaned = reply
+        val found = mutableListOf<PlotSpec?>()
+        val fenced = Regex("(?s)```(?:json|JSON)?\\s*([\\s\\S]*?)```").findAll(reply).toList()
+        for (match in fenced) {
+            val root = parseJsonObject(match.groupValues[1].trim()) ?: continue
+            val parsed = parsePlots(root, warnings)
+            if (parsed.isNotEmpty()) {
+                found += parsed
+                cleaned = cleaned.replace(match.value, "")
+            }
+        }
+        // 也兼容没有围栏、前后带说明文字的裸 JSON。
+        if (found.isEmpty()) {
+            for (candidate in jsonCandidates(reply)) {
+                val root = parseJsonObject(candidate) ?: continue
+                val parsed = parsePlots(root, warnings)
+                if (parsed.isEmpty()) continue
+                found += parsed
+                val start = cleaned.indexOf(candidate)
+                if (start >= 0) cleaned = cleaned.removeRange(start, start + candidate.length)
+                break
+            }
+        }
+        return EmbeddedPlots(found, cleaned.trim())
     }
 
     private fun parsePlot(obj: JsonObject, warnings: MutableList<String>): PlotSpec {
@@ -490,6 +537,10 @@ object AssistantResponseParser {
                 // 带 LaTeX 定界符的写法（16 字符会把公式从中间截断，渲染出来是残缺的）
                 tick to text.take(24)
             }?.toMap().orEmpty(),
+            position = (obj["position"] as? JsonPrimitive)?.contentOrNull
+                ?.lowercase()
+                ?.takeIf { it in setOf("auto", "origin", "bottom") }
+                ?: "auto",
         )
     }
 

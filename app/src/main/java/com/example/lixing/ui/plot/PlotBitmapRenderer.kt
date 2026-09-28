@@ -422,7 +422,16 @@ class PlotBitmapRenderer(
         // x 轴横线：左右各伸出绘图区，伸出量为画布宽的比例。
         // 用外层绘图区（plotX..plotX+plotW）为基准而不是内缩矩形，
         // 这样「轴长度」与内缩比例解耦，调内缩不会连带动到轴长。
-        val axisY = drawY + drawH
+        // 默认让横轴穿过数学原点；非负谱/功率图的 y 范围以 0 为下界时，
+        // sy(0) 正好落在底边，视觉上仍保持传统的底部横轴。
+        // position=bottom 可用于明确要求底部布局的图，origin 在范围包含 0
+        // 时强制使用 y=0（范围不含 0 时安全退回底部）。
+        val zeroInsideY = yLo <= 0.0 && 0.0 <= yHi
+        val axisY = when (spec.x.position) {
+            "bottom" -> drawY + drawH
+            "origin", "auto" -> if (zeroInsideY) sy(0.0) else drawY + drawH
+            else -> if (zeroInsideY) sy(0.0) else drawY + drawH
+        }
         val axisLeft = plotX - width * AXIS_OVERHANG_L_RATIO
         val axisRight = plotX + plotW + width * AXIS_OVERHANG_R_RATIO
         canvas.drawLine(axisLeft, axisY, axisRight, axisY, linePaint)
@@ -437,7 +446,9 @@ class PlotBitmapRenderer(
         // 竖线顶端伸到绘图区之上（参考图里竖向轴线明显高过曲线顶端）
         // 延伸线只能占用绘图区内的留白，不能穿过标题/图例或把箭头画到画布外。
         val yAxisTop = maxOf(plotY, drawY - plotH * AXIS_VERT_OVERHANG_RATIO)
-        val yAxisBottom = axisY + height * AXIS_VERT_BELOW_RATIO
+        // 纵轴必须贯穿横轴下方的负半轴；横轴移到原点后不能仍只画到
+        // axisY 附近，否则 y<0 的数据会落在没有纵轴的半幅区域。
+        val yAxisBottom = drawY + drawH + height * AXIS_VERT_BELOW_RATIO
         canvas.drawLine(yAxisX, yAxisTop, yAxisX, yAxisBottom, linePaint)
 
         // 轴端箭头：替代原先的「小刻度」——箭头对「这是坐标轴」的表达比一小截刻度
@@ -496,7 +507,7 @@ class PlotBitmapRenderer(
                 canvas,
                 raw,
                 centerX,
-                min(drawY + drawH + height * 0.038f, tickBottomLimit),
+                min(axisY + height * 0.038f, tickBottomLimit),
                 tickSize,
                 theme.subText,
                 alignCenter = true,
@@ -594,7 +605,8 @@ class PlotBitmapRenderer(
             linePaint.strokeWidth = dp(MARK_LINE_STROKE_DP)
             linePaint.pathEffect = null
             val top = curveTop ?: drawY
-            canvas.drawLine(px, top, px, drawY + drawH, linePaint)
+            val bottom = axisY
+            canvas.drawLine(px, min(top, bottom), px, maxOf(top, bottom), linePaint)
             line.label?.let {
                 // 放进绘图区顶部：绘图区上方已经让给图例了，放外面会叠在一起。
                 // 夹在绘图区内，贴边的标记标签不会横穿到图片外面。
