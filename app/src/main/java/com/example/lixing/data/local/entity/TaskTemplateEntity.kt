@@ -65,6 +65,10 @@ data class TaskTemplateEntity(
     @ColumnInfo(name = "target_value")
     val targetValue: Int = 1,
 
+    /** Estimated time is independent of the completion target. Null means unknown. */
+    @ColumnInfo(name = "estimated_minutes")
+    val estimatedMinutes: Int? = null,
+
     @ColumnInfo(name = "repeat_rule")
     val repeatRule: RepeatRule = RepeatRule.DAILY,
 

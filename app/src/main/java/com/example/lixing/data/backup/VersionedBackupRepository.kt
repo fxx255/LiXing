@@ -281,8 +281,10 @@ class VersionedBackupRepository @Inject constructor(
         const val BEFORE_SYNC_KEEP = 3
         val FILE_STAMP: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss_SSS")
         val TABLES = listOf(
-            "study_plan", "phase", "subject", "time_slot", "task_template",
-            "daily_task", "day_record", "focus_session", "check_in_streak",
+            "study_plan", "phase", "subject", "time_slot", "task_template", "plan_day_policy", "plan_change_set",
+            "study_resource", "learning_goal", "learning_unit", "scheduled_task",
+            "daily_task", "task_content_progress", "manual_study_time", "plan_change_receipt",
+            "day_record", "focus_session", "check_in_streak",
             "point_ledger", "achievement", "user_profile", "commitment",
             "meal_record", "english_entry", "english_review_log",
             "assistant_conversation", "assistant_message",

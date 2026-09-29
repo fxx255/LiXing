@@ -12,6 +12,27 @@ import org.junit.Test
 class AssistantResponseParserTest {
 
     @Test
+    fun `dated planning parses a batch and rejects partial batches`() {
+        val valid = """{"reply":"未来两天的建议","plan_actions":[
+            {"kind":"ADD_DATED_TASK","date":"2026-09-30","subjectId":"math","timeSlotId":"am","title":"第 190-210 题","goalId":"goal-1","resourceId":"book-1","resourceName":"题册","questionFirst":190,"questionLast":210,"plannedMinutes":60,"reason":"按量推进"},
+            {"kind":"OVERRIDE_TEMPLATE_OCCURRENCE","date":"2026-10-01","subjectId":"math","timeSlotId":"am","sourceTemplateId":"math-daily","title":"第 2 章","plannedMinutes":45,"reason":"细化"}
+        ]}"""
+        val parsed = AssistantResponseParser.parse(valid)
+        assertEquals(2, parsed.actions.size)
+        assertTrue(parsed.actions.all { it is PlanAction.AddDatedTask })
+        assertEquals("2026-09-30", (parsed.actions.first() as PlanAction.AddDatedTask).date.toString())
+        assertEquals("goal-1", (parsed.actions.first() as PlanAction.AddDatedTask).goalId)
+        assertEquals("book-1", (parsed.actions.first() as PlanAction.AddDatedTask).resourceId)
+        assertTrue(parsed.rawPlanActionsJson != null)
+
+        val invalid = valid.replace("\"questionLast\":210", "\"questionLast\":189")
+        val rejected = AssistantResponseParser.parse(invalid)
+        assertTrue(rejected.actions.isEmpty())
+        assertTrue(rejected.rawPlanActionsJson == null)
+        assertTrue(rejected.warnings.any { it.contains("整批") })
+    }
+
+    @Test
     fun `plain text becomes reply without actions`() {
         val parsed = AssistantResponseParser.parse("先把数学放上午试试，不满意再调。")
         assertEquals("先把数学放上午试试，不满意再调。", parsed.reply)
@@ -194,6 +215,20 @@ class AssistantResponseParserTest {
                 "${'$'}${'$'}\nx^2=1\n${'$'}${'$'}",
             normalized,
         )
+    }
+
+    @Test
+    fun `duplicate latex command slashes are collapsed without eating row breaks`() {
+        val normalized = normalizeAssistantMarkdown(
+            """计算：$$ \\int_0^{2\\pi} \\cos^2\\theta \\,d\\theta \\cdot \\frac{\\pi}{4} $$""",
+        )
+        assertEquals(
+            """计算：$$ \int_0^{2\pi} \cos^2\theta \,d\theta \cdot \frac{\pi}{4} $$""",
+            normalized,
+        )
+
+        val aligned = """$$\begin{aligned}a &= b \\ c &= d\end{aligned}$$"""
+        assertEquals("真实的 aligned 行分隔符必须保留", aligned, normalizeAssistantMarkdown(aligned))
     }
 
     @Test

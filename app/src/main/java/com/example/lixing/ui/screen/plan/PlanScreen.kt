@@ -35,6 +35,7 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.lixing.ui.theme.LiXingRadius
 import com.example.lixing.ui.theme.LocalHeroGradient
+import com.example.lixing.ui.screen.plan.schedule.DailyScheduleSection
 import java.time.LocalDate
 import java.time.format.DateTimeFormatter
 
@@ -59,6 +60,8 @@ fun PlanScreen(
 
         if (state.hasPlan) {
             PlanOverview(state)
+
+            DailyScheduleSection()
 
             Button(
                 onClick = onOpenManage,

@@ -24,6 +24,10 @@ class AssistantModelClientTest {
     @Test
     fun `normalizes provider base urls to chat completions endpoint`() {
         assertEquals(
+            "http://127.0.0.1:8000/v1/chat/completions",
+            completionsUrl("http://127.0.0.1:8000/v1/"),
+        )
+        assertEquals(
             "https://api.deepseek.com/chat/completions",
             completionsUrl("https://api.deepseek.com"),
         )
@@ -43,6 +47,7 @@ class AssistantModelClientTest {
 
     @Test
     fun `normalizes provider urls to models endpoint`() {
+        assertEquals("http://127.0.0.1:8000/v1/models", modelsUrl("http://127.0.0.1:8000/v1"))
         assertEquals("https://api.openai.com/v1/models", modelsUrl("https://api.openai.com/v1/"))
         assertEquals(
             "https://api.openai.com/v1/models",

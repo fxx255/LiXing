@@ -64,6 +64,21 @@ fun StatsScreen(
         item { SectionTitle("科目投入（近 30 天）") }
         item { SubjectMinutesList(state) }
 
+        if (state.goalStats.isNotEmpty()) {
+            item { SectionTitle("学习内容进度") }
+            items(state.goalStats.size, key = { "goal-${state.goalStats[it].goalId}" }) { index ->
+                val goal = state.goalStats[index]
+                Column(Modifier.fillMaxWidth()) {
+                    Text(goal.title, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
+                    Text("已确认 ${goal.knownCompleted}${goal.targetCount?.let { "/$it" }.orEmpty()} 题" +
+                        (if (goal.quantityOnly > 0) " · 另有 ${goal.quantityOnly} 题仅报告数量" else "") +
+                        (goal.remainingCount?.let { " · 余 $it 题" } ?: ""),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+        }
+
         item { Spacer(Modifier.height(24.dp)) }
     }
 }
@@ -235,7 +250,7 @@ private fun SlotCompletionRow(slotName: String, rate: Float) {
 
 @Composable
 private fun SubjectMinutesList(state: StatsUiState) {
-    if (state.subjectMinutes.isEmpty()) {
+    if (state.subjectStats.isEmpty()) {
         Text(
             text = "还没有打卡记录",
             style = MaterialTheme.typography.bodyMedium,
@@ -244,21 +259,27 @@ private fun SubjectMinutesList(state: StatsUiState) {
         return
     }
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        state.subjectMinutes.sortedByDescending { it.minutes }.forEach { sm ->
-            Row(
-                Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
+        state.subjectStats.sortedByDescending { it.actualMinutes }.forEach { sm ->
+            Column(Modifier.fillMaxWidth()) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
                     text = sm.subjectName,
                     style = MaterialTheme.typography.bodyMedium,
                     modifier = Modifier.width(70.dp),
                 )
                 Text(
-                    text = formatMinutes(sm.minutes),
+                    text = "实际 ${formatMinutes(sm.actualMinutes)}",
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.Bold,
                     color = MaterialTheme.colorScheme.primary,
+                )
+                }
+                Text(
+                    text = "计划 ${formatMinutes(sm.plannedMinutes)}" +
+                        (if (sm.unestimatedTasks > 0) " · ${sm.unestimatedTasks} 项未估时" else "") +
+                        (if (sm.reportedCount > 0) " · 已报告 ${sm.reportedCount} 题" else ""),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
         }

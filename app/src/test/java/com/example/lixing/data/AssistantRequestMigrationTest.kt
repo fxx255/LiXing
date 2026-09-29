@@ -5,6 +5,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
 import androidx.sqlite.db.SupportSQLiteOpenHelper
 import androidx.sqlite.db.framework.FrameworkSQLiteOpenHelperFactory
 import com.example.lixing.data.local.Migrations
+import com.example.lixing.data.local.LiXingDatabase
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -143,10 +144,10 @@ class AssistantRequestMigrationTest {
     }
 
     @Test
-    fun `migration list is contiguous from 1 to 14 with no destructive fallback`() {
+    fun `migration list is contiguous through the current database version`() {
         val versions = Migrations.ALL.map { it.startVersion to it.endVersion }
-        assertEquals("迁移链必须从 1 连续到 14：$versions", 1, versions.first().first)
-        assertEquals("迁移链终点必须是 14", 14, versions.last().second)
+        assertEquals("迁移链必须从 1 开始：$versions", 1, versions.first().first)
+        assertEquals("迁移链终点必须是当前数据库版本", LiXingDatabase.VERSION, versions.last().second)
         versions.zipWithNext().forEach { (current, next) ->
             assertEquals("迁移链不能有断点：$versions", current.second, next.first)
         }

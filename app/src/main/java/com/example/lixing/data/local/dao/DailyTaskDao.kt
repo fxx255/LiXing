@@ -95,7 +95,7 @@ interface DailyTaskDao {
     /** 整天请假：把待做任务置为 SKIPPED（已完成的保留成绩）。 */
     @Query(
         """
-        UPDATE daily_task SET status = 'SKIPPED'
+        UPDATE daily_task SET status = 'SKIPPED', skip_reason = 'DAY_OFF'
         WHERE date = :date AND status IN ('PENDING', 'MISSED')
         """,
     )
@@ -104,8 +104,8 @@ interface DailyTaskDao {
     /** 取消整天请假：把 SKIPPED 恢复为 PENDING。 */
     @Query(
         """
-        UPDATE daily_task SET status = 'PENDING'
-        WHERE date = :date AND status = 'SKIPPED'
+        UPDATE daily_task SET status = 'PENDING', skip_reason = ''
+        WHERE date = :date AND status = 'SKIPPED' AND skip_reason IN ('', 'DAY_OFF')
         """,
     )
     suspend fun unmarkDaySkipped(date: LocalDate)
@@ -113,7 +113,7 @@ interface DailyTaskDao {
     /** 某时段请假。 */
     @Query(
         """
-        UPDATE daily_task SET status = 'SKIPPED'
+        UPDATE daily_task SET status = 'SKIPPED', skip_reason = 'SLOT_OFF'
         WHERE date = :date AND time_slot_id = :slotId AND status IN ('PENDING', 'MISSED')
         """,
     )
@@ -195,12 +195,15 @@ interface DailyTaskDao {
     @Query("DELETE FROM daily_task")
     suspend fun deleteAll()
 
-    /**
-     * 只删「某日及以后」的任务。换计划时用：未来的任务要按新模板重建，
-     * 但历史打卡（含详细记录与照片）必须原样保留。
-     */
-    @Query("DELETE FROM daily_task WHERE date >= :from")
-    suspend fun deleteFrom(from: LocalDate)
+    /** Remove only future projections that have no execution, photo, or manual record. */
+    @Query("""DELETE FROM daily_task WHERE date >= :from AND status = 'PENDING'
+        AND checked_at IS NULL AND actual_value = 0 AND focused_minutes = 0
+        AND is_late = 0 AND is_makeup = 0 AND makeup_reason IS NULL
+        AND checkin_note IS NULL AND checkin_photo IS NULL AND mood IS NULL AND reflection IS NULL
+        AND NOT EXISTS (SELECT 1 FROM focus_session f WHERE f.daily_task_id = daily_task.id)
+        AND NOT EXISTS (SELECT 1 FROM manual_study_time m WHERE m.daily_task_id = daily_task.id)
+        AND NOT EXISTS (SELECT 1 FROM task_content_progress p WHERE p.daily_task_id = daily_task.id)""")
+    suspend fun deleteUnstartedFrom(from: LocalDate)
 
     /** 供 Kotlin 手动去重用的全表查询。 */
     @Query("SELECT * FROM daily_task ORDER BY date, title, time_slot_id, actual_value DESC, id ASC")

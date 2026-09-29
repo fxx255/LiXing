@@ -161,10 +161,9 @@ class PlanRepository @Inject constructor(
         if (replaceExisting) {
             // 换计划 ≠ 抹掉过去。旧计划只停用不删除（历史任务靠快照字段仍可读，
             // 且物化只认 active 计划，旧模板不会再生成任务）；
-            // 只清掉「新计划生效日及以后」的任务与汇总，避免与新模板叠成重复项。
-            // startDate 之前的打卡记录、详细记录、照片、专注记录全部原样保留。
-            dailyTaskDao.deleteFrom(startDate)
-            dayRecordDao.deleteFrom(startDate)
+            // Only unstarted projections are disposable. A future task may already have
+            // a focus session, content progress or a photo; its execution must survive.
+            dailyTaskDao.deleteUnstartedFrom(startDate)
         }
 
         planDao.deactivateAllPlans()

@@ -4,7 +4,7 @@ import com.example.lixing.data.backup.DbCell
 import kotlinx.serialization.Serializable
 
 /** 同步协议版本。只有破坏性变更才 +1；两端不一致时拒绝同步而不是写坏数据。 */
-const val SYNC_FORMAT = 1
+const val SYNC_FORMAT = 2
 
 /** 每张表统一的同步列：Lamport 逻辑时钟。 */
 const val SYNC_CLOCK_COLUMN = "sync_modified_at"
@@ -47,6 +47,19 @@ data class SyncSnapshot(
     val deviceId: String,
     val clock: Long,
     val createdAtEpochMillis: Long,
+    val rows: List<SyncRow>,
+)
+
+/** One upload is one complete, checksummed transaction boundary in the incremental log. */
+@Serializable
+data class SyncDeltaBatch(
+    val format: Int = SYNC_FORMAT,
+    val databaseVersion: Int,
+    val deviceId: String,
+    val firstClock: Long,
+    val lastClock: Long,
+    val rowCount: Int,
+    val rowsSha256: String,
     val rows: List<SyncRow>,
 )
 

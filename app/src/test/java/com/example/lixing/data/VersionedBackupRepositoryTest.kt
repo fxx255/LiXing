@@ -10,6 +10,12 @@ import com.example.lixing.data.backup.TablePayload
 import com.example.lixing.data.backup.VersionedBackupRepository
 import com.example.lixing.data.local.LiXingDatabase
 import com.example.lixing.data.local.entity.StudyPlanEntity
+import com.example.lixing.data.local.entity.SubjectEntity
+import com.example.lixing.data.local.entity.TimeSlotEntity
+import com.example.lixing.data.local.entity.StudyResourceEntity
+import com.example.lixing.data.local.entity.LearningGoalEntity
+import com.example.lixing.data.local.entity.ScheduledTaskEntity
+import com.example.lixing.data.local.entity.PlanChangeReceiptEntity
 import com.example.lixing.data.local.entity.EnglishEntryEntity
 import com.example.lixing.data.local.entity.AssistantConversationEntity
 import com.example.lixing.data.repository.AssistantChatRepository
@@ -29,6 +35,7 @@ import org.robolectric.RuntimeEnvironment
 import org.robolectric.annotation.Config
 import java.io.File
 import java.time.LocalDate
+import java.time.LocalTime
 import java.time.Instant
 import java.util.zip.ZipFile
 import java.util.zip.ZipEntry
@@ -89,6 +96,39 @@ class VersionedBackupRepositoryTest {
         repository.restore(InspectedBackup(version.copy(path = importCopy.path), importCopy.path))
 
         assertEquals("跨设备计划", database.planDao().getActivePlan()?.name)
+    }
+
+    @Test
+    fun `version package restores dated plans and local application receipt`() = runTest {
+        val date = LocalDate.of(2026, 9, 30)
+        val plan = StudyPlanEntity(id = "plan", name = "每日安排", startDate = date,
+            targetDate = date.plusDays(30))
+        database.planDao().insertPlan(plan)
+        database.planDao().upsertSubject(SubjectEntity(id = "math", planId = plan.id,
+            name = "数学", colorArgb = 0xff3366ff.toInt()))
+        database.planDao().upsertTimeSlot(TimeSlotEntity(id = "morning", planId = plan.id,
+            name = "上午", startTime = LocalTime.of(8, 0), endTime = LocalTime.NOON))
+        val planning = database.planningDao()
+        planning.upsertResource(StudyResourceEntity(id = "book", planId = plan.id,
+            subjectId = "math", name = "题册"))
+        planning.upsertGoal(LearningGoalEntity(id = "goal", planId = plan.id, subjectId = "math",
+            resourceId = "book", title = "完成第 2 章"))
+        planning.upsertScheduledTask(ScheduledTaskEntity(id = "dated", planId = plan.id,
+            studyDate = date, subjectId = "math", timeSlotId = "morning", resourceId = "book",
+            goalId = "goal", title = "第 190–210 题", plannedMinutes = 60,
+            startTime = LocalTime.of(9, 0), endTime = LocalTime.of(10, 0)))
+        planning.insertChangeReceipt(PlanChangeReceiptEntity("batch", "digest", 123L))
+
+        val version = repository.createLocalVersion()
+        val copy = File(version.path).copyTo(File(version.path).resolveSibling(
+            "planning_restore_${System.nanoTime()}.lixingbackup"))
+        database.planDao().deleteAllPlans()
+        repository.restore(InspectedBackup(version.copy(path = copy.path), copy.path))
+
+        assertEquals("题册", planning.getResource("book")?.name)
+        assertEquals("book", planning.getGoal("goal")?.resourceId)
+        assertEquals(60, planning.getScheduledTask("dated")?.plannedMinutes)
+        assertEquals("digest", planning.getChangeReceipt("batch")?.operationsSha256)
     }
 
     @Test

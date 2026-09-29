@@ -17,6 +17,7 @@ import com.example.lixing.data.exporter.ExportRepository
 import com.example.lixing.data.prefs.UserPreferences
 import com.example.lixing.data.prefs.UserPreferencesRepository
 import com.example.lixing.data.sync.SyncRepository
+import com.example.lixing.data.local.dao.PlanningDao
 import com.example.lixing.data.update.AppUpdateController
 import com.example.lixing.domain.word.WordSource
 import com.example.lixing.domain.word.WordSourceException
@@ -38,6 +39,7 @@ class SettingsViewModel @Inject constructor(
     private val versionedBackupRepository: VersionedBackupRepository,
     private val baiduNetdiskRepository: BaiduNetdiskRepository,
     private val syncRepository: SyncRepository,
+    private val planningDao: PlanningDao,
     private val wordSource: WordSource,
     private val assistantModelClient: AssistantModelClient,
     private val aiCredentialStore: AiCredentialStore,
@@ -100,6 +102,7 @@ class SettingsViewModel @Inject constructor(
     val baiduAuthorizationUrl: String get() = baiduNetdiskRepository.authorizationUrl
 
     val syncState = syncRepository.state
+    val planningSyncConflicts = planningDao.observeSyncConflicts()
 
     /** 透传更新检查的实时状态（供设置页检查卡片观察）。 */
     val updateState: StateFlow<AppUpdateController.State> = appUpdateController.state

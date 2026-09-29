@@ -51,6 +51,7 @@ object TaskMaterializer {
                 id = java.util.UUID.nameUUIDFromBytes("lixing:daily:${date.toEpochDay()}:${template.id}".toByteArray(Charsets.UTF_8)).toString(),
                 date = date,
                 templateId = template.id,
+                planId = subject.planId,
                 subjectId = subject.id,
                 subjectName = subject.name,
                 subjectColorArgb = subject.colorArgb,
@@ -64,6 +65,9 @@ object TaskMaterializer {
                 taskType = template.taskType,
                 targetType = template.targetType,
                 targetValue = template.targetValue.coerceAtLeast(1),
+                plannedMinutes = template.estimatedMinutes ?: template.targetValue.takeIf {
+                    template.targetType == com.example.lixing.domain.model.TargetType.MINUTES
+                },
                 isKeystone = template.isKeystone,
                 note = template.note,
                 sortOrder = template.sortOrder,

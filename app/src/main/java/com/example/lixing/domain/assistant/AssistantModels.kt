@@ -62,6 +62,26 @@ data class AssistantUserProfile(
 sealed class PlanAction {
     abstract val reason: String
 
+    /** A dated addition or explicit override proposed for user review. */
+    data class AddDatedTask(
+        val ordinal: Int,
+        val date: java.time.LocalDate,
+        val subjectId: String,
+        val timeSlotId: String,
+        val sourceTemplateId: String?,
+        val title: String,
+        val resourceName: String = "",
+        val chapter: String = "",
+        val questionFirst: Int? = null,
+        val questionLast: Int? = null,
+        val plannedMinutes: Int? = null,
+        val startTime: LocalTime? = null,
+        val endTime: LocalTime? = null,
+        override val reason: String,
+        val goalId: String? = null,
+        val resourceId: String? = null,
+    ) : PlanAction()
+
     /**
      * 调整现有时段（任一字段为空表示不改）。
      * [requiredTaskCount]：该时段「至少完成几项」，0 表示全部都要完成。

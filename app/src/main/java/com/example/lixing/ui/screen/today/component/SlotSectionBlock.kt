@@ -20,6 +20,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.example.lixing.data.local.entity.DailyTaskEntity
+import com.example.lixing.data.local.entity.TaskContentProgressEntity
 import com.example.lixing.domain.time.SlotState
 import com.example.lixing.ui.screen.today.SlotSection
 import com.example.lixing.ui.theme.LiXingRadius
@@ -32,6 +33,7 @@ private val TIME_FMT = DateTimeFormatter.ofPattern("HH:mm")
 @Composable
 fun SlotSectionBlock(
     section: SlotSection,
+    progressByTask: Map<String, TaskContentProgressEntity> = emptyMap(),
     onCheckInClick: (DailyTaskEntity) -> Unit,
     onLongPress: (DailyTaskEntity) -> Unit,
     modifier: Modifier = Modifier,
@@ -43,6 +45,7 @@ fun SlotSectionBlock(
             section.tasks.forEach { task ->
                 TaskCard(
                     task = task,
+                    contentProgress = progressByTask[task.id],
                     isCurrentSlot = section.isCurrent,
                     onCheckInClick = { onCheckInClick(task) },
                     onLongPress = { onLongPress(task) },

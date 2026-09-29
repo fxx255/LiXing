@@ -573,6 +573,13 @@ fun AssistantScreen(
                     val messageIndex = state.messages.size - 1 - index
                     val streamingAnswer = index == 0 && state.busy && message.role == "assistant"
                     val displayContent = message.displayContent ?: message.content
+                    val planCount = if (state.pendingActionsOwnerIndex == messageIndex) state.pendingActions.size else 0
+                    val englishCount = if (state.pendingEnglishOwnerIndex == messageIndex) state.pendingEnglishActions.size else 0
+                    val planAppliedCount = if (state.pendingActionsOwnerIndex == messageIndex) {
+                        state.planReviewAppliedCount
+                    } else {
+                        0
+                    }
                     // The newest answer shares a stable list item with thinking, above its bubble.
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         if (index == 0 && state.busy) {
@@ -603,25 +610,26 @@ fun AssistantScreen(
                             !streamingAnswer || displayContent.isNotBlank() || message.imagePaths.isNotEmpty()
                         }
                         if (showBubble) {
-                            MessageBubble(
-                                role = message.role,
-                                content = displayContent,
-                                imagePaths = message.imagePaths,
-                                streaming = streamingAnswer,
-                                onImageClick = { paths, imageIndex -> photoViewer = PhotoViewerState(paths, imageIndex) },
-                            )
+                            // Review controls change this LazyColumn item's height during or
+                            // after the switch to saved Markdown. Give that layout a fresh
+                            // TextView so an old one-line measurement cannot be reused.
+                            key(message.id ?: messageIndex, streamingAnswer, planCount, englishCount, planAppliedCount) {
+                                MessageBubble(
+                                    role = message.role,
+                                    content = displayContent,
+                                    imagePaths = message.imagePaths,
+                                    streaming = streamingAnswer,
+                                    onImageClick = { paths, imageIndex -> photoViewer = PhotoViewerState(paths, imageIndex) },
+                                )
+                            }
                         }
                         if (message.role == "assistant" && !(index == 0 && state.busy)) {
                             AssistantMessageActionBar(
-                                planCount = if (state.pendingActionsOwnerIndex == messageIndex) state.pendingActions.size else 0,
-                                englishCount = if (state.pendingEnglishOwnerIndex == messageIndex) state.pendingEnglishActions.size else 0,
+                                planCount = planCount,
+                                englishCount = englishCount,
                                 onOpenPlan = viewModel::openPlanReview,
                                 onOpenEnglish = viewModel::openEnglishReview,
-                                planAppliedCount = if (state.pendingActionsOwnerIndex == messageIndex) {
-                                    state.planReviewAppliedCount
-                                } else {
-                                    0
-                                },
+                                planAppliedCount = planAppliedCount,
                             )
                         }
                     }

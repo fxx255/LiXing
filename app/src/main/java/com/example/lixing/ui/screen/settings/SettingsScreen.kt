@@ -550,6 +550,7 @@ private fun WebDavSyncSection(
     prefs: com.example.lixing.data.prefs.UserPreferences,
 ) {
     val state by viewModel.syncState.collectAsStateWithLifecycle()
+    val planningConflicts by viewModel.planningSyncConflicts.collectAsStateWithLifecycle(initialValue = emptyList())
     var url by remember { mutableStateOf("") }
     var account by remember { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
@@ -638,6 +639,18 @@ private fun WebDavSyncSection(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+            }
+
+            if (planningConflicts.isNotEmpty()) {
+                Text("待处理的规划同步冲突：${planningConflicts.size} 项",
+                    style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.error)
+                planningConflicts.take(4).forEach { conflict ->
+                    Text("设备 ${conflict.peerId} · ${conflict.summary}\n${conflict.reason}",
+                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                }
+                Text("本机安排和学习记录已保留。请在两台设备的每日计划中核对并调整这些安排，再点“立即同步”。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
 
             Text(
@@ -1352,7 +1365,8 @@ private fun AiProfileEditorDialog(
                     value = baseUrl,
                     onValueChange = { baseUrl = it; error = null; onModelsInvalidated() },
                     label = { Text("接口地址") },
-                    placeholder = { Text("如 https://api.deepseek.com") },
+                    placeholder = { Text("如 https://api.deepseek.com 或 http://192.168.1.2:8000/v1") },
+                    supportingText = { Text("支持 HTTP 本地服务；HTTP 请求和密钥会以明文传输。") },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
                 )

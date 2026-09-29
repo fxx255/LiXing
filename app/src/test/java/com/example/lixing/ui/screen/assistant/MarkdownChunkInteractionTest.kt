@@ -7,6 +7,7 @@ import android.text.style.ClickableSpan
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
+import android.widget.TextView
 import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Box
@@ -17,6 +18,8 @@ import androidx.compose.foundation.layout.requiredWidth
 import androidx.compose.foundation.layout.wrapContentWidth
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.ScrollState
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -24,9 +27,11 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.swipeLeft
 import androidx.compose.ui.unit.dp
@@ -72,6 +77,57 @@ class MarkdownChunkInteractionTest {
 
         以上就是全部数据。
     """.trimIndent()
+
+    private fun textViews(view: View): List<TextView> = when (view) {
+        is TextView -> listOf(view)
+        is ViewGroup -> (0 until view.childCount).flatMap { textViews(view.getChildAt(it)) }
+        else -> emptyList()
+    }
+
+    @Test
+    fun `saved answer keeps full height while English review button is shown`() {
+        val answer = (1..20).joinToString("\n") { "第 $it 行英语积累说明与完整回答。" }
+        lateinit var root: View
+        lateinit var showReview: () -> Unit
+        lateinit var finishReview: () -> Unit
+        var bubbleHeight = 0
+        compose.setContent {
+            root = LocalView.current
+            var streaming by remember { mutableStateOf(true) }
+            var englishCount by remember { mutableStateOf(0) }
+            showReview = { streaming = false; englishCount = 1 }
+            finishReview = { englishCount = 0 }
+            MaterialTheme {
+                LazyColumn(Modifier.requiredWidth(300.dp).height(500.dp), reverseLayout = true) {
+                    item(key = "answer") {
+                        Column {
+                            Box(Modifier.onGloballyPositioned { bubbleHeight = it.size.height }) {
+                                MessageBubble("assistant", answer, emptyList(), streaming) { _, _ -> }
+                            }
+                            AssistantMessageActionBar(0, englishCount, {}, {})
+                        }
+                    }
+                }
+            }
+        }
+        compose.waitForIdle()
+        compose.runOnIdle { showReview() }
+        compose.waitForIdle()
+        compose.onNodeWithText("📖 确认英语积累（1 条）").assertExists()
+        compose.runOnIdle {
+            val body = textViews(root.rootView).single { it.text.toString().contains("第 20 行英语积累说明") }
+            assertTrue("确认按钮出现时正文仍须完整", body.text.toString().contains("第 1 行英语积累说明"))
+            assertTrue("确认按钮出现时正文须有完整高度", bubbleHeight >= body.layout.height)
+        }
+        compose.runOnIdle { finishReview() }
+        compose.waitForIdle()
+        compose.onNodeWithText("📖 确认英语积累（1 条）").assertDoesNotExist()
+        compose.runOnIdle {
+            val body = textViews(root.rootView).single { it.text.toString().contains("第 20 行英语积累说明") }
+            assertTrue("确认结束后正文仍须完整", body.text.toString().contains("第 1 行英语积累说明"))
+            assertTrue(bubbleHeight >= body.layout.height)
+        }
+    }
 
     @Test
     fun `stale first character is redrawn from the complete answer`() {

@@ -8,6 +8,7 @@ import com.example.lixing.domain.english.EnglishEntryType
 import com.example.lixing.domain.model.*
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.flow.first
 import kotlinx.serialization.json.Json
 import org.junit.After
 import org.junit.Assert.*
@@ -19,6 +20,9 @@ import org.robolectric.RuntimeEnvironment
 import org.robolectric.annotation.Config
 import java.time.LocalDate
 import java.time.LocalTime
+import java.security.MessageDigest
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.decodeFromString
 
 @RunWith(RobolectricTestRunner::class)
 @Config(application = android.app.Application::class)
@@ -116,15 +120,38 @@ class SyncRegressionTest {
         a.sync()
         val logName = SyncFiles.log("A")
         val log = cloud.files.getValue(logName)
-        val rows = log.lineSequence().filter { it.isNotBlank() }.map { json.decodeFromString<SyncRow>(it) }.toList()
-        cloud.files[logName] = rows.filter { it.table != "assistant_conversation" }
-            .joinToString("\n") { json.encodeToString(SyncRow.serializer(), it) }
+        val batch = json.decodeFromString<SyncDeltaBatch>(log.trim())
+        val rows = batch.rows.filter { it.table != "assistant_conversation" }
+        val digest = MessageDigest.getInstance("SHA-256")
+            .digest(json.encodeToString(rows).toByteArray(Charsets.UTF_8))
+            .joinToString("") { "%02x".format(it) }
+        cloud.files[logName] = json.encodeToString(batch.copy(
+            rowCount = rows.size, rowsSha256 = digest, rows = rows))
         val cursor = b.store.cursors()["A"]
         assertFalse(b.sync().isSuccess)
         assertEquals("failed rows must remain pending", cursor, b.store.cursors()["A"])
         cloud.files[logName] = log
         assertTrue(b.sync().isSuccess)
         assertEquals("question", b.db.assistantChatDao().getMessages("conv").single().content)
+    }
+
+    @Test fun `truncated incremental batch does not apply its valid prefix`() = runTest {
+        val a = Device("A"); val b = Device("B")
+        a.db.englishEntryDao().upsert(word())
+        a.sync(); b.sync()
+        a.db.assistantChatDao().insertConversation(AssistantConversationEntity(id = "conv", title = "题目"))
+        a.db.assistantChatDao().insertMessage(AssistantMessageEntity(id = "msg", conversationId = "conv", role = "user", content = "question"))
+        a.sync()
+        val logName = SyncFiles.log("A")
+        val full = cloud.files.getValue(logName)
+        cloud.files[logName] = full.dropLast(30)
+        val cursor = b.store.cursors()["A"]
+        assertFalse(b.sync().isSuccess)
+        assertEquals(cursor, b.store.cursors()["A"])
+        assertNull(b.db.assistantChatDao().getConversation("conv"))
+        cloud.files[logName] = full
+        val recovered = b.sync()
+        assertTrue(recovered.errors.joinToString(), recovered.isSuccess)
     }
 
     @Test fun `third device forwarding an equal clock never changes the winner`() = runTest {
@@ -136,6 +163,29 @@ class SyncRegressionTest {
         assertEquals("B wins", a.word().meaning)
         assertEquals(a.word().meaning, b.word().meaning)
         assertEquals(a.word().meaning, c.word().meaning)
+    }
+
+    @Test fun `concurrent dated edits retain both local candidates and report conflict`() = runTest {
+        val a = Device("A"); val b = Device("B")
+        seedPlan(a.db)
+        val base = ScheduledTaskEntity(id = "dated", planId = "plan", studyDate = DATE,
+            subjectId = "subject", timeSlotId = "slot", title = "初稿")
+        a.db.planningDao().upsertScheduledTask(base)
+        assertTrue(a.sync().isSuccess)
+        assertTrue(b.sync().isSuccess)
+        a.db.planningDao().upsertScheduledTask(base.copy(title = "甲修改", revision = 2))
+        b.db.planningDao().upsertScheduledTask(base.copy(title = "乙修改", revision = 2))
+        assertTrue(a.sync().isSuccess)
+        val cursor = b.store.cursors()["A"]
+        val report = b.sync()
+        assertFalse(report.isSuccess)
+        assertEquals(cursor, b.store.cursors()["A"])
+        assertEquals("乙修改", b.db.planningDao().getScheduledTask("dated")?.title)
+        assertEquals(1, b.db.planningDao().observeSyncConflicts().first().size)
+        b.db.planningDao().upsertScheduledTask(base.copy(title = "甲修改", revision = 3))
+        val retried = b.sync()
+        assertTrue(retried.errors.joinToString(), retried.isSuccess)
+        assertTrue(b.db.planningDao().observeSyncConflicts().first().isEmpty())
     }
 
     @Test fun `independently created daily tasks merge checkins instead of colliding`() = runTest {

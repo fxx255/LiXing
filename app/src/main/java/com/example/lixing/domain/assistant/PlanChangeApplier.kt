@@ -4,9 +4,18 @@ import com.example.lixing.data.local.entity.TaskTemplateEntity
 import com.example.lixing.data.local.entity.TimeSlotEntity
 import com.example.lixing.data.repository.PlanRepository
 import com.example.lixing.data.repository.TaskRepository
+import com.example.lixing.data.repository.PlanningRepository
+import com.example.lixing.data.local.entity.ScheduledTaskEntity
 import com.example.lixing.domain.model.TaskStatus
+import com.example.lixing.domain.model.TargetType
+import com.example.lixing.domain.model.TaskType
+import com.example.lixing.domain.planning.ContentInterval
+import com.example.lixing.domain.planning.ContentSelection
+import com.example.lixing.domain.planning.ContentSelectionCodec
+import com.example.lixing.domain.time.SlotWindow
 import kotlinx.coroutines.CancellationException
 import java.time.LocalDate
+import java.util.UUID
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -42,6 +51,7 @@ data class PlanApplyResult(
 open class PlanChangeApplier @Inject constructor(
     private val planRepository: PlanRepository,
     private val taskRepository: TaskRepository,
+    private val planningRepository: PlanningRepository? = null,
 ) {
 
     suspend fun apply(
@@ -84,6 +94,71 @@ open class PlanChangeApplier @Inject constructor(
         is PlanAction.SkipTodayTask -> applySkipTodayTask(action, today)
         is PlanAction.TakeTodayOff -> applyTakeTodayOff(action, today, dayOffLimit)
         is PlanAction.KeepTodayTasks -> applyKeepTodayTasks(action, today)
+        is PlanAction.AddDatedTask -> applyDatedTask(action)
+    }
+
+    private suspend fun applyDatedTask(action: PlanAction.AddDatedTask): PlanApplyResult {
+        val planning = planningRepository ?: return fail(action, "按日规划服务不可用")
+        val plan = planRepository.getActivePlan() ?: return fail(action, "当前没有学习计划")
+        val goal = action.goalId?.let { id -> planning.getGoals(plan.id).firstOrNull { it.id == id } }
+        if (action.goalId != null && (goal == null || goal.subjectId != action.subjectId)) {
+            return fail(action, "学习目标不存在或不属于该科目")
+        }
+        val resourceId = action.resourceId ?: goal?.resourceId
+        val resource = resourceId?.let { id -> planning.getResources(plan.id).firstOrNull { it.id == id } }
+        if (resourceId != null && (resource == null || resource.subjectId != action.subjectId)) {
+            return fail(action, "学习资料不存在或不属于该科目")
+        }
+        if (goal?.resourceId != null && resource?.id != goal.resourceId) {
+            return fail(action, "资料与学习目标不一致")
+        }
+        if (resource != null && action.resourceName.isNotBlank() && action.resourceName != resource.name) {
+            return fail(action, "资料名称与所选资料 id 不一致")
+        }
+        val content = if (action.resourceName.isNotBlank() || action.chapter.isNotBlank() ||
+            action.questionFirst != null || resource != null) ContentSelection(
+            resourceName = resource?.name ?: action.resourceName,
+            edition = resource?.edition.orEmpty(), chapter = action.chapter,
+            kind = if (action.questionFirst == null) "UNIT" else "QUESTION",
+            intervals = if (action.questionFirst == null) emptyList() else
+                listOf(ContentInterval(action.questionFirst, requireNotNull(action.questionLast))),
+            roundKey = goal?.roundKey ?: "FIRST",
+        ) else null
+        val id = if (action.sourceTemplateId != null) {
+            UUID.nameUUIDFromBytes("lixing:override:${plan.id}:${action.date}:${action.sourceTemplateId}"
+                .toByteArray()).toString()
+        } else {
+            UUID.nameUUIDFromBytes("lixing:ai-dated:${plan.id}:${action.date}:${action.ordinal}:$action"
+                .toByteArray()).toString()
+        }
+        if (planning.getSchedules(plan.id, action.date, action.date).any { it.id == id &&
+                it.state in setOf("ACTIVE", "OVERRIDE") }) {
+            return fail(action, "该日期安排已存在，请重新生成方案")
+        }
+        val minutes = action.plannedMinutes ?: if (action.startTime != null && action.endTime != null) {
+            SlotWindow.of(action.date, action.startTime, action.endTime).duration.toMinutes().toInt()
+        } else null
+        val entry = ScheduledTaskEntity(
+            id = id, planId = plan.id, studyDate = action.date,
+            sourceTemplateId = action.sourceTemplateId,
+            subjectId = action.subjectId, timeSlotId = action.timeSlotId,
+            resourceId = resource?.id, goalId = goal?.id, roundKey = goal?.roundKey ?: "FIRST",
+            title = action.title,
+            taskType = if (action.questionFirst == null) TaskType.CUSTOM else TaskType.PRACTICE,
+            targetType = if (action.questionFirst == null) TargetType.BOOLEAN else TargetType.COUNT,
+            targetValue = content?.quantity()?.takeIf { action.questionFirst != null } ?: 1,
+            contentJson = content?.let(ContentSelectionCodec::encode).orEmpty(),
+            plannedMinutes = minutes, startTime = action.startTime, endTime = action.endTime,
+            state = if (action.sourceTemplateId == null) "ACTIVE" else "OVERRIDE",
+        )
+        return try {
+            planning.saveSchedule(entry, recordManualChange = false)
+            ok(action, "已安排 ${action.date}「${action.title}」")
+        } catch (error: IllegalArgumentException) {
+            fail(action, error.message ?: "日期安排无效")
+        } catch (error: IllegalStateException) {
+            fail(action, error.message ?: "日期安排冲突")
+        }
     }
 
     private suspend fun applyUpdateTimeSlot(action: PlanAction.UpdateTimeSlot): PlanApplyResult {

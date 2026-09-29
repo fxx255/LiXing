@@ -658,6 +658,62 @@ INSERT INTO `user_profile` (`id`, `nickname`, `total_points`, `level`, `title`, 
         }
     }
 
+    /** v14 → v15: optional dated content and execution detail, retaining every legacy row. */
+    private val MIGRATION_14_15 = object : Migration(14, 15) {
+        override fun migrate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
+            db.execSQL("ALTER TABLE `task_template` ADD COLUMN `estimated_minutes` INTEGER")
+            db.execSQL("ALTER TABLE `daily_task` ADD COLUMN `plan_id` TEXT")
+            db.execSQL("ALTER TABLE `daily_task` ADD COLUMN `schedule_id` TEXT")
+            db.execSQL("ALTER TABLE `daily_task` ADD COLUMN `planned_minutes` INTEGER")
+            db.execSQL("ALTER TABLE `daily_task` ADD COLUMN `content_json` TEXT NOT NULL DEFAULT ''")
+            db.execSQL("ALTER TABLE `daily_task` ADD COLUMN `scheduled_start` INTEGER")
+            db.execSQL("ALTER TABLE `daily_task` ADD COLUMN `scheduled_end` INTEGER")
+            db.execSQL("ALTER TABLE `daily_task` ADD COLUMN `baseline_minutes` INTEGER")
+            db.execSQL("ALTER TABLE `daily_task` ADD COLUMN `baseline_value` INTEGER")
+            db.execSQL("ALTER TABLE `daily_task` ADD COLUMN `skip_reason` TEXT NOT NULL DEFAULT ''")
+            db.execSQL("ALTER TABLE `daily_task` ADD COLUMN `time_accounting_version` INTEGER NOT NULL DEFAULT 1")
+            db.execSQL("ALTER TABLE `focus_session` ADD COLUMN `time_accounting_version` INTEGER NOT NULL DEFAULT 1")
+            db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS `index_daily_task_schedule_id` ON `daily_task`(`schedule_id`)")
+
+            db.execSQL("""CREATE TABLE IF NOT EXISTS `study_resource` (`id` TEXT NOT NULL, `plan_id` TEXT NOT NULL, `subject_id` TEXT NOT NULL, `name` TEXT NOT NULL, `edition` TEXT NOT NULL, `kind` TEXT NOT NULL, `is_archived` INTEGER NOT NULL, `sync_modified_at` INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(`id`), FOREIGN KEY(`plan_id`) REFERENCES `study_plan`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE)""")
+            db.execSQL("CREATE INDEX IF NOT EXISTS `index_study_resource_plan_id` ON `study_resource`(`plan_id`)")
+            db.execSQL("CREATE INDEX IF NOT EXISTS `index_study_resource_subject_id` ON `study_resource`(`subject_id`)")
+
+            db.execSQL("""CREATE TABLE IF NOT EXISTS `learning_goal` (`id` TEXT NOT NULL, `plan_id` TEXT NOT NULL, `subject_id` TEXT NOT NULL, `resource_id` TEXT, `title` TEXT NOT NULL, `scope_json` TEXT NOT NULL, `initial_progress_json` TEXT NOT NULL, `start_date` INTEGER, `due_date` INTEGER, `round_key` TEXT NOT NULL, `activity_type` TEXT NOT NULL, `priority` INTEGER NOT NULL, `sync_modified_at` INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(`id`), FOREIGN KEY(`plan_id`) REFERENCES `study_plan`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE)""")
+            db.execSQL("CREATE INDEX IF NOT EXISTS `index_learning_goal_plan_id` ON `learning_goal`(`plan_id`)")
+            db.execSQL("CREATE INDEX IF NOT EXISTS `index_learning_goal_subject_id` ON `learning_goal`(`subject_id`)")
+            db.execSQL("CREATE INDEX IF NOT EXISTS `index_learning_goal_resource_id` ON `learning_goal`(`resource_id`)")
+
+            db.execSQL("""CREATE TABLE IF NOT EXISTS `learning_unit` (`id` TEXT NOT NULL, `resource_id` TEXT NOT NULL, `parent_id` TEXT, `title` TEXT NOT NULL, `kind` TEXT NOT NULL, `sort_order` INTEGER NOT NULL, `range_start` INTEGER, `range_end` INTEGER, `numbering_scope` TEXT NOT NULL, `estimated_minutes` INTEGER, `sync_modified_at` INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(`id`), FOREIGN KEY(`resource_id`) REFERENCES `study_resource`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE)""")
+            db.execSQL("CREATE INDEX IF NOT EXISTS `index_learning_unit_resource_id` ON `learning_unit`(`resource_id`)")
+            db.execSQL("CREATE INDEX IF NOT EXISTS `index_learning_unit_parent_id` ON `learning_unit`(`parent_id`)")
+
+            db.execSQL("""CREATE TABLE IF NOT EXISTS `scheduled_task` (`id` TEXT NOT NULL, `plan_id` TEXT NOT NULL, `study_date` INTEGER NOT NULL, `source_template_id` TEXT, `subject_id` TEXT NOT NULL, `time_slot_id` TEXT NOT NULL, `resource_id` TEXT, `goal_id` TEXT, `round_key` TEXT NOT NULL, `title` TEXT NOT NULL, `task_type` TEXT NOT NULL, `target_type` TEXT NOT NULL, `target_value` INTEGER NOT NULL, `content_json` TEXT NOT NULL, `planned_minutes` INTEGER, `start_time` INTEGER, `end_time` INTEGER, `state` TEXT NOT NULL, `is_locked` INTEGER NOT NULL, `baseline_minutes` INTEGER, `baseline_value` INTEGER, `note` TEXT NOT NULL, `revision` INTEGER NOT NULL, `created_at` INTEGER NOT NULL, `sync_modified_at` INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(`id`), FOREIGN KEY(`plan_id`) REFERENCES `study_plan`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE)""")
+            db.execSQL("CREATE INDEX IF NOT EXISTS `index_scheduled_task_plan_id` ON `scheduled_task`(`plan_id`)")
+            db.execSQL("CREATE INDEX IF NOT EXISTS `index_scheduled_task_study_date` ON `scheduled_task`(`study_date`)")
+            db.execSQL("CREATE INDEX IF NOT EXISTS `index_scheduled_task_subject_id` ON `scheduled_task`(`subject_id`)")
+            db.execSQL("CREATE INDEX IF NOT EXISTS `index_scheduled_task_resource_id` ON `scheduled_task`(`resource_id`)")
+            db.execSQL("CREATE INDEX IF NOT EXISTS `index_scheduled_task_goal_id` ON `scheduled_task`(`goal_id`)")
+            db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS `index_scheduled_task_plan_id_study_date_source_template_id` ON `scheduled_task`(`plan_id`, `study_date`, `source_template_id`)")
+
+            db.execSQL("""CREATE TABLE IF NOT EXISTS `task_content_progress` (`id` TEXT NOT NULL, `daily_task_id` TEXT NOT NULL, `goal_id` TEXT, `resource_id` TEXT, `round_key` TEXT NOT NULL, `mode` TEXT NOT NULL, `completed_json` TEXT NOT NULL, `quantity` INTEGER NOT NULL, `supersedes_id` TEXT, `recorded_at` INTEGER NOT NULL, `sync_modified_at` INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(`id`), FOREIGN KEY(`daily_task_id`) REFERENCES `daily_task`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE)""")
+            db.execSQL("CREATE INDEX IF NOT EXISTS `index_task_content_progress_daily_task_id` ON `task_content_progress`(`daily_task_id`)")
+            db.execSQL("CREATE INDEX IF NOT EXISTS `index_task_content_progress_goal_id` ON `task_content_progress`(`goal_id`)")
+            db.execSQL("CREATE INDEX IF NOT EXISTS `index_task_content_progress_supersedes_id` ON `task_content_progress`(`supersedes_id`)")
+
+            db.execSQL("""CREATE TABLE IF NOT EXISTS `manual_study_time` (`id` TEXT NOT NULL, `daily_task_id` TEXT, `plan_id` TEXT, `subject_id` TEXT, `subject_name` TEXT NOT NULL, `study_date` INTEGER NOT NULL, `minutes` INTEGER NOT NULL, `counts_toward_task` INTEGER NOT NULL, `supersedes_id` TEXT, `recorded_at` INTEGER NOT NULL, `sync_modified_at` INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(`id`))""")
+            db.execSQL("CREATE INDEX IF NOT EXISTS `index_manual_study_time_daily_task_id` ON `manual_study_time`(`daily_task_id`)")
+            db.execSQL("CREATE INDEX IF NOT EXISTS `index_manual_study_time_subject_id` ON `manual_study_time`(`subject_id`)")
+            db.execSQL("CREATE INDEX IF NOT EXISTS `index_manual_study_time_study_date` ON `manual_study_time`(`study_date`)")
+            db.execSQL("""CREATE TABLE IF NOT EXISTS `plan_day_policy` (`id` TEXT NOT NULL, `plan_id` TEXT NOT NULL, `study_date` INTEGER NOT NULL, `windows_json` TEXT NOT NULL, `max_planned_minutes` INTEGER, `is_locked` INTEGER NOT NULL, `reason` TEXT NOT NULL, `revision` INTEGER NOT NULL, `sync_modified_at` INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(`id`), FOREIGN KEY(`plan_id`) REFERENCES `study_plan`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE)""")
+            db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS `index_plan_day_policy_plan_id_study_date` ON `plan_day_policy`(`plan_id`, `study_date`)")
+            db.execSQL("""CREATE TABLE IF NOT EXISTS `plan_change_set` (`id` TEXT NOT NULL, `plan_id` TEXT NOT NULL, `source` TEXT NOT NULL, `actions_json` TEXT NOT NULL, `selected_json` TEXT NOT NULL, `base_fingerprint` TEXT NOT NULL, `after_fingerprint` TEXT NOT NULL, `applied_at` INTEGER NOT NULL, `sync_modified_at` INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(`id`), FOREIGN KEY(`plan_id`) REFERENCES `study_plan`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE)""")
+            db.execSQL("CREATE INDEX IF NOT EXISTS `index_plan_change_set_plan_id` ON `plan_change_set`(`plan_id`)")
+            db.execSQL("""CREATE TABLE IF NOT EXISTS `plan_change_receipt` (`id` TEXT NOT NULL, `operations_sha256` TEXT NOT NULL, `applied_at` INTEGER NOT NULL, PRIMARY KEY(`id`))""")
+            db.execSQL("""CREATE TABLE IF NOT EXISTS `planning_sync_conflict` (`id` TEXT NOT NULL, `peer_id` TEXT NOT NULL, `reason` TEXT NOT NULL, `summary` TEXT NOT NULL, `rows_json` TEXT NOT NULL, `detected_at` INTEGER NOT NULL, `resolved_at` INTEGER, PRIMARY KEY(`id`))""")
+        }
+    }
+
     val ALL: Array<Migration> = arrayOf(
         MIGRATION_1_2,
         MIGRATION_2_3,
@@ -672,5 +728,6 @@ INSERT INTO `user_profile` (`id`, `nickname`, `total_points`, `level`, `title`, 
         MIGRATION_11_12,
         MIGRATION_12_13,
         MIGRATION_13_14,
+        MIGRATION_14_15,
     )
 }

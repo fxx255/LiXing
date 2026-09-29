@@ -6,6 +6,7 @@ import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import java.security.MessageDigest
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -84,7 +85,8 @@ class SyncEngine @Inject constructor(
                         continue
                     }
                     if (!hasBaseline || snapshot.clock > cursor) {
-                        val outcome = store.applyRemote(if (hasBaseline) snapshot.rows.filter { it.clock > cursor } else snapshot.rows, peer, localDeviceId)
+                        val outcome = applyPeerRows(if (hasBaseline) snapshot.rows.filter { it.clock > cursor } else snapshot.rows,
+                            peer, localDeviceId)
                         appliedRows += outcome.appliedRows
                         appliedTombstones += outcome.appliedTombstones
                         skippedRows += outcome.skippedRows
@@ -99,11 +101,12 @@ class SyncEngine @Inject constructor(
                         val text = transport.read(logName).orEmpty()
                         downloadedBytes += text.toByteArray(Charsets.UTF_8).size
                         val parseErrors = mutableListOf<String>()
-                        val rows = parseLog(text, parseErrors)
+                        val rows = parseLog(text, peer, parseErrors)
                         errors += parseErrors
+                        if (parseErrors.isNotEmpty()) continue
                         val pending = rows.filter { it.clock > cursor }
                         if (pending.isNotEmpty()) {
-                            val outcome = store.applyRemote(pending, peer, localDeviceId)
+                            val outcome = applyPeerRows(pending, peer, localDeviceId)
                             appliedRows += outcome.appliedRows
                             appliedTombstones += outcome.appliedTombstones
                             skippedRows += outcome.skippedRows
@@ -111,13 +114,13 @@ class SyncEngine @Inject constructor(
                             if (outcome.errors.isNotEmpty()) continue
                             cursor = maxOf(cursor, pending.maxOf { it.clock })
                         }
-                        if (parseErrors.isNotEmpty()) continue
                     }
 
                     if (cursor != (cursors[peer] ?: 0L)) {
                         store.saveCursor(peer, cursor)
                         cursors[peer] = cursor
                     }
+                    store.resolvePlanningConflicts(peer)
                 } catch (e: Exception) {
                     if (e is kotlinx.coroutines.CancellationException) throw e
                     errors += "$peer 同步未完成：${e.safeMessage()}"
@@ -158,7 +161,15 @@ class SyncEngine @Inject constructor(
                 }
                 snapshotWritten = true
             } else if (changes.isNotEmpty()) {
-                val lines = changes.map { json.encodeToString(it) }
+                val lines = listOf(json.encodeToString(SyncDeltaBatch(
+                    databaseVersion = LiXingDatabase.VERSION,
+                    deviceId = localDeviceId,
+                    firstClock = changes.minOf { it.clock },
+                    lastClock = changes.maxOf { it.clock },
+                    rowCount = changes.size,
+                    rowsSha256 = rowsDigest(changes),
+                    rows = changes,
+                )))
                 transport.append(ownLogName, lines)
                 uploadedBytes += lines.sumOf { it.toByteArray(Charsets.UTF_8).size }
             }
@@ -182,16 +193,38 @@ class SyncEngine @Inject constructor(
             )
         }
 
-    private fun parseLog(text: String, errors: MutableList<String>): List<SyncRow> =
+    private fun parseLog(text: String, peer: String, errors: MutableList<String>): List<SyncRow> =
         text.lineSequence()
             .map { it.trim() }
             .filter { it.isNotEmpty() }
             .mapNotNull { line ->
-                runCatching { json.decodeFromString<SyncRow>(line) }
-                    .onFailure { errors += "跳过无法解析的日志行：${it.safeMessage()}" }
+                runCatching {
+                    val batch = json.decodeFromString<SyncDeltaBatch>(line)
+                    require(batch.format == SYNC_FORMAT && batch.databaseVersion == LiXingDatabase.VERSION) {
+                        "增量协议或数据库版本不同"
+                    }
+                    require(batch.deviceId == peer && batch.rows.size == batch.rowCount &&
+                        batch.rows.all { it.clock in batch.firstClock..batch.lastClock } &&
+                        rowsDigest(batch.rows) == batch.rowsSha256) { "增量批次不完整或内容摘要不符" }
+                    batch.rows
+                }
+                    .onFailure { errors += "增量批次无法解析或校验：${it.safeMessage()}" }
                     .getOrNull()
             }
+            .flatten()
             .toList()
+
+    private fun rowsDigest(rows: List<SyncRow>): String =
+        MessageDigest.getInstance("SHA-256").digest(json.encodeToString(rows).toByteArray(Charsets.UTF_8))
+            .joinToString("") { "%02x".format(it) }
+
+    private suspend fun applyPeerRows(rows: List<SyncRow>, peer: String, localDeviceId: String): ApplyOutcome =
+        try { store.applyRemote(rows, peer, localDeviceId) }
+        catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
+        catch (error: Exception) {
+            store.recordPlanningConflict(peer, rows, error.safeMessage())
+            throw error
+        }
 
     private fun Throwable.safeMessage(): String =
         message?.take(120)?.takeIf { it.isNotBlank() } ?: this::class.java.simpleName

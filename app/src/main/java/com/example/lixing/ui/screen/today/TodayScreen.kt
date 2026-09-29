@@ -39,6 +39,10 @@ fun TodayScreen(
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     val checkInTarget by viewModel.checkInTarget.collectAsStateWithLifecycle()
+    val contentProgress by viewModel.contentProgress.collectAsStateWithLifecycle()
+    val currentProgress by viewModel.currentProgress.collectAsStateWithLifecycle()
+    val manualMinutes by viewModel.manualMinutes.collectAsStateWithLifecycle()
+    val manualTimeError by viewModel.manualTimeError.collectAsStateWithLifecycle()
     val events by viewModel.events.collectAsStateWithLifecycle()
 
     if (state.isLoading) {
@@ -103,6 +107,7 @@ fun TodayScreen(
             ) { section ->
                 SlotSectionBlock(
                     section = section,
+                    progressByTask = currentProgress,
                     onCheckInClick = { viewModel.onCheckInClick(it) },
                     onLongPress = { viewModel.onTaskLongPress(it) },
                 )
@@ -124,8 +129,14 @@ fun TodayScreen(
     checkInTarget?.let { task ->
         CheckInDialog(
             task = task,
+            previousProgress = contentProgress,
+            manualMinutes = manualMinutes,
+            manualTimeError = manualTimeError,
             onDismiss = { viewModel.dismissCheckIn() },
-            onSubmit = { value, note, photo -> viewModel.submitCheckIn(task.id, value, note, photo) },
+            onSubmit = { value, note, photo, progress ->
+                viewModel.submitCheckIn(task.id, value, note, photo, progress)
+            },
+            onSaveManualMinutes = { viewModel.saveManualMinutes(task.id, it) },
             onRevoke = { viewModel.revokeCheckIn(task.id) },
         )
     }

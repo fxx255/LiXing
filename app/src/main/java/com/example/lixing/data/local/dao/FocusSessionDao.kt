@@ -11,6 +11,9 @@ import java.time.LocalDate
 /** 专注记录读写。 */
 @Dao
 interface FocusSessionDao {
+    /** Any session, including a just-started one, protects a task from schedule replacement. */
+    @Query("SELECT COUNT(*) FROM focus_session WHERE daily_task_id = :taskId")
+    suspend fun countForTask(taskId: String): Int
 
     /** 进行中的会话（ended_at 为空）。进程被杀后恢复计时状态靠它。 */
     @Query("SELECT * FROM focus_session WHERE ended_at IS NULL ORDER BY started_at DESC LIMIT 1")
@@ -27,6 +30,9 @@ interface FocusSessionDao {
 
     @Query("SELECT * FROM focus_session WHERE date BETWEEN :from AND :to ORDER BY started_at")
     suspend fun getSessionsBetween(from: LocalDate, to: LocalDate): List<FocusSessionEntity>
+
+    @Query("SELECT * FROM focus_session WHERE date BETWEEN :from AND :to ORDER BY started_at")
+    fun observeSessionsBetween(from: LocalDate, to: LocalDate): Flow<List<FocusSessionEntity>>
 
     @Query(
         """

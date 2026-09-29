@@ -28,6 +28,17 @@ import com.example.lixing.data.local.entity.TaskTemplateEntity
 import com.example.lixing.data.local.entity.TimeSlotEntity
 import com.example.lixing.data.local.entity.UserProfileEntity
 import com.example.lixing.data.local.entity.MealRecordEntity
+import com.example.lixing.data.local.entity.StudyResourceEntity
+import com.example.lixing.data.local.entity.LearningGoalEntity
+import com.example.lixing.data.local.entity.LearningUnitEntity
+import com.example.lixing.data.local.entity.ScheduledTaskEntity
+import com.example.lixing.data.local.entity.TaskContentProgressEntity
+import com.example.lixing.data.local.entity.ManualStudyTimeEntity
+import com.example.lixing.data.local.entity.PlanDayPolicyEntity
+import com.example.lixing.data.local.entity.PlanChangeSetEntity
+import com.example.lixing.data.local.entity.PlanChangeReceiptEntity
+import com.example.lixing.data.local.entity.PlanningSyncConflictEntity
+import com.example.lixing.data.local.dao.PlanningDao
 
 /**
  * 应用数据库。
@@ -61,6 +72,16 @@ import com.example.lixing.data.local.entity.MealRecordEntity
         AssistantConversationEntity::class,
         AssistantMessageEntity::class,
         com.example.lixing.data.local.entity.AssistantRequestEntity::class,
+        StudyResourceEntity::class,
+        LearningGoalEntity::class,
+        LearningUnitEntity::class,
+        ScheduledTaskEntity::class,
+        TaskContentProgressEntity::class,
+        ManualStudyTimeEntity::class,
+        PlanDayPolicyEntity::class,
+        PlanChangeSetEntity::class,
+        PlanChangeReceiptEntity::class,
+        PlanningSyncConflictEntity::class,
     ],
     version = LiXingDatabase.VERSION,
     exportSchema = true,
@@ -80,8 +101,10 @@ abstract class LiXingDatabase : RoomDatabase() {
 
     abstract fun assistantRequestDao(): com.example.lixing.data.local.dao.AssistantRequestDao
 
+    abstract fun planningDao(): PlanningDao
+
     companion object {
-        const val VERSION = 14
+        const val VERSION = 15
         const val NAME = "lixing.db"
     }
 }

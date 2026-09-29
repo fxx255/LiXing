@@ -1,20 +1,34 @@
 package com.example.lixing.data.repository
 
+import androidx.room.withTransaction
+import com.example.lixing.data.local.LiXingDatabase
 import com.example.lixing.data.local.dao.DailyTaskDao
 import com.example.lixing.data.local.dao.DayRecordDao
+import com.example.lixing.data.local.dao.FocusSessionDao
+import com.example.lixing.data.local.dao.PlanningDao
 import com.example.lixing.data.local.dao.SlotCompletion
 import com.example.lixing.data.local.dao.SubjectMinutes
 import com.example.lixing.data.local.entity.DailyTaskEntity
 import com.example.lixing.data.local.entity.DayRecordEntity
+import com.example.lixing.data.local.entity.TaskContentProgressEntity
+import com.example.lixing.data.local.entity.ManualStudyTimeEntity
 import com.example.lixing.di.IoDispatcher
 import com.example.lixing.domain.materialize.TaskMaterializer
 import com.example.lixing.domain.materialize.DailyTaskReconciler
+import com.example.lixing.domain.planning.DailyScheduleResolver
+import com.example.lixing.domain.planning.ContentProgressInput
+import com.example.lixing.domain.planning.ContentSelectionCodec
+import com.example.lixing.domain.planning.IntervalMath
 import com.example.lixing.domain.model.Mood
 import com.example.lixing.domain.model.TaskStatus
+import com.example.lixing.domain.study.StudyStatsCalculator
+import com.example.lixing.domain.study.SubjectStudyStats
 import com.example.lixing.domain.settle.DayStats
 import com.example.lixing.domain.settle.DayStatsCalculator
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.withContext
 import java.time.LocalDate
 import javax.inject.Inject
@@ -28,9 +42,12 @@ import javax.inject.Singleton
  */
 @Singleton
 class TaskRepository @Inject constructor(
+    private val db: LiXingDatabase,
     private val dailyTaskDao: DailyTaskDao,
     private val dayRecordDao: DayRecordDao,
     private val planRepository: PlanRepository,
+    private val planningDao: PlanningDao,
+    private val focusSessionDao: FocusSessionDao,
     @IoDispatcher private val io: CoroutineDispatcher,
 ) {
     // ---------------- 读 ----------------
@@ -44,6 +61,24 @@ class TaskRepository @Inject constructor(
     fun observeTask(id: String): Flow<DailyTaskEntity?> = dailyTaskDao.observeTask(id)
 
     suspend fun getTask(id: String): DailyTaskEntity? = withContext(io) { dailyTaskDao.getTask(id) }
+
+    suspend fun getLatestContentProgress(taskId: String): TaskContentProgressEntity? = withContext(io) {
+        val history = planningDao.getContentProgress(taskId)
+        val superseded = history.mapNotNull { it.supersedesId }.toSet()
+        history.lastOrNull { it.id !in superseded }
+    }
+
+    fun observeCurrentContentProgressOfDate(date: LocalDate): Flow<Map<String, TaskContentProgressEntity>> =
+        planningDao.observeContentProgressOfDate(date).map { history ->
+            val superseded = history.mapNotNull { it.supersedesId }.toSet()
+            history.filter { it.id !in superseded }.associateBy { it.dailyTaskId }
+        }
+
+    suspend fun getManualMinutesOfTask(taskId: String): Int = withContext(io) {
+        val history = planningDao.getManualTimesOfTask(taskId)
+        val superseded = history.mapNotNull { it.supersedesId }.toSet()
+        history.filter { it.id !in superseded }.sumOf { it.minutes }
+    }
 
     suspend fun getTasksOfDay(date: LocalDate): List<DailyTaskEntity> =
         withContext(io) { dailyTaskDao.getTasksOfDay(date) }
@@ -66,7 +101,20 @@ class TaskRepository @Inject constructor(
         withContext(io) { dayRecordDao.getRecordsBetween(from, to) }
 
     suspend fun getSubjectMinutes(from: LocalDate, to: LocalDate): List<SubjectMinutes> =
-        withContext(io) { dailyTaskDao.getSubjectMinutes(from, to) }
+        getSubjectStudyStats(from, to).map { SubjectMinutes(it.subjectId, it.subjectName, it.actualMinutes) }
+
+    suspend fun getSubjectStudyStats(from: LocalDate, to: LocalDate): List<SubjectStudyStats> =
+        withContext(io) {
+            StudyStatsCalculator.calculate(dailyTaskDao.getTasksBetween(from, to),
+                focusSessionDao.getSessionsBetween(from, to), planningDao.getManualTimes(from, to))
+        }
+
+    fun observeSubjectStudyStats(from: LocalDate, to: LocalDate): Flow<List<SubjectStudyStats>> =
+        combine(
+            dailyTaskDao.observeTasksBetween(from, to),
+            focusSessionDao.observeSessionsBetween(from, to),
+            planningDao.observeManualTimes(from, to),
+        ) { tasks, sessions, manual -> StudyStatsCalculator.calculate(tasks, sessions, manual) }
 
     suspend fun getSlotCompletion(from: LocalDate, to: LocalDate): List<SlotCompletion> =
         withContext(io) {
@@ -89,7 +137,8 @@ class TaskRepository @Inject constructor(
         }
 
     suspend fun getTotalFocusMinutes(from: LocalDate, to: LocalDate): Int =
-        withContext(io) { dayRecordDao.getTotalFocusMinutes(from, to) }
+        withContext(io) { focusSessionDao.getSessionsBetween(from, to)
+            .filter { it.endedAt != null }.sumOf { it.effectiveMinutes } }
 
     /** 当天实时统计。首页进度环用这个，不等结算。 */
     suspend fun computeStats(date: LocalDate): DayStats =
@@ -112,8 +161,12 @@ class TaskRepository @Inject constructor(
         val inserted = dailyTaskDao.getTasksOfDay(date).count() - before
 
         // 有新任务就确保 day_record 存在，后续结算和统计都依赖它
-        if (inserted > 0 && dayRecordDao.getRecord(date) == null) {
-            dayRecordDao.upsert(DayRecordEntity(date = date, totalTasks = tasks.size))
+        if (inserted > 0) {
+            val record = dayRecordDao.getRecord(date)
+            if (record?.isSettled != true) {
+                val count = dailyTaskDao.getTasksOfDay(date).count { it.status != TaskStatus.SKIPPED }
+                dayRecordDao.upsert((record ?: DayRecordEntity(date = date)).copy(totalTasks = count))
+            }
         }
         inserted
     }
@@ -128,7 +181,12 @@ class TaskRepository @Inject constructor(
 
         val existing = dailyTaskDao.getTasksOfDay(date)
         val expected = buildTasksForDay(date)
-        val changes = DailyTaskReconciler.reconcile(existing, expected)
+        val protected = existing.filter {
+            focusSessionDao.countForTask(it.id) > 0 ||
+                planningDao.getManualTimesOfTask(it.id).isNotEmpty() ||
+                planningDao.getContentProgress(it.id).isNotEmpty()
+        }.mapTo(HashSet()) { it.id }
+        val changes = DailyTaskReconciler.reconcile(existing, expected, protected)
 
         changes.deleteIds.forEach { dailyTaskDao.deleteById(it) }
         if (changes.updates.isNotEmpty()) dailyTaskDao.updateAll(changes.updates)
@@ -159,15 +217,22 @@ class TaskRepository @Inject constructor(
         if (date < plan.startDate) return emptyList()
 
         val templates = planRepository.getEnabledTemplates(plan.id)
-        if (templates.isEmpty()) return emptyList()
-
-        return TaskMaterializer.materialize(
+        val slots = planRepository.getTimeSlots(plan.id).associateBy { it.id }
+        val subjects = planRepository.getSubjects(plan.id).associateBy { it.id }
+        val recurring = TaskMaterializer.materialize(
             date = date,
             templates = templates,
-            slots = planRepository.getTimeSlots(plan.id).associateBy { it.id },
-            subjects = planRepository.getSubjects(plan.id).associateBy { it.id },
+            slots = slots,
+            subjects = subjects,
             phases = planRepository.getPhases(plan.id).associateBy { it.id },
             planStart = plan.startDate,
+        )
+        return DailyScheduleResolver.resolve(
+            date = date,
+            recurring = recurring,
+            scheduled = planningDao.getScheduledTasks(plan.id, date),
+            slots = slots,
+            subjects = subjects,
         )
     }
 
@@ -186,6 +251,57 @@ class TaskRepository @Inject constructor(
     // ---------------- 写 ----------------
 
     suspend fun updateTask(task: DailyTaskEntity) = withContext(io) { dailyTaskDao.update(task) }
+
+    /** Keep the check-in projection and cumulative content snapshot in one transaction. */
+    suspend fun updateTaskWithContent(task: DailyTaskEntity, input: ContentProgressInput?) = withContext(io) {
+        db.withTransaction {
+            val content = ContentSelectionCodec.decode(task.contentJson)
+            val history = if (content != null && input != null) planningDao.getContentProgress(task.id) else emptyList()
+            val superseded = history.mapNotNull { it.supersedesId }.toSet()
+            val active = history.filter { it.id !in superseded }
+            require(active.size <= 1) { "内容完成记录存在同步冲突，请先处理冲突" }
+            val previous = active.singleOrNull()
+            val ranges = input?.ranges?.let(IntervalMath::merge)
+            val quantity = input?.quantity(task.actualValue) ?: task.actualValue
+            require(ranges == null || quantity == task.actualValue) { "题号范围与完成量不一致" }
+            val mode = if (ranges == null) "COUNT" else "RANGE"
+            val completedJson = if (ranges == null || content == null) ""
+                else ContentSelectionCodec.encode(content.copy(intervals = ranges))
+            dailyTaskDao.update(task)
+            if (content != null && input != null &&
+                (previous == null || previous.mode != mode || previous.quantity != quantity ||
+                    previous.completedJson != completedJson)) {
+                planningDao.insertContentProgress(TaskContentProgressEntity(
+                    dailyTaskId = task.id, goalId = task.scheduleId?.let { planningDao.getScheduledTask(it)?.goalId },
+                    resourceId = task.scheduleId?.let { planningDao.getScheduledTask(it)?.resourceId },
+                    roundKey = content.roundKey, mode = mode, completedJson = completedJson,
+                    quantity = quantity, supersedesId = previous?.id,
+                ))
+            }
+        }
+    }
+
+    /** The entered amount replaces the previous untimed amount for this task. */
+    suspend fun setManualMinutesOfTask(taskId: String, minutes: Int) = withContext(io) {
+        require(minutes in 0..1440) { "补记时长应为 0–1440 分钟" }
+        db.withTransaction {
+            val task = dailyTaskDao.getTask(taskId) ?: error("任务不存在")
+            val history = planningDao.getManualTimesOfTask(taskId)
+            val superseded = history.mapNotNull { it.supersedesId }.toSet()
+            val active = history.filter { it.id !in superseded }
+            require(active.size <= 1) { "发现多条补记记录，请先处理同步冲突" }
+            if (active.size == 1 && active.single().minutes == minutes || active.isEmpty() && minutes == 0) {
+                return@withTransaction
+            }
+            val previous = active.lastOrNull()
+            planningDao.insertManualTime(ManualStudyTimeEntity(
+                dailyTaskId = task.id, planId = task.planId,
+                subjectId = task.subjectId, subjectName = task.subjectName,
+                studyDate = task.date, minutes = minutes,
+                supersedesId = previous?.id,
+            ))
+        }
+    }
 
     suspend fun updateTasks(tasks: List<DailyTaskEntity>) =
         withContext(io) { dailyTaskDao.updateAll(tasks) }
@@ -239,7 +355,8 @@ class TaskRepository @Inject constructor(
         val all = dailyTaskDao.getAllForDedupe()
         // 按 (date, title, slot_name) 分组 —— 不能按 time_slot_id，
         // 因为旧计划导入的 slot ID 和新计划不同，同名时段会认不出是重复。
-        val groups = all.groupBy { Triple(it.date, it.title, it.slotName) }
+        val groups = all.filter { it.scheduleId == null }
+            .groupBy { Triple(it.date, it.title, it.slotName) }
         val toDelete = ArrayList<String>()
         for ((_, tasks) in groups) {
             if (tasks.size <= 1) continue

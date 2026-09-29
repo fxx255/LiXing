@@ -8,6 +8,7 @@ import com.example.lixing.data.repository.PlanRepository
 import com.example.lixing.data.repository.TaskRepository
 import com.example.lixing.domain.achievement.UnlockedAchievement
 import com.example.lixing.domain.model.PointReason
+import com.example.lixing.domain.planning.ContentProgressInput
 import com.example.lixing.domain.rules.PointRules
 import com.example.lixing.domain.settle.CheckInResolver
 import com.example.lixing.domain.settle.DayStatsCalculator
@@ -70,6 +71,7 @@ class CheckInUseCase @Inject constructor(
         makeupReason: String? = null,
         note: String? = null,
         photo: String? = null,
+        contentProgress: ContentProgressInput? = null,
     ): CheckInResult {
         val task = taskRepository.getTask(taskId) ?: return CheckInResult.TaskNotFound
         val prefs = prefsRepository.current()
@@ -102,7 +104,8 @@ class CheckInUseCase @Inject constructor(
 
         // 完成量归零 = 撤销打卡，走单独路径（清掉打卡详情）
         if (outcome.status == com.example.lixing.domain.model.TaskStatus.PENDING) {
-            taskRepository.updateTask(outcome.task.copy(checkinNote = null, checkinPhoto = null))
+            taskRepository.updateTaskWithContent(outcome.task.copy(checkinNote = null, checkinPhoto = null),
+                contentProgress ?: ContentProgressInput())
             gamification.revokeTaskPoints(taskId)
             refreshDayRecord(task.date, prefs.achieveThreshold)
             return CheckInResult.Success(
@@ -131,7 +134,7 @@ class CheckInUseCase @Inject constructor(
                 else -> photo
             },
         )
-        taskRepository.updateTask(detailedTask)
+        taskRepository.updateTaskWithContent(detailedTask, contentProgress ?: ContentProgressInput())
 
         // 重新打卡时先清掉旧流水，避免「改了完成量后积分只增不减」
         if (task.status.isEngaged) gamification.revokeTaskPoints(taskId)
@@ -219,7 +222,7 @@ class CheckInUseCase @Inject constructor(
     suspend fun revoke(taskId: String, clock: StudyClock) {
         val task = taskRepository.getTask(taskId) ?: return
         val prefs = prefsRepository.current()
-        taskRepository.updateTask(CheckInResolver.revoke(task))
+        taskRepository.updateTaskWithContent(CheckInResolver.revoke(task), ContentProgressInput())
         gamification.revokeTaskPoints(taskId)
         refreshDayRecord(task.date, prefs.achieveThreshold)
         if (task.date == clock.today()) {

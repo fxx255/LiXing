@@ -12,14 +12,21 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
@@ -56,6 +63,7 @@ fun FocusScreen(
     val gradient = LocalHeroGradient.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val powerManager = LocalContext.current.getSystemService(PowerManager::class.java)
+    var choosingFocus by remember { mutableStateOf(false) }
 
     // Activity 生命周期在切到其它 App 时会收到 PAUSE/STOP；导航到应用内其它页面
     // 不会触发这两个事件，因此只会把真正离开应用的行为计为中断。
@@ -77,6 +85,7 @@ fun FocusScreen(
     Column(
         modifier = Modifier
             .fillMaxSize()
+            .verticalScroll(rememberScrollState())
             .padding(20.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(14.dp),
@@ -159,6 +168,10 @@ fun FocusScreen(
         Spacer(Modifier.height(4.dp))
 
         if (!state.isRunning) {
+            TextButton(onClick = { choosingFocus = true }) {
+                Text(state.selectedTaskTitle?.let { "关联任务：$it" }
+                    ?: "自由专注 · ${state.selectedSubjectName}")
+            }
             // 番茄钟时长胶囊
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 listOf(25, 45, 50).forEach { minutes ->
@@ -209,7 +222,7 @@ fun FocusScreen(
             ) { Text("放弃本次") }
         }
 
-        Spacer(Modifier.weight(1f))
+        Spacer(Modifier.height(12.dp))
 
         Surface(
             color = MaterialTheme.colorScheme.surfaceContainerLow,
@@ -247,6 +260,36 @@ fun FocusScreen(
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             textAlign = TextAlign.Center,
+        )
+    }
+
+    if (choosingFocus) {
+        AlertDialog(
+            onDismissRequest = { choosingFocus = false },
+            title = { Text("本次专注归属") },
+            text = {
+                Column(Modifier.verticalScroll(rememberScrollState())) {
+                    Text("关联今日任务", style = MaterialTheme.typography.labelLarge)
+                    state.availableTasks.forEach { task ->
+                        TextButton(onClick = {
+                            viewModel.selectTask(task.id, task.title)
+                            choosingFocus = false
+                        }) { Text("${task.subjectName} · ${task.title}") }
+                    }
+                    Text("自由专注", style = MaterialTheme.typography.labelLarge)
+                    TextButton(onClick = {
+                        viewModel.selectFreeSubject(null)
+                        choosingFocus = false
+                    }) { Text("未分类") }
+                    state.availableSubjects.filterNot { it.isArchived }.forEach { subject ->
+                        TextButton(onClick = {
+                            viewModel.selectFreeSubject(subject.id)
+                            choosingFocus = false
+                        }) { Text(subject.name) }
+                    }
+                }
+            },
+            confirmButton = { TextButton(onClick = { choosingFocus = false }) { Text("关闭") } },
         )
     }
 }

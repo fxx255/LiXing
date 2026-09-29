@@ -1,5 +1,7 @@
 package com.example.lixing.data.repository
 
+import androidx.room.withTransaction
+import com.example.lixing.data.local.LiXingDatabase
 import com.example.lixing.data.local.dao.FocusSessionDao
 import com.example.lixing.data.local.entity.FocusSessionEntity
 import com.example.lixing.di.IoDispatcher
@@ -20,6 +22,7 @@ import javax.inject.Singleton
  */
 @Singleton
 class FocusRepository @Inject constructor(
+    private val db: LiXingDatabase,
     private val dao: FocusSessionDao,
     private val taskRepository: TaskRepository,
     private val gamification: GamificationRepository,
@@ -48,10 +51,13 @@ class FocusRepository @Inject constructor(
     ): String = withContext(io) {
         dao.getRunningSession()?.let { return@withContext it.id }
 
+        val task = dailyTaskId?.let { taskRepository.getTask(it) }
+        require(dailyTaskId == null || task?.date == date) { "所选任务不属于当前学习日" }
+
         val session = FocusSessionEntity(
             date = date,
             dailyTaskId = dailyTaskId,
-            subjectId = subjectId,
+            subjectId = task?.subjectId ?: subjectId,
             startedAt = Instant.now(),
             mode = mode,
             plannedMinutes = plannedMinutes,
@@ -71,48 +77,40 @@ class FocusRepository @Inject constructor(
         completed: Boolean,
         countsTowardTask: Boolean = true,
     ) = withContext(io) {
-        val session = dao.getSession(sessionId) ?: return@withContext
-        dao.update(
-            session.copy(
-                endedAt = Instant.now(),
-                effectiveMinutes = effectiveMinutes,
-                isCompleted = completed,
-                countsTowardTask = countsTowardTask,
-            ),
-        )
-
-        // 计入任务进度 + 档案专注时长 + 积分
-        if (countsTowardTask && effectiveMinutes > 0) {
-            session.dailyTaskId?.let { taskId ->
-                taskRepository.addFocusedMinutes(taskId, effectiveMinutes)
-            }
-            gamification.addFocusMinutes(effectiveMinutes)
-
-            val points = com.example.lixing.domain.rules.PointRules.focusPoints(effectiveMinutes)
-            if (points > 0) {
-                gamification.award(
-                    date = session.date,
-                    delta = points,
+        db.withTransaction {
+            val current = dao.getSession(sessionId) ?: return@withTransaction null
+            if (current.endedAt != null) return@withTransaction null
+            require(effectiveMinutes >= 0) { "有效时长不能为负数" }
+            dao.update(current.copy(
+                endedAt = Instant.now(), effectiveMinutes = effectiveMinutes,
+                isCompleted = completed, countsTowardTask = countsTowardTask,
+            ))
+            if (countsTowardTask && effectiveMinutes > 0) {
+                current.dailyTaskId?.let { taskRepository.addFocusedMinutes(it, effectiveMinutes) }
+                gamification.addFocusMinutes(effectiveMinutes)
+                val points = com.example.lixing.domain.rules.PointRules.focusPoints(effectiveMinutes)
+                if (points > 0) gamification.award(
+                    date = current.date, delta = points,
                     reason = com.example.lixing.domain.model.PointReason.FOCUS_SESSION,
                     detail = "专注 $effectiveMinutes 分钟",
                     dedupeKey = com.example.lixing.domain.rules.PointRules.keyFocus(sessionId),
                 )
             }
+            current
         }
     }
 
     /** 放弃当前会话（不计入有效时长，但保留记录）。 */
     suspend fun abandon(sessionId: String) = withContext(io) {
-        val session = dao.getSession(sessionId) ?: return@withContext
-        // 放弃的会话不算一次有效专注，因此其中断次数也不应进入统计。
-        dao.update(
-            session.copy(
-                endedAt = Instant.now(),
-                effectiveMinutes = 0,
-                interruptionCount = 0,
-                isCompleted = false,
-            ),
-        )
+        db.withTransaction {
+            val session = dao.getSession(sessionId) ?: return@withTransaction
+            if (session.endedAt != null) return@withTransaction
+            // 放弃的会话不算一次有效专注，因此其中断次数也不应进入统计。
+            dao.update(session.copy(
+                endedAt = Instant.now(), effectiveMinutes = 0,
+                interruptionCount = 0, isCompleted = false,
+            ))
+        }
     }
 
     suspend fun incrementInterruption(sessionId: String) =

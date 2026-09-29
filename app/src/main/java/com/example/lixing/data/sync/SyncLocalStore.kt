@@ -7,9 +7,13 @@ import androidx.sqlite.db.SupportSQLiteDatabase
 import androidx.room.withTransaction
 import com.example.lixing.data.backup.DbCell
 import com.example.lixing.data.local.LiXingDatabase
+import com.example.lixing.data.local.entity.PlanningSyncConflictEntity
 import com.example.lixing.di.IoDispatcher
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
+import java.security.MessageDigest
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -36,6 +40,27 @@ class SyncLocalStore @Inject constructor(
 ) {
 
     private val db: SupportSQLiteDatabase get() = database.openHelper.writableDatabase
+
+    suspend fun recordPlanningConflict(peer: String, rows: List<SyncRow>, reason: String) = withContext(io) {
+        val planning = rows.filter { it.table in setOf("scheduled_task", "plan_day_policy", "plan_change_set",
+            "learning_goal", "learning_unit", "study_resource", "task_content_progress", "manual_study_time") }
+        if (planning.isEmpty()) return@withContext
+        val payload = Json.encodeToString(rows)
+        val id = MessageDigest.getInstance("SHA-256")
+            .digest("$peer:$payload".toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) }
+        val summary = planning.take(4).joinToString("、") { row ->
+            val title = row.columns["title"]?.value ?: row.columns["name"]?.value ?: row.rowId
+            "${row.table}：$title"
+        }
+        database.planningDao().upsertSyncConflict(PlanningSyncConflictEntity(
+            id = id, peerId = peer, reason = reason.take(300), summary = summary,
+            rowsJson = payload, detectedAt = System.currentTimeMillis(),
+        ))
+    }
+
+    suspend fun resolvePlanningConflicts(peer: String) = withContext(io) {
+        database.planningDao().resolveSyncConflictsForPeer(peer, System.currentTimeMillis())
+    }
 
     // ---------------- 时钟 ----------------
 
@@ -151,6 +176,10 @@ class SyncLocalStore @Inject constructor(
         var appliedTombstones = 0
         var skipped = 0
         val errors = mutableListOf<String>()
+        val containsPlanning = rows.any { it.table in setOf(
+            "scheduled_task", "plan_day_policy", "plan_change_set", "learning_goal", "learning_unit", "study_resource",
+            "task_content_progress", "manual_study_time",
+        ) }
         val unknown = rows.map { it.table }.distinct().filter { it !in SYNC_TABLE_BY_NAME }
         if (unknown.isNotEmpty()) {
             errors += "忽略未知数据表：${unknown.joinToString()}"
@@ -159,6 +188,7 @@ class SyncLocalStore @Inject constructor(
         database.withTransaction {
             setApplying(true)
             try {
+                preflightPlanningRows(rows)
                 val grouped = rows.groupBy { it.table }
                 // 删除按子→父，写入按父→子，外键才不会在半途断掉
                 for (spec in SYNC_TABLE_SPECS.asReversed()) {
@@ -166,12 +196,19 @@ class SyncLocalStore @Inject constructor(
                         val row = normalizeIncoming(spec, incoming, remoteDeviceId)
                         when (decide(spec, row, localDeviceId, remoteDeviceId)) {
                             SyncMerger.Decision.APPLY_DELETE -> {
-                                if (deleteRow(spec, row, errors)) appliedTombstones++ else skipped++
+                                checkPlanningConflict(spec, row)
+                                if (deleteRow(spec, row, errors)) appliedTombstones++ else {
+                                    if (containsPlanning) error(errors.lastOrNull() ?: "规划批次删除失败")
+                                    skipped++
+                                }
                             }
                             SyncMerger.Decision.APPLY_UPSERT -> {
                                 // 远端把删掉的行又建回来了
-                                if (upsertRow(spec, row, errors)) appliedRows++
-                                else skipped++
+                                checkPlanningConflict(spec, row)
+                                if (upsertRow(spec, row, errors)) appliedRows++ else {
+                                    if (containsPlanning) error(errors.lastOrNull() ?: "规划批次写入失败")
+                                    skipped++
+                                }
                             }
                             SyncMerger.Decision.KEEP_LOCAL -> skipped++
                         }
@@ -184,11 +221,18 @@ class SyncLocalStore @Inject constructor(
                             val row = normalizeIncoming(spec, incoming, remoteDeviceId)
                             when (decide(spec, row, localDeviceId, remoteDeviceId)) {
                                 SyncMerger.Decision.APPLY_UPSERT -> {
-                                    if (upsertRow(spec, row, errors)) appliedRows++
-                                    else skipped++
+                                    checkPlanningConflict(spec, row)
+                                    if (upsertRow(spec, row, errors)) appliedRows++ else {
+                                        if (containsPlanning) error(errors.lastOrNull() ?: "规划批次写入失败")
+                                        skipped++
+                                    }
                                 }
                                 SyncMerger.Decision.APPLY_DELETE -> {
-                                    if (deleteRow(spec, row, errors)) appliedTombstones++ else skipped++
+                                    checkPlanningConflict(spec, row)
+                                    if (deleteRow(spec, row, errors)) appliedTombstones++ else {
+                                        if (containsPlanning) error(errors.lastOrNull() ?: "规划批次删除失败")
+                                        skipped++
+                                    }
                                 }
                                 SyncMerger.Decision.KEEP_LOCAL -> skipped++
                             }
@@ -225,6 +269,120 @@ class SyncLocalStore @Inject constructor(
         localDeviceId = localDeviceId,
         remoteDeviceId = remoteDeviceId,
     )
+
+    /** A remote plan cannot replace an execution snapshot that this device already started. */
+    private fun checkPlanningConflict(spec: SyncTableSpec, row: SyncRow) {
+        if (!row.deleted && spec.name in setOf("task_content_progress", "manual_study_time")) {
+            val predecessor = row.columns["supersedes_id"]?.value
+            if (predecessor != null) {
+                val competing = db.query(
+                    "SELECT `id` FROM `${spec.name}` WHERE `supersedes_id` = ? AND `id` != ? LIMIT 1",
+                    arrayOf(predecessor, row.rowId),
+                ).use { it.moveToFirst() }
+                if (competing) error("${spec.name} 的同一记录出现并发更正；本轮同步已回滚")
+            } else if (spec.name == "task_content_progress") {
+                val taskId = row.columns["daily_task_id"]?.value
+                if (taskId != null) {
+                    val competing = db.query(
+                        "SELECT `id` FROM `task_content_progress` WHERE `daily_task_id` = ? AND `supersedes_id` IS NULL AND `id` != ? LIMIT 1",
+                        arrayOf(taskId, row.rowId),
+                    ).use { it.moveToFirst() }
+                    if (competing) error("该任务的内容完成记录出现并发初始提交；本轮同步已回滚")
+                }
+            }
+        }
+        if (spec.name == "scheduled_task") {
+            val local = db.query("SELECT * FROM `scheduled_task` WHERE `id` = ? LIMIT 1", arrayOf(row.rowId))
+                .use { cursor ->
+                    if (!cursor.moveToFirst()) null else (0 until cursor.columnCount).associate {
+                        cursor.getColumnName(it) to DbCell.from(cursor, it)
+                    }
+                }
+            val date = row.columns["study_date"]?.value ?: local?.get("study_date")?.value
+            val template = row.columns["source_template_id"]?.value ?: local?.get("source_template_id")?.value
+            val taskIds = mutableSetOf<String>()
+            db.query("SELECT `id` FROM `daily_task` WHERE `schedule_id` = ?", arrayOf(row.rowId)).use { cursor ->
+                while (cursor.moveToNext()) taskIds += cursor.getString(0)
+            }
+            if (date != null && template != null) {
+                db.query("SELECT `id` FROM `daily_task` WHERE `date` = ? AND `template_id` = ?",
+                    arrayOf(date, template)).use { cursor ->
+                    while (cursor.moveToNext()) taskIds += cursor.getString(0)
+                }
+            }
+            if (taskIds.any(::hasTaskExecution)) {
+                val materialFields = listOf("study_date", "source_template_id", "subject_id", "time_slot_id",
+                    "resource_id", "goal_id", "round_key", "title", "task_type", "target_type",
+                    "target_value", "content_json", "planned_minutes", "start_time", "end_time", "state")
+                val changed = row.deleted || local == null || materialFields.any { key ->
+                    row.columns[key] != null && row.columns[key] != local[key]
+                }
+                if (changed) error("按日安排 ${row.rowId} 与本机已开始的任务冲突；本轮同步已回滚")
+            }
+        }
+        if (spec.name == "daily_task") {
+            val local = db.query("SELECT * FROM `daily_task` WHERE `id` = ? LIMIT 1", arrayOf(row.rowId))
+                .use { cursor ->
+                    if (!cursor.moveToFirst()) null else (0 until cursor.columnCount).associate {
+                        cursor.getColumnName(it) to DbCell.from(cursor, it)
+                    }
+                }
+            if (local?.get("schedule_id")?.value != null && hasTaskExecution(row.rowId)) {
+                val fields = listOf("date", "template_id", "schedule_id", "subject_id", "time_slot_id",
+                    "title", "target_type", "target_value", "content_json", "planned_minutes",
+                    "scheduled_start", "scheduled_end", "status", "actual_value", "checked_at")
+                if (row.deleted || fields.any { key -> row.columns[key] != null && row.columns[key] != local[key] }) {
+                    error("每日任务 ${row.rowId} 已有本机执行记录；本轮同步已回滚")
+                }
+            }
+        }
+    }
+
+    /** A same-or-older revision with different contents is a concurrent plan edit, regardless of LWW clock. */
+    private fun preflightPlanningRows(rows: List<SyncRow>) {
+        val fields = mapOf(
+            "scheduled_task" to listOf("study_date", "source_template_id", "subject_id", "time_slot_id",
+                "resource_id", "goal_id", "round_key", "title", "task_type", "target_type",
+                "target_value", "content_json", "planned_minutes", "start_time", "end_time", "state", "is_locked"),
+            "plan_day_policy" to listOf("windows_json", "max_planned_minutes", "is_locked", "reason"),
+        )
+        rows.filter { !it.deleted && it.table in fields }
+            .groupBy { it.table to it.rowId }.values.map { group -> group.maxBy { it.clock } }
+            .forEach { incoming ->
+            val local = db.query("SELECT * FROM `${incoming.table}` WHERE `id` = ? LIMIT 1",
+                arrayOf(incoming.rowId)).use { cursor ->
+                if (!cursor.moveToFirst()) null else (0 until cursor.columnCount).associate {
+                    cursor.getColumnName(it) to DbCell.from(cursor, it)
+                }
+            } ?: return@forEach
+            val changed = fields.getValue(incoming.table).any { field ->
+                incoming.columns[field] != null && incoming.columns[field] != local[field]
+            }
+            if (!changed) return@forEach
+            val localRevision = local["revision"]?.value?.toLongOrNull() ?: 0L
+            val remoteRevision = incoming.columns["revision"]?.value?.toLongOrNull() ?: 0L
+            val localClock = local[SYNC_CLOCK_COLUMN]?.value?.toLongOrNull() ?: 0L
+            val stale = remoteRevision < localRevision && incoming.clock <= localClock
+            if (!stale && (remoteRevision <= localRevision || incoming.clock <= localClock)) {
+                error("${incoming.table}/${incoming.rowId} 存在并发或过期的规划修改；本轮同步已回滚")
+            }
+        }
+    }
+
+    private fun hasTaskExecution(id: String): Boolean {
+        val taskStarted = db.query(
+            "SELECT `status`, `checked_at`, `actual_value`, `focused_minutes`, `skip_reason` FROM `daily_task` WHERE `id` = ?",
+            arrayOf(id),
+        ).use { cursor -> cursor.moveToFirst() && (
+            cursor.getString(0) !in setOf("PENDING", "SKIPPED") ||
+                cursor.getString(0) == "SKIPPED" && cursor.getString(4) != "PLAN_CANCELLED" ||
+                !cursor.isNull(1) || cursor.getInt(2) > 0 || cursor.getInt(3) > 0) }
+        if (taskStarted) return true
+        return listOf("focus_session", "manual_study_time", "task_content_progress").any { table ->
+            db.query("SELECT 1 FROM `$table` WHERE `daily_task_id` = ? LIMIT 1", arrayOf(id))
+                .use { it.moveToFirst() }
+        }
+    }
 
     private fun localState(spec: SyncTableSpec, rowId: String): SyncMerger.LocalState {
         val pk = spec.pkValue(rowId)
@@ -376,6 +534,7 @@ class SyncLocalStore @Inject constructor(
             db.execSQL("DELETE FROM `sync_tombstone`")
             db.execSQL("DELETE FROM `sync_row_version`")
             db.execSQL("DELETE FROM `sync_row_alias`")
+            db.execSQL("DELETE FROM `planning_sync_conflict`")
             val highest = SYNC_TABLE_SPECS.maxOf { spec ->
                 db.query("SELECT COALESCE(MAX(`$SYNC_CLOCK_COLUMN`), 0) FROM `${spec.name}`")
                     .use { it.moveToFirst(); it.getLong(0) }

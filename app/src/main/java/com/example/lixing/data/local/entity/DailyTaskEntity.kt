@@ -40,6 +40,7 @@ import java.time.LocalTime
         Index("template_id"),
         Index(value = ["date", "time_slot_id"]),
         Index("subject_id"),
+        Index(value = ["schedule_id"], unique = true),
     ],
 )
 data class DailyTaskEntity(
@@ -52,6 +53,13 @@ data class DailyTaskEntity(
     /** 来源模板。模板被删时置空，但任务记录保留。 */
     @ColumnInfo(name = "template_id")
     val templateId: String?,
+
+    @ColumnInfo(name = "plan_id")
+    val planId: String? = null,
+
+    /** Confirmed date-specific source; template occurrences retain their old task ID. */
+    @ColumnInfo(name = "schedule_id")
+    val scheduleId: String? = null,
 
     // ---------- 模板快照字段 ----------
     @ColumnInfo(name = "subject_id")
@@ -92,6 +100,31 @@ data class DailyTaskEntity(
     /** 当天的目标量。允许单独调整今日目标而不动模板。 */
     @ColumnInfo(name = "target_value")
     val targetValue: Int,
+
+    @ColumnInfo(name = "planned_minutes")
+    val plannedMinutes: Int? = null,
+
+    @ColumnInfo(name = "content_json", defaultValue = "''")
+    val contentJson: String = "",
+
+    @ColumnInfo(name = "scheduled_start")
+    val scheduledStart: LocalTime? = null,
+
+    @ColumnInfo(name = "scheduled_end")
+    val scheduledEnd: LocalTime? = null,
+
+    @ColumnInfo(name = "baseline_minutes")
+    val baselineMinutes: Int? = null,
+
+    @ColumnInfo(name = "baseline_value")
+    val baselineValue: Int? = null,
+
+    @ColumnInfo(name = "skip_reason", defaultValue = "''")
+    val skipReason: String = "",
+
+    /** v1 keeps the legacy aggregate; new tasks use source-based time accounting. */
+    @ColumnInfo(name = "time_accounting_version", defaultValue = "1")
+    val timeAccountingVersion: Int = 2,
 
     @ColumnInfo(name = "is_keystone")
     val isKeystone: Boolean = false,

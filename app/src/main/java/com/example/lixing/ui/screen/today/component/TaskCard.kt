@@ -33,8 +33,10 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
 import com.example.lixing.data.local.entity.DailyTaskEntity
+import com.example.lixing.data.local.entity.TaskContentProgressEntity
 import com.example.lixing.domain.model.TargetType
 import com.example.lixing.domain.model.TaskStatus
+import com.example.lixing.domain.planning.ContentSelectionCodec
 import com.example.lixing.ui.theme.LiXingRadius
 import com.example.lixing.ui.theme.StatusDone
 import com.example.lixing.ui.theme.StatusMissed
@@ -48,6 +50,7 @@ import com.example.lixing.ui.theme.StatusSkipped
 @Composable
 fun TaskCard(
     task: DailyTaskEntity,
+    contentProgress: TaskContentProgressEntity? = null,
     isCurrentSlot: Boolean,
     onCheckInClick: () -> Unit,
     onLongPress: () -> Unit,
@@ -127,6 +130,28 @@ fun TaskCard(
                 } else {
                     SubjectSubtitleLine(task, MaterialTheme.typography.bodySmall)
                 }
+                val content = ContentSelectionCodec.decode(task.contentJson)?.displayText().orEmpty()
+                if (content.isNotBlank()) {
+                    Text(content, style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                if (contentProgress?.mode == "RANGE") {
+                    val completed = ContentSelectionCodec.decode(contentProgress.completedJson)
+                    completed?.let {
+                        Text("已完成 ${it.displayText()} · ${contentProgress.quantity} ${task.targetType.unit}",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary)
+                    }
+                }
+                if (task.scheduleId != null || task.plannedMinutes != null) {
+                    val window = if (task.scheduledStart != null && task.scheduledEnd != null) {
+                        "${task.scheduledStart}–${task.scheduledEnd}"
+                    } else null
+                    val estimate = task.plannedMinutes?.let { "预计 $it 分钟" }
+                    Text(listOfNotNull(window, estimate).joinToString(" · "),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
             }
 
             Spacer(Modifier.width(10.dp))
@@ -168,7 +193,9 @@ private fun buildSubtitle(task: DailyTaskEntity): String {
     val flags = listOfNotNull(
         if (task.isLate) "迟到" else null,
         if (task.isMakeup) "补卡" else null,
-        if (task.status == TaskStatus.SKIPPED) "已请假" else null,
+        if (task.status == TaskStatus.SKIPPED) {
+            if (task.skipReason == "PLAN_CANCELLED") "已取消" else "已请假"
+        } else null,
         if (photoCount > 0) "📷x$photoCount" else null,
     )
     return (listOfNotNull(target, progress) + flags).joinToString(" · ")

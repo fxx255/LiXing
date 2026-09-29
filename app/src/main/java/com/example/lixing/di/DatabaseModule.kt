@@ -16,6 +16,7 @@ import com.example.lixing.data.local.dao.TaskTemplateDao
 import com.example.lixing.data.local.dao.MealRecordDao
 import com.example.lixing.data.local.dao.AssistantChatDao
 import com.example.lixing.data.local.dao.EnglishEntryDao
+import com.example.lixing.data.local.dao.PlanningDao
 import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
@@ -80,4 +81,7 @@ object DatabaseModule {
     fun provideAssistantRequestDao(
         db: LiXingDatabase,
     ): com.example.lixing.data.local.dao.AssistantRequestDao = db.assistantRequestDao()
+
+    @Provides
+    fun providePlanningDao(db: LiXingDatabase): PlanningDao = db.planningDao()
 }

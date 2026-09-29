@@ -33,6 +33,7 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
 import java.time.LocalTime
+import java.time.LocalDate
 
 /** 发往网关的聊天请求。 */
 @Serializable
@@ -116,6 +117,8 @@ data class PendingPlanReviewPayload(
     val selected: List<Boolean> = emptyList(),
     /** 是否已确认应用过。保留这个标记是为了让按钮**置灰**而不是凭空消失。 */
     val applied: Boolean = false,
+    /** Hash of the dated planning inputs shown when this proposal was created. */
+    val datedPlanFingerprint: String = "",
     /**
      * 模型给出的 `english_actions` 数组原始 JSON（英语积累变更）。
      *
@@ -306,9 +309,15 @@ object AssistantResponseParser {
             rawReply.let { if (normalizeMarkdown) normalizeAssistantMarkdown(it).trim() else it }
         }
         val actionsArray = root["plan_actions"] as? JsonArray
-        val actions = actionsArray
+        val parsedActions = actionsArray
             ?.mapIndexedNotNull { index, element -> parseAction(element, index, warnings) }
             .orEmpty()
+        val hasDated = actionsArray?.any { (it as? JsonObject)?.string("kind") in
+            setOf("ADD_DATED_TASK", "OVERRIDE_TEMPLATE_OCCURRENCE") } == true
+        val invalidDatedBatch = hasDated && (parsedActions.size != actionsArray!!.size ||
+            parsedActions.any { it !is PlanAction.AddDatedTask })
+        if (invalidDatedBatch) warnings += "按日规划包含无效或混合动作，整批未进入确认；请重新生成完整方案"
+        val actions = if (invalidDatedBatch) emptyList() else parsedActions
         // 只在动作确实解析出内容时留原始串，供持久化待确认方案用（见字段注释）
         val rawPlanActionsJson = actionsArray
             ?.takeIf { it.isNotEmpty() && actions.isNotEmpty() }
@@ -728,6 +737,7 @@ object AssistantResponseParser {
                 "SKIP_TODAY_TASK" -> parseSkipTodayTask(obj)
                 "TAKE_TODAY_OFF" -> PlanAction.TakeTodayOff(obj.reason())
                 "KEEP_TODAY_TASKS" -> parseKeepTodayTasks(obj)
+                "ADD_DATED_TASK", "OVERRIDE_TEMPLATE_OCCURRENCE" -> parseDatedTask(obj, index, kind)
                 else -> {
                     warnings += "不支持的计划建议类型「$kind」，已忽略"
                     null
@@ -865,6 +875,41 @@ object AssistantResponseParser {
         }.distinct()
         require(ids.isNotEmpty() && ids.size <= 50) { "keepTaskIds 需要包含 1~50 个任务" }
         return PlanAction.KeepTodayTasks(ids, obj.reason())
+    }
+
+    private fun parseDatedTask(obj: JsonObject, index: Int, kind: String): PlanAction.AddDatedTask {
+        val date = obj.string("date")?.let { runCatching { LocalDate.parse(it) }.getOrNull() }
+            ?: throw IllegalArgumentException("date 应为 YYYY-MM-DD")
+        val subjectId = obj.idString("subjectId") ?: throw IllegalArgumentException("缺少 subjectId")
+        val slotId = obj.idString("timeSlotId") ?: throw IllegalArgumentException("缺少 timeSlotId")
+        val templateId = obj.idString("sourceTemplateId")
+        require(kind != "OVERRIDE_TEMPLATE_OCCURRENCE" || templateId != null) {
+            "替代重复任务必须提供 sourceTemplateId"
+        }
+        val title = obj.string("title")?.trim().orEmpty()
+        require(title.isNotBlank() && title.length <= 160) { "任务标题应为 1–160 字" }
+        val first = obj.optionalInt("questionFirst")
+        val last = obj.optionalInt("questionLast")
+        require((first == null) == (last == null)) { "请同时给出起止题号" }
+        require(first == null || first > 0 && last!! >= first && last - first + 1 <= MAX_TARGET_VALUE) {
+            "题号范围无效或过大"
+        }
+        val minutes = obj.optionalInt("plannedMinutes")
+        require(minutes == null || minutes in 1..1440) { "预计时长无效" }
+        val start = obj.time("startTime")
+        val end = obj.time("endTime")
+        require((start == null) == (end == null) && start != end || start == null && end == null) {
+            "开始和结束时间应同时提供且不同"
+        }
+        return PlanAction.AddDatedTask(
+            ordinal = index, date = date, subjectId = subjectId, timeSlotId = slotId,
+            sourceTemplateId = templateId, title = title,
+            resourceName = obj.string("resourceName")?.trim()?.take(120).orEmpty(),
+            chapter = obj.string("chapter")?.trim()?.take(120).orEmpty(),
+            questionFirst = first, questionLast = last, plannedMinutes = minutes,
+            startTime = start, endTime = end, reason = obj.reason(),
+            goalId = obj.idString("goalId"), resourceId = obj.idString("resourceId"),
+        )
     }
 
     // ---------------- English entry actions ----------------
@@ -1008,8 +1053,116 @@ internal fun normalizeAssistantMarkdown(raw: String): String {
         // Chinese prose is also a safe paragraph/list continuation; LaTeX commands are not.
         normalized = normalized.replace(Regex("""\\n(?=[\u3400-\u9fff])"""), "\n")
     }
-    return normalizeTables(normalizeMathDelimiters(normalized))
+    return normalizeTables(normalizeDuplicateLatexBackslashes(normalizeMathDelimiters(normalized)))
 }
+
+/**
+ * Repairs a second escaping layer that some providers leave in the decoded reply.
+ *
+ * The JSON decoder correctly turns `\\\\int` on the wire into `\\int`.  A few
+ * providers, however, put the already escaped LaTeX in the JSON value, so the
+ * decoded Markdown still contains `\\\\int`.  In a formula JLatexMath reads the
+ * first two slashes as a row break; the rest (`int`, `cos`, `theta`, ...) then
+ * renders as unrelated italic letters or fails with a ParseException.  This is
+ * the exact pattern behind the screenshot where one integral was split into a
+ * stack of `int_0`, `theta`, `cdot` and `frac` placeholders.
+ *
+ * Only an *exactly two-slash* run followed immediately by a likely command (or
+ * a spacing punctuation) is collapsed.  A real TeX row break is kept when it is
+ * followed by whitespace, `&`, another slash, an optional `[6pt]` argument, or
+ * a plain one-letter row expression.  Code fences and text outside `$$` blocks
+ * are left untouched.
+ */
+private fun normalizeDuplicateLatexBackslashes(markdown: String): String {
+    if ("\\\\" !in markdown) return markdown
+    val out = StringBuilder(markdown.length)
+    var inFence: String? = null
+    var inMath = false
+    var inlineCodeTicks = 0
+    var index = 0
+    var lineStart = true
+    while (index < markdown.length) {
+        val c = markdown[index]
+        if (lineStart && !inMath) {
+            val actualMarker = when {
+                markdown.startsWith("```", index) -> "```"
+                markdown.startsWith("~~~", index) -> "~~~"
+                else -> null
+            }
+            if (actualMarker != null) {
+                inFence = if (inFence == null) actualMarker else if (inFence == actualMarker) null else inFence
+            }
+        }
+        if (c == '\n') {
+            out.append(c)
+            index++
+            lineStart = true
+            continue
+        }
+        lineStart = false
+        if (inFence != null) {
+            out.append(c)
+            index++
+            continue
+        }
+        if (c == '`') {
+            var end = index + 1
+            while (end < markdown.length && markdown[end] == '`') end++
+            val count = end - index
+            inlineCodeTicks = when {
+                inlineCodeTicks == 0 -> count
+                inlineCodeTicks == count -> 0
+                else -> inlineCodeTicks
+            }
+            out.append(markdown, index, end)
+            index = end
+            continue
+        }
+        if (inlineCodeTicks == 0 && markdown.startsWith("$$", index)) {
+            inMath = !inMath
+            out.append("$$")
+            index += 2
+            continue
+        }
+        if (!inMath || c != '\\') {
+            out.append(c)
+            index++
+            continue
+        }
+        var runEnd = index
+        while (runEnd < markdown.length && markdown[runEnd] == '\\') runEnd++
+        val runLength = runEnd - index
+        if (runLength == 2 && isDuplicateLatexCommand(markdown, runEnd)) {
+            out.append('\\')
+        } else {
+            repeat(runLength) { out.append('\\') }
+        }
+        index = runEnd
+    }
+    return out.toString()
+}
+
+private fun isDuplicateLatexCommand(text: String, start: Int): Boolean {
+    val next = text.getOrNull(start) ?: return false
+    if (next in ",;:!") return true
+    if (!next.isLetter()) return false
+    var end = start
+    while (text.getOrNull(end)?.isLetter() == true) end++
+    val command = text.substring(start, end)
+    // Keep this list intentionally broad: an unknown command is safer to leave
+    // alone than to turn a genuine row break followed by a plain word into one.
+    return command in DUPLICATE_LATEX_COMMANDS
+}
+
+private val DUPLICATE_LATEX_COMMANDS = setOf(
+    "alpha", "beta", "cdot", "cdots", "cos", "delta", "dfrac", "dot", "ell",
+    "equiv", "exists", "exp", "frac", "gamma", "ge", "geq", "in", "infty",
+    "iint", "int", "lambda", "le", "leq", "lim", "ln", "log", "left", "mid",
+    "mu", "nabla", "neq", "notin", "nu", "omega", "partial", "pi", "pm",
+    "prod", "quad", "qquad", "rho", "right", "sigma", "sin", "sqrt", "sum",
+    "tan", "tau", "theta", "times", "text", "mathrm", "mathbf", "mathbb",
+    "mathcal", "operatorname", "begin", "end",
+)
 
 /**
  * 修复 Markdown 表格在 CommonMark 下「渲染不出来」的两种常见形态。

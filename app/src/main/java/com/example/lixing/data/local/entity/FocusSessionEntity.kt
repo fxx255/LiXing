@@ -48,6 +48,9 @@ data class FocusSessionEntity(
     @ColumnInfo(name = "subject_id")
     val subjectId: String? = null,
 
+    @ColumnInfo(name = "time_accounting_version", defaultValue = "1")
+    val timeAccountingVersion: Int = 2,
+
     @ColumnInfo(name = "started_at")
     val startedAt: Instant,
 

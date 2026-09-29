@@ -3,6 +3,8 @@ package com.example.lixing.data.assistant
 import com.example.lixing.data.repository.EnglishEntryRepository
 import com.example.lixing.data.repository.PlanRepository
 import com.example.lixing.data.repository.TaskRepository
+import com.example.lixing.data.repository.PlanningRepository
+import com.example.lixing.domain.planning.ContentSelectionCodec
 import com.example.lixing.domain.assistant.AssistantContextKind
 import com.example.lixing.domain.word.WordSource
 import android.util.Log
@@ -25,6 +27,7 @@ import javax.inject.Singleton
 class AssistantContextBuilder @Inject constructor(
     private val planRepository: PlanRepository,
     private val taskRepository: TaskRepository,
+    private val planningRepository: PlanningRepository,
     private val englishEntryRepository: EnglishEntryRepository,
     private val wordSource: WordSource,
 ) {
@@ -32,7 +35,7 @@ class AssistantContextBuilder @Inject constructor(
 
     suspend fun build(kinds: Set<AssistantContextKind>, today: LocalDate): String {
         val sections = mutableListOf<String>()
-        if (AssistantContextKind.PLAN in kinds) sections += buildPlanSection()
+        if (AssistantContextKind.PLAN in kinds) sections += buildPlanSection(today)
         if (AssistantContextKind.TODAY in kinds) sections += buildTodaySection(today)
         if (AssistantContextKind.STATS in kinds) sections += buildStatsSection(today)
         if (AssistantContextKind.ENGLISH in kinds) sections += buildEnglishSection()
@@ -41,11 +44,16 @@ class AssistantContextBuilder @Inject constructor(
         return sections.joinToString("\n\n").take(MAX_CONTEXT_CHARS)
     }
 
-    private suspend fun buildPlanSection(): String = runCatching {
+    private suspend fun buildPlanSection(today: LocalDate): String = runCatching {
         val plan = planRepository.getActivePlan() ?: return "## 当前计划\n（还没有学习计划）"
         val subjects = planRepository.getSubjects(plan.id)
         val slots = planRepository.getTimeSlots(plan.id)
         val templates = planRepository.getTemplates(plan.id)
+        val resources = planningRepository.getResources(plan.id)
+        val goals = planningRepository.getGoals(plan.id)
+        val goalStats = planningRepository.getGoalContentStats(plan.id).associateBy { it.goalId }
+        val dated = planningRepository.getSchedules(plan.id, today, today.plusDays(13))
+        val dayPolicies = planningRepository.getDayPolicies(plan.id, today, today.plusDays(13))
         buildString {
             appendLine("## 当前计划")
             appendLine("- 计划：${plan.name}（${plan.startDate} ~ 目标日 ${plan.targetDate}）")
@@ -77,6 +85,35 @@ class AssistantContextBuilder @Inject constructor(
                 appendLine(
                     "  - [id=${t.id}] ${t.title}（科目:$subject，时段:$slot，$target，重复:${t.repeatRule.name}$flags）",
                 )
+            }
+            appendLine("- 已登记学习资料：")
+            resources.take(30).forEach { resource ->
+                appendLine("  - [id=${resource.id}] ${resource.name}（科目 id=${resource.subjectId}）")
+            }
+            appendLine("- 学习目标：")
+            goals.take(30).forEach { goal ->
+                val scope = ContentSelectionCodec.decode(goal.scopeJson)?.displayText().orEmpty()
+                val progress = goalStats[goal.id]
+                val quantity = progress?.targetCount?.let { target ->
+                    "已确认 ${progress.knownCompleted}/$target，剩余 ${progress.remainingCount ?: 0}"
+                } ?: "未设可计数范围"
+                val countOnly = progress?.quantityOnly?.takeIf { it > 0 }?.let { "，另有 $it 项仅报数量" }.orEmpty()
+                val remainingRanges = progress?.remainingRanges?.takeIf { it.isNotEmpty() }?.let { ranges ->
+                    val visible = com.example.lixing.domain.planning.ContentRangeText.format(ranges.take(8))
+                    "，待做编号 $visible${if (ranges.size > 8) " 等" else ""}"
+                }.orEmpty()
+                appendLine("  - [id=${goal.id}] ${goal.title}（科目 id=${goal.subjectId}，截止 ${goal.dueDate}，$scope；$quantity$remainingRanges$countOnly）")
+            }
+            appendLine("- 未来 14 天的例外可用时间（未列出者使用周期时段）：")
+            dayPolicies.forEach { policy ->
+                val windows = com.example.lixing.domain.planning.AvailabilityCodec.decode(policy.windowsJson)
+                    ?.joinToString("、") { "${it.start}-${it.end}" }.orEmpty().ifBlank { "无可用时间" }
+                appendLine("  - ${policy.studyDate}：$windows，最多 ${policy.maxPlannedMinutes?.let { "$it 分钟" } ?: "按窗口容量"}${if (policy.isLocked) "，已锁定" else ""}")
+            }
+            appendLine("- 未来 14 天已确认指定日期安排（未列出者仍按重复模板）：")
+            dated.take(90).forEach { item ->
+                val content = ContentSelectionCodec.decode(item.contentJson)?.displayText().orEmpty()
+                appendLine("  - [id=${item.id}] ${item.studyDate} ${item.title}，科目 id=${item.subjectId}，时段 id=${item.timeSlotId}，${item.plannedMinutes ?: "未估时"} 分钟，状态 ${item.state}，替代模板 id=${item.sourceTemplateId ?: "无"}，$content")
             }
         }.trimEnd()
     }.getOrElse { e ->

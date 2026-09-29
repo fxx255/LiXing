@@ -8,10 +8,15 @@ import android.os.Build
 import android.util.Log
 import com.example.lixing.data.local.entity.TimeSlotEntity
 import com.example.lixing.data.repository.PlanRepository
+import com.example.lixing.data.local.dao.PlanningDao
+import com.example.lixing.data.prefs.UserPreferencesRepository
+import com.example.lixing.domain.planning.AvailabilityCodec
+import com.example.lixing.domain.planning.PlanningEngine
+import com.example.lixing.domain.time.StudyClock
+import com.example.lixing.domain.time.StudyDayWindow
 import com.example.lixing.domain.model.WeekdayMask
 import dagger.hilt.android.qualifiers.ApplicationContext
 import java.time.LocalDate
-import java.time.LocalDateTime
 import java.time.ZoneId
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -32,6 +37,8 @@ import javax.inject.Singleton
 class ReminderScheduler @Inject constructor(
     @ApplicationContext private val context: Context,
     private val planRepository: PlanRepository,
+    private val planningDao: PlanningDao,
+    private val prefs: UserPreferencesRepository,
 ) {
     private val alarmManager: AlarmManager? =
         context.getSystemService(Context.ALARM_SERVICE) as? AlarmManager
@@ -39,30 +46,54 @@ class ReminderScheduler @Inject constructor(
     /** 为指定日期的所有启用时段排提醒。 */
     suspend fun scheduleFor(date: LocalDate) {
         val plan = planRepository.getActivePlan() ?: return
-        val slots = planRepository.getTimeSlots(plan.id).filter { it.isEnabled }
-        if (slots.isEmpty()) return
-
+        val slots = planRepository.getTimeSlots(plan.id)
+        val dayStart = prefs.current().dayStartTime
+        val dayWindows = planningDao.getDayPolicy(plan.id, date)?.let { policy ->
+            AvailabilityCodec.decode(policy.windowsJson)?.let {
+                PlanningEngine.validateWindows(date, dayStart, it)
+            }
+        }
+        val slotReminderStarts = mutableMapOf<String, java.time.LocalDateTime>()
         slots.forEach { slot ->
-            if (!WeekdayMask(slot.weekdayMask).contains(date)) return@forEach
-            scheduleSlot(slot, date)
+            val slotWindow = runCatching { StudyDayWindow.of(date, slot.startTime, slot.endTime, dayStart) }.getOrNull()
+            val available = slotWindow != null && PlanningEngine.availableForSlot(slotWindow, dayWindows).isNotEmpty()
+            if (slot.isEnabled && WeekdayMask(slot.weekdayMask).contains(date) && available) {
+                val effective = PlanningEngine.availableForSlot(requireNotNull(slotWindow), dayWindows)
+                slotReminderStarts[slot.id] = effective.first().start
+                scheduleSlot(slot, date, effective)
+            } else cancelSlot(slot.id, date)
+        }
+        planningDao.getScheduledTasks(plan.id, date).forEach { task ->
+            val active = task.state in setOf("ACTIVE", "OVERRIDE")
+            val slotStart = slotReminderStarts[task.timeSlotId]
+            val nearSlotStart = slotStart != null &&
+                task.startTime?.takeIf { task.endTime != null }?.let { start ->
+                    val taskAt = StudyDayWindow.of(date, start, requireNotNull(task.endTime), dayStart).start
+                    kotlin.math.abs(java.time.Duration.between(taskAt, slotStart).toMinutes()) <= 10
+                } == true
+            if (active && task.startTime != null && task.endTime != null && !nearSlotStart) {
+                scheduleTask(task.id, date, task.startTime, task.endTime, dayStart)
+            } else cancelTask(task.id, date)
         }
         Log.d(TAG, "Scheduled reminders for $date: ${slots.size} slots")
     }
 
     /** 排今天 + 明天。 */
     suspend fun scheduleUpcoming() {
-        val today = LocalDate.now()
+        val today = StudyClock(dayStart = prefs.current().dayStartTime).today()
         scheduleFor(today)
         scheduleFor(today.plusDays(1))
     }
 
-    private fun scheduleSlot(slot: TimeSlotEntity, date: LocalDate) {
+    private fun scheduleSlot(slot: TimeSlotEntity, date: LocalDate,
+        available: List<com.example.lixing.domain.time.SlotWindow>) {
         val am = alarmManager ?: return
+        cancelSlot(slot.id, date)
         val zone = ZoneId.systemDefault()
 
         // 1. 时段开始提醒（提前 N 分钟，默认 5）
         val leadMinutes = 5
-        val slotStartAt = date.atTime(slot.startTime)
+        val slotStartAt = available.first().start
         val remindAt = slotStartAt.minusMinutes(leadMinutes.toLong())
         val startMillis = remindAt.atZone(zone).toInstant().toEpochMilli()
         if (startMillis > System.currentTimeMillis()) {
@@ -70,18 +101,43 @@ class ReminderScheduler @Inject constructor(
         }
 
         // 2. 时段结束前的催办（提前 15 分钟）
-        val urgeAt = slotEndTime(slot, date).minusMinutes(15)
+        val urgeAt = available.last().end.minusMinutes(15)
         val urgeMillis = urgeAt.atZone(zone).toInstant().toEpochMilli()
         if (urgeMillis > System.currentTimeMillis()) {
             setExact(am, urgeMillis, slotPendingIntent(slot.id, date, TYPE_SLOT_URGE))
         }
     }
 
-    /** 处理跨夜时段的真实结束时刻。 */
-    private fun slotEndTime(slot: TimeSlotEntity, date: LocalDate): LocalDateTime {
-        val start = date.atTime(slot.startTime)
-        return if (slot.endTime > slot.startTime) date.atTime(slot.endTime)
-        else date.plusDays(1).atTime(slot.endTime)
+    private fun cancelSlot(slotId: String, date: LocalDate) {
+        val am = alarmManager ?: return
+        am.cancel(slotPendingIntent(slotId, date, TYPE_SLOT_START))
+        am.cancel(slotPendingIntent(slotId, date, TYPE_SLOT_URGE))
+    }
+
+    private fun scheduleTask(id: String, date: LocalDate, start: java.time.LocalTime,
+        end: java.time.LocalTime, dayStart: java.time.LocalTime) {
+        val am = alarmManager ?: return
+        val pi = taskPendingIntent(id, date, start)
+        am.cancel(pi)
+        val actual = StudyDayWindow.of(date, start, end, dayStart).start.minusMinutes(5)
+        val millis = actual.atZone(ZoneId.systemDefault()).toInstant().toEpochMilli()
+        if (millis > System.currentTimeMillis()) setExact(am, millis, pi)
+    }
+
+    private fun cancelTask(id: String, date: LocalDate) {
+        alarmManager?.cancel(taskPendingIntent(id, date, null))
+    }
+
+    private fun taskPendingIntent(id: String, date: LocalDate, start: java.time.LocalTime?): PendingIntent {
+        val intent = Intent(context, SlotReminderReceiver::class.java).apply {
+            action = "com.example.lixing.TASK_REMINDER:$id:$date"
+            putExtra(SlotReminderReceiver.EXTRA_TASK_ID, id)
+            start?.let { putExtra(SlotReminderReceiver.EXTRA_TASK_START, it.toString()) }
+            putExtra(SlotReminderReceiver.EXTRA_DATE_EPOCH, date.toEpochDay())
+            putExtra(SlotReminderReceiver.EXTRA_TYPE, TYPE_TASK_START)
+        }
+        return PendingIntent.getBroadcast(context, id.hashCode(), intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
     }
 
     private fun setExact(am: AlarmManager, triggerAtMillis: Long, pi: PendingIntent) {
@@ -123,5 +179,6 @@ class ReminderScheduler @Inject constructor(
         private const val TAG = "ReminderScheduler"
         const val TYPE_SLOT_START = 0
         const val TYPE_SLOT_URGE = 1
+        const val TYPE_TASK_START = 2
     }
 }

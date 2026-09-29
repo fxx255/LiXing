@@ -93,9 +93,12 @@ class AssistantReviewTransactionTest {
             Dispatchers.Unconfined,
         )
         taskRepository = TaskRepository(
+            database,
             database.dailyTaskDao(),
             database.dayRecordDao(),
             planRepository,
+            database.planningDao(),
+            database.focusSessionDao(),
             Dispatchers.Unconfined,
         )
         applier = PlanChangeApplier(planRepository, taskRepository)

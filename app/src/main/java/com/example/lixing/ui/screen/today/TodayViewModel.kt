@@ -4,12 +4,14 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.lixing.data.local.entity.DailyTaskEntity
 import com.example.lixing.data.local.entity.TimeSlotEntity
+import com.example.lixing.data.local.entity.TaskContentProgressEntity
 import com.example.lixing.data.prefs.UserPreferencesRepository
 import com.example.lixing.data.repository.GamificationRepository
 import com.example.lixing.data.repository.PlanRepository
 import com.example.lixing.data.repository.TaskRepository
 import com.example.lixing.domain.model.Mood
 import com.example.lixing.domain.model.TaskStatus
+import com.example.lixing.domain.planning.ContentProgressInput
 import com.example.lixing.domain.settle.DayStats
 import com.example.lixing.domain.time.SlotState
 import com.example.lixing.domain.time.SlotWindow
@@ -57,6 +59,14 @@ class TodayViewModel @Inject constructor(
     /** 当前打卡对话框的目标任务。null = 关闭。 */
     private val _checkInTarget = MutableStateFlow<DailyTaskEntity?>(null)
     val checkInTarget: StateFlow<DailyTaskEntity?> = _checkInTarget.asStateFlow()
+    private val _contentProgress = MutableStateFlow<TaskContentProgressEntity?>(null)
+    val contentProgress: StateFlow<TaskContentProgressEntity?> = _contentProgress.asStateFlow()
+    private val _currentProgress = MutableStateFlow<Map<String, TaskContentProgressEntity>>(emptyMap())
+    val currentProgress: StateFlow<Map<String, TaskContentProgressEntity>> = _currentProgress.asStateFlow()
+    private val _manualMinutes = MutableStateFlow(0)
+    val manualMinutes: StateFlow<Int> = _manualMinutes.asStateFlow()
+    private val _manualTimeError = MutableStateFlow<String?>(null)
+    val manualTimeError: StateFlow<String?> = _manualTimeError.asStateFlow()
 
     private val clock = MutableStateFlow(buildClock(java.time.LocalTime.of(4, 0)))
 
@@ -135,6 +145,12 @@ class TodayViewModel @Inject constructor(
                     // 以库为唯一真相：整体替换缓存，不做累加
                     currentTasks = tasks.distinctBy { it.id }
                 _state.update { rebuildSections(it, currentTasks, currentSlots) }
+            }
+        }
+
+        viewModelScope.launch {
+            taskRepository.observeCurrentContentProgressOfDate(clock.value.today()).collect {
+                _currentProgress.value = it
             }
         }
 
@@ -274,11 +290,11 @@ class TodayViewModel @Inject constructor(
         viewModelScope.launch {
             if (task.status.isEngaged) {
                 // 已完成的任务：长按撤销，点击则打开编辑
-                _checkInTarget.value = task
+                openCheckIn(task)
                 return@launch
             }
             if (task.targetType.isQuantified) {
-                _checkInTarget.value = task
+                openCheckIn(task)
             } else {
                 doCheckIn(task.id, 1)
             }
@@ -287,24 +303,52 @@ class TodayViewModel @Inject constructor(
 
     /** 长按：开始专注。这里先走打卡弹窗占位，专注计时在 Focus 模块接上。 */
     fun onTaskLongPress(task: DailyTaskEntity) {
+        viewModelScope.launch { openCheckIn(task) }
+    }
+
+    private suspend fun openCheckIn(task: DailyTaskEntity) {
+        _contentProgress.value = taskRepository.getLatestContentProgress(task.id)
+        _manualMinutes.value = taskRepository.getManualMinutesOfTask(task.id)
+        _manualTimeError.value = null
         _checkInTarget.value = task
     }
 
-    fun submitCheckIn(taskId: String, value: Int, note: String? = null, photo: String? = null) {
-        doCheckIn(taskId, value, note, photo)
+    fun saveManualMinutes(taskId: String, minutes: Int) {
+        viewModelScope.launch {
+            runCatching { taskRepository.setManualMinutesOfTask(taskId, minutes) }
+                .onSuccess {
+                    _manualMinutes.value = minutes
+                    _manualTimeError.value = null
+                }
+                .onFailure { _manualTimeError.value = it.message ?: "保存失败" }
+        }
+    }
+
+    fun submitCheckIn(taskId: String, value: Int, note: String? = null, photo: String? = null,
+                      contentProgress: ContentProgressInput? = null) {
+        doCheckIn(taskId, value, note, photo, contentProgress)
     }
 
     fun revokeCheckIn(taskId: String) {
         viewModelScope.launch {
             checkIn.revoke(taskId, clock.value)
             _checkInTarget.value = null
+            _contentProgress.value = null
         }
     }
 
-    private fun doCheckIn(taskId: String, value: Int, note: String? = null, photo: String? = null) {
+    private fun doCheckIn(taskId: String, value: Int, note: String? = null, photo: String? = null,
+                          contentProgress: ContentProgressInput? = null) {
         viewModelScope.launch {
-            val result = checkIn(taskId, value, clock.value, note = note, photo = photo)
+            val result = runCatching {
+                checkIn(taskId, value, clock.value, note = note, photo = photo,
+                    contentProgress = contentProgress)
+            }.getOrElse {
+                _manualTimeError.value = it.message ?: "打卡保存失败"
+                return@launch
+            }
             _checkInTarget.value = null
+            _contentProgress.value = null
             when (result) {
                 is CheckInResult.Success -> {
                     _events.value = TodayEvent.CheckInSuccess(result)
@@ -327,6 +371,7 @@ class TodayViewModel @Inject constructor(
 
     fun dismissCheckIn() {
         _checkInTarget.value = null
+        _contentProgress.value = null
     }
 
     fun consumeEvent() {

@@ -3,9 +3,12 @@ package com.example.lixing.ui.screen.focus
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.lixing.data.local.entity.FocusSessionEntity
+import com.example.lixing.data.local.entity.DailyTaskEntity
+import com.example.lixing.data.local.entity.SubjectEntity
 import com.example.lixing.data.prefs.UserPreferencesRepository
 import com.example.lixing.data.repository.FocusRepository
 import com.example.lixing.data.repository.PlanRepository
+import com.example.lixing.data.repository.TaskRepository
 import com.example.lixing.domain.model.FocusMode
 import com.example.lixing.domain.time.StudyClock
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -34,12 +37,17 @@ data class FocusUiState(
     val totalFocusMinutes: Int = 0,
     val selectedTaskId: String? = null,
     val selectedTaskTitle: String? = null,
+    val selectedSubjectId: String? = null,
+    val selectedSubjectName: String = "未分类",
+    val availableTasks: List<DailyTaskEntity> = emptyList(),
+    val availableSubjects: List<SubjectEntity> = emptyList(),
 )
 
 @HiltViewModel
 class FocusViewModel @Inject constructor(
     private val focusRepository: FocusRepository,
     private val planRepository: PlanRepository,
+    private val taskRepository: TaskRepository,
     private val prefsRepository: UserPreferencesRepository,
 ) : ViewModel() {
 
@@ -54,16 +62,26 @@ class FocusViewModel @Inject constructor(
     /** 中断只在用户接受并记录本次专注时落库；放弃时全部丢弃。 */
     private var pendingInterruptions = 0
 
-    private val clock = StudyClock()
+    private var clock = StudyClock()
 
     init {
         viewModelScope.launch {
             val prefs = prefsRepository.current()
+            clock = StudyClock(dayStart = prefs.dayStartTime)
             _state.update {
                 it.copy(
                     pomodoroSeconds = prefs.pomodoroMinutes * 60,
                     remainingSeconds = prefs.pomodoroMinutes * 60,
                 )
+            }
+            taskRepository.observeTasksOfDay(clock.today()).collect { tasks ->
+                _state.update { it.copy(availableTasks = tasks) }
+            }
+        }
+        viewModelScope.launch {
+            planRepository.activePlan.collect { plan ->
+                val subjects = plan?.let { p -> planRepository.getSubjects(p.id) }.orEmpty()
+                _state.update { it.copy(availableSubjects = subjects) }
             }
         }
         viewModelScope.launch {
@@ -81,6 +99,7 @@ class FocusViewModel @Inject constructor(
     private fun resumeIfRunning() {
         viewModelScope.launch {
             val running = focusRepository.getRunningSession() ?: return@launch
+            val task = running.dailyTaskId?.let { taskRepository.getTask(it) }
             currentSessionId = running.id
             startedAt = running.startedAt
             _state.update {
@@ -89,6 +108,10 @@ class FocusViewModel @Inject constructor(
                     mode = running.mode,
                     interruptions = running.interruptionCount,
                     selectedTaskId = running.dailyTaskId,
+                    selectedSubjectId = running.subjectId,
+                    selectedTaskTitle = task?.title,
+                    selectedSubjectName = task?.subjectName ?: _state.value.availableSubjects
+                        .firstOrNull { subject -> subject.id == running.subjectId }?.name ?: "未分类",
                 )
             }
             startTicking()
@@ -110,19 +133,21 @@ class FocusViewModel @Inject constructor(
 
     private fun start(mode: FocusMode) {
         viewModelScope.launch {
-            val plan = planRepository.getActivePlan()
-            val subjects = plan?.let { planRepository.getSubjects(it.id) } ?: emptyList()
-            val subjectId = subjects.firstOrNull()?.id
+            val date = clock.today()
+            val task = _state.value.selectedTaskId?.let { taskRepository.getTask(it) }
+                ?.takeIf { it.date == date }
+            val subjectId = task?.subjectId ?: _state.value.selectedSubjectId
+                ?.takeIf { id -> _state.value.availableSubjects.any { it.id == id && !it.isArchived } }
 
             val sessionId = focusRepository.start(
-                date = clock.today(),
-                dailyTaskId = _state.value.selectedTaskId,
+                date = date,
+                dailyTaskId = task?.id,
                 subjectId = subjectId,
                 mode = mode,
                 plannedMinutes = _state.value.pomodoroSeconds / 60,
             )
             currentSessionId = sessionId
-            startedAt = Instant.now()
+            startedAt = focusRepository.getSession(sessionId)?.startedAt ?: Instant.now()
             pendingInterruptions = 0
             interruptionReportedForBackground = false
             _state.update {
@@ -209,7 +234,19 @@ class FocusViewModel @Inject constructor(
     }
 
     fun selectTask(taskId: String, title: String) {
-        _state.update { it.copy(selectedTaskId = taskId, selectedTaskTitle = title) }
+        val task = _state.value.availableTasks.firstOrNull { it.id == taskId } ?: return
+        _state.update { it.copy(
+            selectedTaskId = taskId, selectedTaskTitle = title,
+            selectedSubjectId = task.subjectId, selectedSubjectName = task.subjectName,
+        ) }
+    }
+
+    fun selectFreeSubject(subjectId: String?) {
+        val subject = _state.value.availableSubjects.firstOrNull { it.id == subjectId }
+        _state.update { it.copy(
+            selectedTaskId = null, selectedTaskTitle = null,
+            selectedSubjectId = subject?.id, selectedSubjectName = subject?.name ?: "未分类",
+        ) }
     }
 
     /**

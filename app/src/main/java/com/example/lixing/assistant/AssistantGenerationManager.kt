@@ -27,6 +27,12 @@ import com.example.lixing.data.assistant.shouldContinueGeneration
 import com.example.lixing.data.assistant.stripControlMarkers
 import com.example.lixing.data.local.entity.AssistantRequestEntity
 import com.example.lixing.data.repository.AssistantRequestRepository
+import com.example.lixing.data.repository.PlanningRepository
+import com.example.lixing.domain.time.StudyDayWindow
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import com.example.lixing.domain.assistant.AssistantFailureKind
 import com.example.lixing.domain.assistant.AssistantMessage
 import com.example.lixing.domain.assistant.AssistantRequestStatus
@@ -1523,6 +1529,7 @@ class AssistantGenerationManager @Inject constructor(
 class GenerationFinalizer @Inject constructor(
     private val requestRepository: AssistantRequestRepository,
     private val figureRenderer: FigureRenderer,
+    private val planningRepository: PlanningRepository? = null,
 ) {
     /** 收尾结果：[saved] 为 false 表示持久化被拒（attempt 过期/终态/位置不符）。 */
     data class Result(
@@ -1577,7 +1584,7 @@ class GenerationFinalizer @Inject constructor(
      * 恢复/清理/应用都应以「这一批」为单位。早先英语方案只活在内存里，
      * 用户没确认就锁屏/切走就丢了。
      */
-    private fun encodeReviewPayload(result: ParsedAssistantReply): String {
+    private suspend fun encodeReviewPayload(result: ParsedAssistantReply): String {
         val rawPlanJson = result.rawPlanActionsJson
         val planActions: List<PlanAction> = result.actions
         val englishActions = result.englishActions
@@ -1586,14 +1593,56 @@ class GenerationFinalizer @Inject constructor(
         val hasPlan = rawPlanJson != null && planActions.isNotEmpty()
         val hasEnglish = rawEnglishJson != null && englishActions.isNotEmpty()
         if (!hasPlan && !hasEnglish) return ""
+        val dated = planActions.filterIsInstance<PlanAction.AddDatedTask>()
+        val fingerprint = if (dated.isEmpty()) "" else try {
+            val active = planningRepository?.activePlanId()
+            if (active == null) "UNAVAILABLE" else planningRepository.snapshotFingerprint(active, dated.map { it.date })
+        } catch (cancelled: CancellationException) { throw cancelled }
+          catch (_: Exception) { "UNAVAILABLE" }
+        val resolvedJson = if (dated.isEmpty() || planningRepository == null || rawPlanJson == null) rawPlanJson
+            else try { resolveDatedTimes(rawPlanJson, dated) }
+                catch (cancelled: CancellationException) { throw cancelled }
+                catch (_: Exception) { rawPlanJson }
         return encodePendingReview(
             PendingPlanReviewPayload(
-                actionsJson = if (hasPlan) rawPlanJson!! else "",
+                actionsJson = if (hasPlan) resolvedJson!! else "",
                 selected = if (hasPlan) List(planActions.size) { true } else emptyList(),
+                datedPlanFingerprint = fingerprint,
                 englishActionsJson = if (hasEnglish) rawEnglishJson!! else "",
                 englishSelected = if (hasEnglish) List(englishActions.size) { true } else emptyList(),
             ),
         )
+    }
+
+    private suspend fun resolveDatedTimes(raw: String, dated: List<PlanAction.AddDatedTask>): String {
+        val planning = planningRepository ?: return raw
+        val planId = planning.activePlanId() ?: return raw
+        val array = runCatching { Json.parseToJsonElement(raw) as? JsonArray }.getOrNull() ?: return raw
+        val occupied = mutableMapOf<java.time.LocalDate, MutableList<com.example.lixing.domain.time.SlotWindow>>()
+        val replaced = mutableMapOf<java.time.LocalDate, MutableSet<String>>()
+        val reserved = mutableMapOf<java.time.LocalDate, Int>()
+        val byOrdinal = dated.associateBy { it.ordinal }
+        val dayStart = planning.studyDayStart()
+        val resolved = array.mapIndexed { index, element ->
+            val action = byOrdinal[index] ?: return@mapIndexed element
+            val existing = if (action.startTime != null && action.endTime != null) {
+                StudyDayWindow.of(action.date, action.startTime, action.endTime, dayStart)
+            } else null
+            val placed = if (existing == null && action.plannedMinutes != null) {
+                planning.proposePlacement(planId, action.date, action.timeSlotId,
+                    action.plannedMinutes, occupied[action.date].orEmpty(), action.sourceTemplateId,
+                    replaced[action.date].orEmpty(), reserved[action.date] ?: 0)
+            } else existing
+            if (placed != null) occupied.getOrPut(action.date) { mutableListOf() } += placed
+            reserved[action.date] = (reserved[action.date] ?: 0) + (action.plannedMinutes
+                ?: placed?.duration?.toMinutes()?.toInt() ?: 0)
+            action.sourceTemplateId?.let { replaced.getOrPut(action.date) { mutableSetOf() } += it }
+            if (existing == null && placed != null && element is JsonObject) JsonObject(element + mapOf(
+                "startTime" to JsonPrimitive(placed.start.toLocalTime().toString()),
+                "endTime" to JsonPrimitive(placed.end.toLocalTime().toString()),
+            )) else element
+        }
+        return JsonArray(resolved).toString()
     }
 }
 

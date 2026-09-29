@@ -4,6 +4,19 @@ import com.example.lixing.data.prefs.UserPreferencesRepository
 import com.example.lixing.data.repository.EnglishEntryRepository
 import com.example.lixing.data.repository.PlanRepository
 import com.example.lixing.data.repository.TaskRepository
+import com.example.lixing.data.repository.PlanningRepository
+import com.example.lixing.data.local.entity.ScheduledTaskEntity
+import com.example.lixing.domain.model.TargetType
+import com.example.lixing.domain.model.TaskType
+import com.example.lixing.domain.planning.ContentInterval
+import com.example.lixing.domain.planning.ContentSelection
+import com.example.lixing.domain.planning.ContentSelectionCodec
+import com.example.lixing.domain.planning.AvailabilityCodec
+import com.example.lixing.domain.planning.PlanningEngine
+import com.example.lixing.domain.time.SlotWindow
+import com.example.lixing.domain.time.StudyDayWindow
+import kotlinx.coroutines.CancellationException
+import java.util.UUID
 import com.example.lixing.domain.assistant.EnglishEntryAction
 import com.example.lixing.domain.assistant.PlanAction
 import com.example.lixing.domain.english.EnglishEntryType
@@ -18,6 +31,7 @@ class AssistantReviewPreviewBuilder @Inject constructor(
     private val planRepository: PlanRepository,
     private val taskRepository: TaskRepository,
     private val englishEntryRepository: EnglishEntryRepository,
+    private val planningRepository: PlanningRepository? = null,
 ) {
     // ---------------- 预览构建 ----------------
 
@@ -26,8 +40,8 @@ class AssistantReviewPreviewBuilder @Inject constructor(
     suspend fun buildPreviews(
         actions: List<PlanAction>,
         today: LocalDate,
-    ): List<PendingPlanAction> =
-        actions.map { action ->
+    ): List<PendingPlanAction> {
+        val previews = actions.map { action ->
             when (action) {
                 is PlanAction.UpdateTimeSlot -> previewUpdateTimeSlot(action)
                 is PlanAction.UpdateTaskTemplate -> previewUpdateTemplate(action)
@@ -36,8 +50,138 @@ class AssistantReviewPreviewBuilder @Inject constructor(
                 is PlanAction.SkipTodayTask -> previewSkipTodayTask(action, today)
                 is PlanAction.TakeTodayOff -> previewTakeTodayOff(action, today)
                 is PlanAction.KeepTodayTasks -> previewKeepTodayTasks(action, today)
+                is PlanAction.AddDatedTask -> previewDatedTask(action, today)
             }
         }
+        val dayStart = prefsRepository.current().dayStartTime
+        val planId = planRepository.getActivePlan()?.id
+        val datedByDay = actions.filterIsInstance<PlanAction.AddDatedTask>().groupBy { it.date }
+        val capacityProblems = if (planId == null || planningRepository == null) emptyMap() else buildMap {
+            datedByDay.forEach { (date, candidates) ->
+                val policy = planningRepository.getDayPolicy(planId, date) ?: return@forEach
+                val windows = AvailabilityCodec.decode(policy.windowsJson) ?: return@forEach
+                val capacity = minOf(PlanningEngine.capacityMinutes(
+                    PlanningEngine.validateWindows(date, dayStart, windows)),
+                    policy.maxPlannedMinutes ?: Int.MAX_VALUE)
+                val replaced = candidates.mapNotNull { it.sourceTemplateId }.toSet()
+                val existing = planningRepository.previewDay(planId, date)
+                    .filterNot { it.templateId != null && it.templateId in replaced }
+                    .sumOf { it.plannedMinutes ?: 0 }
+                val proposed = candidates.sumOf { candidate -> candidate.plannedMinutes ?:
+                    if (candidate.startTime != null && candidate.endTime != null)
+                        SlotWindow.of(date, candidate.startTime, candidate.endTime).duration.toMinutes().toInt()
+                    else 0 }
+                if (existing + proposed > capacity) put(date,
+                    "当天预计 ${existing + proposed} 分钟，超过可用容量 $capacity 分钟")
+            }
+        }
+        return previews.mapIndexed { index, preview ->
+            val action = preview.action as? PlanAction.AddDatedTask ?: return@mapIndexed preview
+            if (preview.problem != null) return@mapIndexed preview
+            val duplicated = actions.withIndex().any { (otherIndex, other) ->
+                otherIndex != index && other is PlanAction.AddDatedTask &&
+                    other.date == action.date && action.sourceTemplateId != null &&
+                    other.sourceTemplateId == action.sourceTemplateId
+            }
+            val overlap = action.startTime != null && action.endTime != null && actions.withIndex().any { (otherIndex, other) ->
+                if (otherIndex == index || other !is PlanAction.AddDatedTask || other.date != action.date ||
+                    other.startTime == null || other.endTime == null) false
+                else {
+                    val first = runCatching { StudyDayWindow.of(action.date, action.startTime, action.endTime, dayStart) }.getOrNull()
+                    val second = runCatching { StudyDayWindow.of(other.date, other.startTime, other.endTime, dayStart) }.getOrNull()
+                    first != null && second != null && first.start < second.end && second.start < first.end
+                }
+            }
+            when {
+                duplicated -> preview.copy(problem = "同一天同一重复任务出现多次替代")
+                overlap -> preview.copy(problem = "与同批次另一条安排的时间重叠")
+                capacityProblems[action.date] != null -> preview.copy(problem = capacityProblems[action.date])
+                else -> preview
+            }
+        }
+    }
+
+    private suspend fun previewDatedTask(action: PlanAction.AddDatedTask, today: LocalDate): PendingPlanAction {
+        val plan = planRepository.getActivePlan()
+        val subject = planRepository.getSubject(action.subjectId)
+        val slot = planRepository.getTimeSlot(action.timeSlotId)
+        val template = action.sourceTemplateId?.let { planRepository.getTemplate(it) }
+        val existing = if (plan != null) planningRepository?.getSchedules(plan.id, action.date, action.date).orEmpty()
+            else emptyList()
+        val goal = if (plan != null && action.goalId != null) planningRepository?.getGoals(plan.id)
+            ?.firstOrNull { it.id == action.goalId } else null
+        val resourceId = action.resourceId ?: goal?.resourceId
+        val resource = if (plan != null && resourceId != null) planningRepository?.getResources(plan.id)
+            ?.firstOrNull { it.id == resourceId } else null
+        val basicProblem = when {
+            plan == null -> "当前没有计划"
+            action.date < today || action.date < plan.startDate -> "安排日期已经过去或早于计划起始日"
+            subject?.planId != plan.id -> "科目不属于当前计划"
+            slot?.planId != plan.id || slot.isEnabled.not() -> "时段不存在或已停用"
+            action.goalId != null && (goal == null || goal.subjectId != action.subjectId) -> "学习目标不存在或不属于该科目"
+            resourceId != null && (resource == null || resource.subjectId != action.subjectId) -> "学习资料不存在或不属于该科目"
+            goal?.resourceId != null && resource?.id != goal.resourceId -> "资料与学习目标不一致"
+            resource != null && action.resourceName.isNotBlank() && action.resourceName != resource.name ->
+                "资料名称与所选资料 id 不一致"
+            action.sourceTemplateId != null && template?.subjectId != subject?.id -> "被替代的重复任务不属于该科目"
+            action.sourceTemplateId != null && existing.any { it.sourceTemplateId == action.sourceTemplateId && it.state != "DEFAULT" } ->
+                "该日的重复任务已有具体安排"
+            action.startTime != null && action.endTime == null || action.startTime == null && action.endTime != null ->
+                "开始与结束时间需同时填写"
+            else -> null
+        }
+        val problem = if (basicProblem != null || plan == null || planningRepository == null) basicProblem
+            else try {
+                val content = if (action.resourceName.isNotBlank() || action.chapter.isNotBlank() ||
+                    action.questionFirst != null || resource != null) ContentSelection(
+                    resourceName = resource?.name ?: action.resourceName,
+                    edition = resource?.edition.orEmpty(), chapter = action.chapter,
+                    kind = if (action.questionFirst == null) "UNIT" else "QUESTION",
+                    intervals = if (action.questionFirst == null) emptyList() else
+                        listOf(ContentInterval(action.questionFirst, requireNotNull(action.questionLast))),
+                    roundKey = goal?.roundKey ?: "FIRST",
+                ) else null
+                val id = if (action.sourceTemplateId != null) UUID.nameUUIDFromBytes(
+                    "lixing:override:${plan.id}:${action.date}:${action.sourceTemplateId}".toByteArray()).toString()
+                else UUID.nameUUIDFromBytes(
+                    "lixing:ai-dated:${plan.id}:${action.date}:${action.ordinal}:$action".toByteArray()).toString()
+                val minutes = action.plannedMinutes ?: if (action.startTime != null && action.endTime != null)
+                    SlotWindow.of(action.date, action.startTime, action.endTime).duration.toMinutes().toInt() else null
+                planningRepository.validateDatedCandidate(ScheduledTaskEntity(
+                    id = id, planId = plan.id, studyDate = action.date,
+                    sourceTemplateId = action.sourceTemplateId,
+                    subjectId = action.subjectId, timeSlotId = action.timeSlotId,
+                    resourceId = resource?.id, goalId = goal?.id,
+                    roundKey = goal?.roundKey ?: "FIRST",
+                    title = action.title,
+                    taskType = if (action.questionFirst == null) TaskType.CUSTOM else TaskType.PRACTICE,
+                    targetType = if (action.questionFirst == null) TargetType.BOOLEAN else TargetType.COUNT,
+                    targetValue = content?.quantity()?.takeIf { action.questionFirst != null } ?: 1,
+                    contentJson = content?.let(ContentSelectionCodec::encode).orEmpty(),
+                    plannedMinutes = minutes, startTime = action.startTime, endTime = action.endTime,
+                    state = if (action.sourceTemplateId == null) "ACTIVE" else "OVERRIDE",
+                ))
+                null
+            } catch (cancelled: CancellationException) { throw cancelled }
+              catch (invalid: IllegalArgumentException) { invalid.message ?: "安排无效" }
+              catch (invalid: IllegalStateException) { invalid.message ?: "安排冲突" }
+        val displayMinutes = action.plannedMinutes ?: if (action.startTime != null && action.endTime != null)
+            SlotWindow.of(action.date, action.startTime, action.endTime).duration.toMinutes().toInt() else null
+        val content = listOfNotNull((resource?.name ?: action.resourceName).takeIf(String::isNotBlank),
+            action.chapter.takeIf(String::isNotBlank),
+            action.questionFirst?.let { "第 $it–${action.questionLast} 题" },
+            displayMinutes?.let { "预计 $it 分钟" },
+            if (action.startTime != null && action.endTime != null) "${action.startTime}–${action.endTime}"
+                else "未排定具体时间").joinToString(" · ")
+        return PendingPlanAction(
+            action = action,
+            title = "${action.date} · ${if (action.sourceTemplateId == null) "新增" else "细化"}「${action.title}」",
+            before = template?.let { "当天原重复任务：${it.title}" } ?: "当天新增独立任务",
+            after = "${subject?.name ?: "未知科目"} · ${slot?.name ?: "未知时段"} · $content",
+            scope = if (action.date == today) PlanChangeScope.TODAY else PlanChangeScope.LONG_TERM,
+            problem = problem,
+        )
+    }
 
     private suspend fun previewUpdateTimeSlot(action: PlanAction.UpdateTimeSlot): PendingPlanAction {
         val slot = planRepository.getTimeSlot(action.slotId)

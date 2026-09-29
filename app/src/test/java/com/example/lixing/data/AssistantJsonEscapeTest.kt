@@ -26,6 +26,19 @@ class AssistantJsonEscapeTest {
     }
 
     @Test
+    fun `an extra latex escaping layer is repaired after json decoding`() {
+        val raw =
+            """{"reply":"计算：${'$'}${'$'}\\\\int_0^{2\\\\pi} \\\\cos^2\\\\theta \\\\,d\\\\theta${'$'}${'$'}","plan_actions":[]}"""
+
+        val parsed = AssistantResponseParser.parse(raw)
+
+        assertEquals(
+            """计算：${'$'}${'$'}\int_0^{2\pi} \cos^2\theta \,d\theta${'$'}${'$'}""",
+            parsed.reply,
+        )
+    }
+
+    @Test
     fun `genuine json newline escape still becomes a real newline`() {
         val raw = """{"reply":"第一段\n第二段","plan_actions":[],"english_actions":[]}"""
 

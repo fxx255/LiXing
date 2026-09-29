@@ -21,22 +21,30 @@ object DailyTaskReconciler {
     fun reconcile(
         existing: List<DailyTaskEntity>,
         expected: List<DailyTaskEntity>,
+        protectedTaskIds: Set<String> = emptySet(),
     ): Result {
-        val existingByTemplate = existing.mapNotNull { task ->
-            task.templateId?.let { it to task }
-        }.toMap()
-        val expectedByTemplate = expected.mapNotNull { task ->
-            task.templateId?.let { it to task }
-        }.toMap()
-
-        val inserts = expected.filter { task ->
-            task.templateId == null || task.templateId !in existingByTemplate
-        }
-        val updates = expected.mapNotNull { fresh ->
-            val old = fresh.templateId?.let(existingByTemplate::get) ?: return@mapNotNull null
+        val existingById = existing.associateBy { it.id }
+        val existingByTemplate = existing.mapNotNull { task -> task.templateId?.let { it to task } }.toMap()
+        val matched = HashSet<String>()
+        val inserts = ArrayList<DailyTaskEntity>()
+        val updates = ArrayList<DailyTaskEntity>()
+        for (fresh in expected) {
+            val old = existingById[fresh.id] ?: fresh.templateId?.let(existingByTemplate::get)
+            if (old == null) {
+                inserts += fresh
+                continue
+            }
+            matched += old.id
+            val hasExecution = old.checkedAt != null || old.focusedMinutes > 0 ||
+                old.actualValue > 0 ||
+                (old.status != TaskStatus.PENDING && old.skipReason != "PLAN_CANCELLED")
+            // Legacy templates retain their old "refresh title while keeping progress" behavior.
+            // Dated tasks and independently recorded time/content freeze their full snapshot.
+            if (old.id in protectedTaskIds ||
+                hasExecution && (fresh.scheduleId != old.scheduleId || fresh.scheduleId != null)) continue
             val merged = fresh.copy(
                 id = old.id,
-                status = old.status,
+                status = if (old.skipReason == "PLAN_CANCELLED") TaskStatus.PENDING else old.status,
                 actualValue = old.actualValue,
                 checkedAt = old.checkedAt,
                 isLate = old.isLate,
@@ -47,14 +55,23 @@ object DailyTaskReconciler {
                 checkinPhoto = old.checkinPhoto,
                 mood = old.mood,
                 reflection = old.reflection,
+                baselineMinutes = old.baselineMinutes ?: fresh.baselineMinutes,
+                baselineValue = old.baselineValue ?: fresh.baselineValue,
+                skipReason = if (old.skipReason == "PLAN_CANCELLED") "" else old.skipReason,
+                timeAccountingVersion = if (hasExecution || fresh.scheduleId == null) {
+                    old.timeAccountingVersion
+                } else fresh.timeAccountingVersion,
             )
-            merged.takeIf { it != old }
+            if (merged != old) updates += merged
         }
-        val deleteIds = existing.mapNotNull { old ->
-            val noLongerExpected = old.templateId != null && old.templateId !in expectedByTemplate
-            old.id.takeIf { noLongerExpected && old.status == TaskStatus.PENDING && old.focusedMinutes == 0 }
+        val deleteIds = ArrayList<String>()
+        for (old in existing) {
+            if (old.id in matched || old.status != TaskStatus.PENDING || old.focusedMinutes > 0 ||
+                old.checkedAt != null || old.id in protectedTaskIds
+            ) continue
+            if (old.scheduleId != null) updates += old.copy(status = TaskStatus.SKIPPED, skipReason = "PLAN_CANCELLED")
+            else if (old.templateId != null) deleteIds += old.id
         }
-
         return Result(inserts = inserts, updates = updates, deleteIds = deleteIds)
     }
 }

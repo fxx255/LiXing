@@ -46,6 +46,11 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
 import com.example.lixing.data.local.entity.DailyTaskEntity
+import com.example.lixing.data.local.entity.TaskContentProgressEntity
+import com.example.lixing.domain.planning.ContentProgressInput
+import com.example.lixing.domain.planning.ContentRangeText
+import com.example.lixing.domain.planning.ContentSelectionCodec
+import com.example.lixing.domain.model.TargetType
 import com.example.lixing.ui.photo.importPhoto
 import com.example.lixing.ui.theme.LiXingRadius
 import com.example.lixing.ui.util.ScreenOrientationGuard
@@ -68,8 +73,12 @@ import kotlin.math.roundToInt
 @Composable
 fun CheckInDialog(
     task: DailyTaskEntity,
+    previousProgress: TaskContentProgressEntity? = null,
+    manualMinutes: Int = 0,
+    manualTimeError: String? = null,
     onDismiss: () -> Unit,
-    onSubmit: (value: Int, note: String?, photo: String?) -> Unit,
+    onSubmit: (value: Int, note: String?, photo: String?, progress: ContentProgressInput?) -> Unit,
+    onSaveManualMinutes: (Int) -> Unit = {},
     onRevoke: () -> Unit,
 ) {
     val context = LocalContext.current
@@ -82,6 +91,19 @@ fun CheckInDialog(
     // 多张照片：rememberSaveable——拍照回来若 Activity 被部分 ROM 重建，刚拍的照片不会丢
     var photos by rememberSaveable(task.id) { mutableStateOf(decodePhotos(task.checkinPhoto)) }
     var photoError by remember(task.id) { mutableStateOf<String?>(null) }
+    val plannedContent = remember(task.contentJson) { ContentSelectionCodec.decode(task.contentJson) }
+    val supportsRanges = plannedContent?.intervals?.isNotEmpty() == true &&
+        task.targetType in setOf(TargetType.COUNT, TargetType.PAGES)
+    var rangeMode by remember(task.id, previousProgress?.id) {
+        mutableStateOf(previousProgress?.mode == "RANGE")
+    }
+    var rangeText by remember(task.id, previousProgress?.id) {
+        mutableStateOf(ContentRangeText.format(
+            ContentSelectionCodec.decode(previousProgress?.completedJson.orEmpty())?.intervals.orEmpty()))
+    }
+    val parsedRanges = if (supportsRanges && rangeMode) ContentRangeText.parse(rangeText) else null
+    var manualText by remember(task.id, manualMinutes) { mutableStateOf(manualMinutes.toString()) }
+    val parsedManual = manualText.toIntOrNull()?.takeIf { it in 0..1440 }
 
     // 拍照：先建好文件拿 FileProvider URI，相机写入后追加本地路径。
     // 用路径 + rememberSaveable：旋转屏幕 / 进程被回收重建后仍能取回照片（普通 remember 会丢）。
@@ -132,14 +154,33 @@ fun CheckInDialog(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
 
-                if (useStepper) {
+                if (supportsRanges) {
+                    Text(plannedContent?.displayText().orEmpty(), style = MaterialTheme.typography.bodySmall)
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        AssistChip(onClick = { rangeMode = false }, label = { Text("只填数量") })
+                        AssistChip(onClick = { rangeMode = true }, label = { Text("填写题号/页码") })
+                    }
+                    if (rangeMode) {
+                        OutlinedTextField(
+                            value = rangeText, onValueChange = { rangeText = it },
+                            label = { Text("累计完成范围") },
+                            placeholder = { Text("190-198、200-203") },
+                            supportingText = { Text(if (parsedRanges == null) "范围格式有误"
+                                else "共 ${parsedRanges.sumOf { it.size }} ${task.targetType.unit}；更正时填写完整累计范围") },
+                            isError = parsedRanges == null,
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    }
+                }
+
+                if (!rangeMode && useStepper) {
                     StepperRow(
                         value = value,
                         unit = task.targetType.unit,
                         onMinus = { value = (value - 1).coerceAtLeast(0) },
                         onPlus = { value = value + 1 },
                     )
-                } else {
+                } else if (!rangeMode) {
                     Row(verticalAlignment = Alignment.Bottom) {
                         Text(
                             text = "$value",
@@ -177,6 +218,25 @@ fun CheckInDialog(
                     modifier = Modifier.fillMaxWidth().height(84.dp),
                     maxLines = 3,
                 )
+
+                if (task.scheduleId != null || task.plannedMinutes != null) {
+                    OutlinedTextField(
+                        value = manualText, onValueChange = { manualText = it.filter(Char::isDigit) },
+                        label = { Text("补记未使用计时器的分钟数") },
+                        supportingText = { Text("填写本任务累计补记时长；修改会替换此前补记") },
+                        isError = parsedManual == null,
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                    )
+                    TextButton(
+                        enabled = parsedManual != null && parsedManual != manualMinutes,
+                        onClick = { parsedManual?.let(onSaveManualMinutes) },
+                    ) { Text("保存补记时长") }
+                }
+                manualTimeError?.let {
+                    Text(it, color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodySmall)
+                }
 
                 // ---- 详细记录：拍照（多张）+ 预览 ----
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -237,7 +297,15 @@ fun CheckInDialog(
             }
         },
         confirmButton = {
-            TextButton(onClick = { onSubmit(value, note, if (photos.isEmpty()) "" else encodePhotos(photos)) }) {
+            TextButton(
+                enabled = !rangeMode || !parsedRanges.isNullOrEmpty(),
+                onClick = {
+                    val progress = if (supportsRanges) ContentProgressInput(if (rangeMode) parsedRanges else null)
+                        else null
+                    onSubmit(if (rangeMode) parsedRanges.orEmpty().sumOf { it.size } else value,
+                        note, if (photos.isEmpty()) "" else encodePhotos(photos), progress)
+                },
+            ) {
                 Text(if (isDone) "更新" else "打卡", fontWeight = FontWeight.Bold)
             }
         },

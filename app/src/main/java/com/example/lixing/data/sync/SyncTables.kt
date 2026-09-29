@@ -1,7 +1,7 @@
 package com.example.lixing.data.sync
 
 /**
- * 参与同步的 17 张业务表。
+ * 参与同步的业务表。
  *
  * 顺序即「父表 → 子表」：应用远端变更时按此顺序写入（外键父行先就位），
  * 删除时反向（子表先删，避免 DROP/DELETE 父行触发级联误伤）。
@@ -14,7 +14,15 @@ internal val SYNC_TABLE_SPECS: List<SyncTableSpec> = listOf(
     SyncTableSpec("subject", "id"),
     SyncTableSpec("time_slot", "id"),
     SyncTableSpec("task_template", "id"),
+    SyncTableSpec("plan_day_policy", "id"),
+    SyncTableSpec("plan_change_set", "id"),
+    SyncTableSpec("study_resource", "id"),
+    SyncTableSpec("learning_goal", "id"),
+    SyncTableSpec("learning_unit", "id"),
+    SyncTableSpec("scheduled_task", "id"),
     SyncTableSpec("daily_task", "id", setOf("checkin_photo")),
+    SyncTableSpec("task_content_progress", "id"),
+    SyncTableSpec("manual_study_time", "id"),
     SyncTableSpec("point_ledger", "id"),
     SyncTableSpec("focus_session", "id"),
     SyncTableSpec("assistant_conversation", "id"),

@@ -6,15 +6,22 @@ import com.example.lixing.data.assistant.PendingPlanReviewPayload
 import com.example.lixing.data.assistant.decodePendingReview
 import com.example.lixing.data.assistant.encodePendingReview
 import com.example.lixing.data.local.LiXingDatabase
+import com.example.lixing.data.local.entity.PlanChangeSetEntity
+import com.example.lixing.data.local.entity.PlanChangeReceiptEntity
 import com.example.lixing.data.local.dao.AssistantChatDao
 import com.example.lixing.di.IoDispatcher
 import com.example.lixing.domain.assistant.EnglishEntryAction
 import com.example.lixing.domain.assistant.PlanAction
 import com.example.lixing.domain.assistant.PlanApplyResult
 import com.example.lixing.domain.assistant.PlanChangeApplier
+import com.example.lixing.reminder.ReminderScheduler
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.withContext
 import java.time.LocalDate
+import java.security.MessageDigest
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -106,6 +113,8 @@ class AssistantReviewTransactionRepository @Inject constructor(
     private val englishEntryRepository: EnglishEntryRepository,
     private val applier: PlanChangeApplier,
     @param:IoDispatcher private val io: CoroutineDispatcher,
+    private val planningRepository: PlanningRepository? = null,
+    private val reminderScheduler: ReminderScheduler? = null,
 ) {
 
     /**
@@ -122,7 +131,15 @@ class AssistantReviewTransactionRepository @Inject constructor(
         today: LocalDate,
         dayOffLimit: Int,
     ): PlanReviewTransactionResult = withContext(io) {
-        runPlanTransaction(conversationId, messageId, selected, today, dayOffLimit)
+        val result = runPlanTransaction(conversationId, messageId, selected, today, dayOffLimit)
+        if (result is PlanReviewTransactionResult.Applied) {
+            selected.filterIsInstance<PlanAction.AddDatedTask>().map { it.date }.distinct().forEach { date ->
+                try { reminderScheduler?.scheduleFor(date) }
+                catch (cancelled: CancellationException) { throw cancelled }
+                catch (_: Exception) { /* Next daily scheduling pass will retry. */ }
+            }
+        }
+        result
     }
 
     /** 事务化应用一批**英语积累**变更。 */
@@ -143,11 +160,33 @@ class AssistantReviewTransactionRepository @Inject constructor(
         today: LocalDate,
         dayOffLimit: Int,
     ): PlanReviewTransactionResult = transactionCatching {
+        val operationDigest = MessageDigest.getInstance("SHA-256")
+            .digest(selected.joinToString("\n") { it.toString() }.toByteArray(Charsets.UTF_8))
+            .joinToString("") { "%02x".format(it) }
         val (before, payload) = loadEnvelope(conversationId, messageId)
             ?: return@transactionCatching PlanReviewTransactionResult.StaleEnvelope
+        val receipt = database.planningDao().getChangeReceipt(messageId)
+        if (receipt != null) return@transactionCatching if (receipt.operationsSha256 == operationDigest)
+            PlanReviewTransactionResult.AlreadyConsumed
+        else PlanReviewTransactionResult.Rejected("同一批次已按不同选择应用，不能再次执行")
         if (payload.applied) return@transactionCatching PlanReviewTransactionResult.AlreadyConsumed
-        if (!isSubMultiset(selected, AssistantResponseParser.parseActionsJson(payload.actionsJson))) {
+        val allActions = AssistantResponseParser.parseActionsJson(payload.actionsJson)
+        if (!isSubMultiset(selected, allActions)) {
             return@transactionCatching PlanReviewTransactionResult.Rejected("所选修改不属于这一批方案")
+        }
+        if (selected.any { it is PlanAction.AddDatedTask }) {
+            val dated = allActions.filterIsInstance<PlanAction.AddDatedTask>()
+            val planId = planningRepository?.activePlanId()
+            if (planId == null || payload.datedPlanFingerprint.isBlank() ||
+                payload.datedPlanFingerprint == "UNAVAILABLE" ||
+                planningRepository.snapshotFingerprint(planId, dated.map { it.date }) != payload.datedPlanFingerprint) {
+                return@transactionCatching PlanReviewTransactionResult.Rejected("计划已发生变化，请重新生成并预览每日安排")
+            }
+        }
+        val planId = planningRepository?.activePlanId()
+        val datedDates = allActions.filterIsInstance<PlanAction.AddDatedTask>().map { it.date }
+        val baseFingerprint = if (planId == null) "" else payload.datedPlanFingerprint.ifBlank {
+            planningRepository.snapshotFingerprint(planId, datedDates)
         }
 
         // 认领只置本类标记，保留另一类与勾选状态；失败 ⇒ 绝不执行实际动作。
@@ -157,9 +196,34 @@ class AssistantReviewTransactionRepository @Inject constructor(
 
         // 严格模式：预期内的校验失败是返回值；意外异常/取消直接抛出 ⇒ 整个事务回滚。
         val results = applier.applyStrict(selected, today, dayOffLimit)
+        if (selected.any { it is PlanAction.AddDatedTask } && results.any { !it.success }) {
+            throw NothingAppliedRollback(PlanReviewTransactionResult.NothingApplied(
+                results.map { if (it.success) it.copy(success = false,
+                    message = "本批次因其他日期校验失败而回滚") else it },
+            ))
+        }
         if (results.none { it.success }) {
             throw NothingAppliedRollback(PlanReviewTransactionResult.NothingApplied(results))
         }
+        if (planId != null) {
+            val successful = results.filter { it.success }.map { it.action }
+            val consumed = BooleanArray(allActions.size)
+            val indexes = successful.map { action ->
+                val index = allActions.indices.firstOrNull { !consumed[it] && allActions[it] == action } ?: -1
+                if (index >= 0) consumed[index] = true
+                index
+            }.filter { it >= 0 }
+            database.planningDao().insertChangeSet(PlanChangeSetEntity(
+                id = messageId, planId = planId, source = "AI",
+                actionsJson = payload.actionsJson,
+                selectedJson = Json.encodeToString(indexes),
+                baseFingerprint = baseFingerprint,
+                afterFingerprint = planningRepository.snapshotFingerprint(planId, datedDates),
+                appliedAt = System.currentTimeMillis(),
+            ))
+        }
+        database.planningDao().insertChangeReceipt(PlanChangeReceiptEntity(
+            id = messageId, operationsSha256 = operationDigest, appliedAt = System.currentTimeMillis()))
         PlanReviewTransactionResult.Applied(results)
     }
 
