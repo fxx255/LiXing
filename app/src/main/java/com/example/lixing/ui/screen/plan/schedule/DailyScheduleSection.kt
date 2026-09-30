@@ -1,6 +1,7 @@
 package com.example.lixing.ui.screen.plan.schedule
 
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -9,8 +10,11 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.DatePicker
+import androidx.compose.material3.DatePickerDialog
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -18,6 +22,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.rememberDatePickerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -37,103 +42,120 @@ import com.example.lixing.domain.planning.AvailabilityWindow
 import com.example.lixing.domain.planning.PlanningEngine
 import java.time.LocalDate
 import java.time.LocalTime
+import java.time.Instant
+import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
 
 private val dayFormat = DateTimeFormatter.ofPattern("M月d日 E")
 
-/** Week preview shares the same effective schedule resolver as the Today screen. */
+/** The selected day uses the same effective schedule resolver as the Today screen. */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun DailyScheduleSection(viewModel: DailyScheduleViewModel = hiltViewModel()) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     var editingDate by remember { mutableStateOf<LocalDate?>(null) }
     var editingEntry by remember { mutableStateOf<ScheduledTaskEntity?>(null) }
     var editingPolicyDate by remember { mutableStateOf<LocalDate?>(null) }
+    var showDatePicker by remember { mutableStateOf(false) }
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
         LearningGoalsSection(state, viewModel::saveResource, viewModel::saveGoal)
         Text("每日具体安排", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            OutlinedButton(onClick = { viewModel.shiftWeek(-1) }) { Text("上一周") }
-            OutlinedButton(onClick = { viewModel.shiftWeek(1) }) { Text("下一周") }
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+            TextButton(onClick = { viewModel.shiftDay(-1) }) { Text("前一天") }
+            OutlinedButton(onClick = { showDatePicker = true }) { Text(state.selectedDate.format(dayFormat)) }
+            TextButton(onClick = { viewModel.shiftDay(1) }) { Text("后一天") }
         }
-        Text("${state.weekStart} ～ ${state.weekStart.plusDays(6)}", style = MaterialTheme.typography.bodyMedium)
         state.message?.let { message ->
             Text(message, color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.bodyMedium)
         }
-        for (offset in 0L..6L) {
-            val date = state.weekStart.plusDays(offset)
-            val tasks = state.tasksByDate[date].orEmpty()
-            val totalMinutes = tasks.mapNotNull { it.plannedMinutes }.sum()
-            val policy = state.dayPolicies.firstOrNull { it.studyDate == date }
-            val inheritedCapacity = ScheduleLoadAnalyzer.analyze(state.slots.filter {
-                it.isEnabled && WeekdayMask(it.weekdayMask).contains(date)
-            }).scheduledMinutes
-            val policyCapacity = policy?.let { item ->
-                AvailabilityCodec.decode(item.windowsJson)?.let { windows ->
-                    runCatching { PlanningEngine.capacityMinutes(
-                        PlanningEngine.validateWindows(date, state.dayStart, windows)) }.getOrNull()
-                }
+        val date = state.selectedDate
+        val tasks = state.tasksByDate[date].orEmpty()
+        val totalMinutes = tasks.mapNotNull { it.plannedMinutes }.sum()
+        val policy = state.dayPolicies.firstOrNull { it.studyDate == date }
+        val inheritedCapacity = ScheduleLoadAnalyzer.analyze(state.slots.filter {
+            it.isEnabled && WeekdayMask(it.weekdayMask).contains(date)
+        }).scheduledMinutes
+        val policyCapacity = policy?.let { item ->
+            AvailabilityCodec.decode(item.windowsJson)?.let { windows ->
+                runCatching { PlanningEngine.capacityMinutes(
+                    PlanningEngine.validateWindows(date, state.dayStart, windows)) }.getOrNull()
             }
-            val capacity = if (policyCapacity == null) inheritedCapacity else
-                minOf(policyCapacity, policy.maxPlannedMinutes ?: Int.MAX_VALUE)
-            Surface(tonalElevation = 1.dp, shape = MaterialTheme.shapes.medium, modifier = Modifier.fillMaxWidth()) {
-                Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                        Text(date.format(dayFormat), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-                        TextButton(onClick = { editingEntry = null; editingDate = date }) { Text("添加安排") }
+        }
+        val capacity = if (policyCapacity == null) inheritedCapacity else
+            minOf(policyCapacity, policy.maxPlannedMinutes ?: Int.MAX_VALUE)
+        Surface(tonalElevation = 1.dp, shape = MaterialTheme.shapes.medium, modifier = Modifier.fillMaxWidth()) {
+            Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                    Text("当天安排", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                    TextButton(onClick = { editingEntry = null; editingDate = date }) { Text("添加安排") }
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    TextButton(onClick = { editingPolicyDate = date }) {
+                        Text(if (policy == null) "设置当天可用时间" else "编辑当天可用时间")
                     }
-                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        TextButton(onClick = { editingPolicyDate = date }) {
-                            Text(if (policy == null) "设置当天可用时间" else "编辑当天可用时间")
-                        }
-                        if (policy != null) TextButton(onClick = { viewModel.clearDayPolicy(date) }) {
-                            Text("恢复周期时段")
-                        }
+                    if (policy != null) TextButton(onClick = { viewModel.clearDayPolicy(date) }) {
+                        Text("恢复周期时段")
                     }
-                    if (tasks.isEmpty()) Text("暂无学习任务", style = MaterialTheme.typography.bodySmall)
-                    else {
-                        Text("预计 ${totalMinutes / 60} 小时 ${totalMinutes % 60} 分钟" +
-                            if (tasks.any { it.plannedMinutes == null }) " · 部分任务未估时" else "",
+                }
+                if (tasks.isEmpty()) Text("暂无学习任务", style = MaterialTheme.typography.bodySmall)
+                else {
+                    Text("预计 ${totalMinutes / 60} 小时 ${totalMinutes % 60} 分钟" +
+                        if (tasks.any { it.plannedMinutes == null }) " · 部分任务未估时" else "",
+                        style = MaterialTheme.typography.bodySmall)
+                    Text("${if (policy == null) "周期时段约" else "当天可用"} $capacity 分钟" +
+                        if (totalMinutes > capacity) " · 已超出 ${totalMinutes - capacity} 分钟，请调整" else "",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (totalMinutes > capacity) MaterialTheme.colorScheme.error
+                            else MaterialTheme.colorScheme.onSurfaceVariant)
+                    tasks.forEachIndexed { index, task ->
+                        if (index > 0) HorizontalDivider()
+                        val time = if (task.scheduledStart != null && task.scheduledEnd != null) {
+                            "${task.scheduledStart}–${task.scheduledEnd}"
+                        } else task.slotName
+                        Text("$time · ${task.subjectName} · ${task.title}", style = MaterialTheme.typography.bodyMedium)
+                        val detail = ContentSelectionCodec.decode(task.contentJson)?.displayText().orEmpty()
+                        if (detail.isNotBlank()) Text(detail, style = MaterialTheme.typography.bodySmall)
+                        val target = when (task.targetType.name) {
+                            "COUNT" -> "目标 ${task.targetValue} 题"
+                            "PAGES" -> "目标 ${task.targetValue} 页"
+                            "MINUTES" -> "目标 ${task.targetValue} 分钟"
+                            else -> "完成即可"
+                        }
+                        Text("$target${task.plannedMinutes?.let { " · 预计 $it 分钟" }.orEmpty()}",
                             style = MaterialTheme.typography.bodySmall)
-                        Text("${if (policy == null) "周期时段约" else "当天可用"} $capacity 分钟" +
-                            if (totalMinutes > capacity) " · 已超出 ${totalMinutes - capacity} 分钟，请调整" else "",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = if (totalMinutes > capacity) MaterialTheme.colorScheme.error
-                                else MaterialTheme.colorScheme.onSurfaceVariant)
-                        tasks.forEachIndexed { index, task ->
-                            if (index > 0) HorizontalDivider()
-                            val time = if (task.scheduledStart != null && task.scheduledEnd != null) {
-                                "${task.scheduledStart}–${task.scheduledEnd}"
-                            } else task.slotName
-                            Text("$time · ${task.subjectName} · ${task.title}", style = MaterialTheme.typography.bodyMedium)
-                            val detail = ContentSelectionCodec.decode(task.contentJson)?.displayText().orEmpty()
-                            if (detail.isNotBlank()) Text(detail, style = MaterialTheme.typography.bodySmall)
-                            val target = when (task.targetType.name) {
-                                "COUNT" -> "目标 ${task.targetValue} 题"
-                                "PAGES" -> "目标 ${task.targetValue} 页"
-                                "MINUTES" -> "目标 ${task.targetValue} 分钟"
-                                else -> "完成即可"
-                            }
-                            Text("$target${task.plannedMinutes?.let { " · 预计 $it 分钟" }.orEmpty()}",
-                                style = MaterialTheme.typography.bodySmall)
-                            task.scheduleId?.let { scheduleId ->
-                                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                    TextButton(onClick = {
-                                        editingEntry = state.scheduled.firstOrNull { it.id == scheduleId }
-                                        editingDate = date
-                                    }) { Text("编辑") }
-                                    TextButton(onClick = { viewModel.cancel(scheduleId) }) { Text("取消此安排") }
-                                }
+                        task.scheduleId?.let { scheduleId ->
+                            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                TextButton(onClick = {
+                                    editingEntry = state.scheduled.firstOrNull { it.id == scheduleId }
+                                    editingDate = date
+                                }) { Text("编辑") }
+                                TextButton(onClick = { viewModel.cancel(scheduleId) }) { Text("取消此安排") }
                             }
                         }
                     }
-                    state.scheduled.filter { it.studyDate == date && it.state == "SUPPRESS" }.forEach { suppressed ->
-                        TextButton(onClick = { viewModel.restore(suppressed.id) }) {
-                            Text("恢复「${suppressed.title}」的重复任务")
-                        }
+                }
+                state.scheduled.filter { it.studyDate == date && it.state == "SUPPRESS" }.forEach { suppressed ->
+                    TextButton(onClick = { viewModel.restore(suppressed.id) }) {
+                        Text("恢复「${suppressed.title}」的重复任务")
                     }
                 }
             }
         }
+    }
+    if (showDatePicker) {
+        val pickerState = rememberDatePickerState(
+            initialSelectedDateMillis = state.selectedDate.atStartOfDay(ZoneOffset.UTC).toInstant().toEpochMilli(),
+        )
+        DatePickerDialog(
+            onDismissRequest = { showDatePicker = false },
+            confirmButton = { TextButton(onClick = {
+                pickerState.selectedDateMillis?.let {
+                    viewModel.selectDate(Instant.ofEpochMilli(it).atZone(ZoneOffset.UTC).toLocalDate())
+                }
+                showDatePicker = false
+            }) { Text("确定") } },
+            dismissButton = { TextButton(onClick = { showDatePicker = false }) { Text("取消") } },
+        ) { DatePicker(state = pickerState) }
     }
     editingDate?.let { date ->
         AddDatedTaskDialog(
@@ -268,32 +290,36 @@ private fun AddDatedTaskDialog(
                         }
                     }
                 }
-                OutlinedButton(onClick = { templateMenu = true }) {
-                    Text(state.templates.firstOrNull { it.id == templateId }?.title ?: "新增独立任务（可选择替代重复任务）")
-                }
-                DropdownMenu(templateMenu, onDismissRequest = { templateMenu = false }) {
-                    DropdownMenuItem(text = { Text("新增独立任务") }, onClick = { templateId = null; templateMenu = false })
-                    state.templates.filter { it.subjectId == subjectId && it.isEnabled }.forEach { template ->
-                        DropdownMenuItem(text = { Text("替代：${template.title}") }, onClick = {
-                            templateId = template.id
-                            if (title.isBlank()) title = template.title
-                            templateMenu = false
-                        })
+                Box {
+                    OutlinedButton(onClick = { templateMenu = true }) {
+                        Text(state.templates.firstOrNull { it.id == templateId }?.title ?: "新增独立任务（可选择替代重复任务）")
+                    }
+                    DropdownMenu(templateMenu, onDismissRequest = { templateMenu = false }) {
+                        DropdownMenuItem(text = { Text("新增独立任务") }, onClick = { templateId = null; templateMenu = false })
+                        state.templates.filter { it.subjectId == subjectId && it.isEnabled }.forEach { template ->
+                            DropdownMenuItem(text = { Text("替代：${template.title}") }, onClick = {
+                                templateId = template.id
+                                if (title.isBlank()) title = template.title
+                                templateMenu = false
+                            })
+                        }
                     }
                 }
-                OutlinedButton(onClick = { goalMenu = true }) {
-                    Text(state.goals.firstOrNull { it.id == goalId }?.title ?: "关联学习目标（可选）")
-                }
-                DropdownMenu(goalMenu, onDismissRequest = { goalMenu = false }) {
-                    DropdownMenuItem(text = { Text("不关联目标") }, onClick = { goalId = null; goalMenu = false })
-                    state.goals.filter { it.subjectId == subjectId }.forEach { goal ->
-                        DropdownMenuItem(text = { Text(goal.title) }, onClick = {
-                            goalId = goal.id
-                            goal.resourceId?.let { resourceId ->
-                                state.resources.firstOrNull { it.id == resourceId }?.let { resource = it.name }
-                            }
-                            goalMenu = false
-                        })
+                Box {
+                    OutlinedButton(onClick = { goalMenu = true }) {
+                        Text(state.goals.firstOrNull { it.id == goalId }?.title ?: "关联学习目标（可选）")
+                    }
+                    DropdownMenu(goalMenu, onDismissRequest = { goalMenu = false }) {
+                        DropdownMenuItem(text = { Text("不关联目标") }, onClick = { goalId = null; goalMenu = false })
+                        state.goals.filter { it.subjectId == subjectId }.forEach { goal ->
+                            DropdownMenuItem(text = { Text(goal.title) }, onClick = {
+                                goalId = goal.id
+                                goal.resourceId?.let { resourceId ->
+                                    state.resources.firstOrNull { it.id == resourceId }?.let { resource = it.name }
+                                }
+                                goalMenu = false
+                            })
+                        }
                     }
                 }
                 OutlinedTextField(title, { title = it }, label = { Text("任务名称") }, singleLine = true)

@@ -91,6 +91,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.zIndex
@@ -623,6 +624,17 @@ fun AssistantScreen(
                                 )
                             }
                         }
+                        if (message.role == "user" && message.id == state.retryUserMessageId) {
+                            state.retryRequestId?.let { requestId ->
+                                RetrySendButton(
+                                    requestId = requestId,
+                                    reason = state.retryReason,
+                                    busy = state.busy || state.retrying,
+                                    onClick = viewModel::retryInterrupted,
+                                    modifier = Modifier.fillMaxWidth(),
+                                )
+                            }
+                        }
                         if (message.role == "assistant" && !(index == 0 && state.busy)) {
                             AssistantMessageActionBar(
                                 planCount = planCount,
@@ -691,16 +703,6 @@ fun AssistantScreen(
                         )
                     }
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        // 输入框左侧的「重新发送」：只在当前会话最新请求中断且可重试时出现。
-                        // 无中断时不占位，因此不会多出一行常驻提示。
-                        state.retryRequestId?.let { requestId ->
-                            RetrySendButton(
-                                reason = state.retryReason,
-                                busy = state.busy || state.retrying,
-                                onClick = viewModel::retryInterrupted,
-                                requestId = requestId,
-                            )
-                        }
                         IconButton(
                             onClick = {
                                 val file = createAssistantPhotoFile(context)
@@ -1301,14 +1303,13 @@ internal fun MessageBubble(
 }
 
 /**
- * 输入框左侧的「重新发送」按钮。
+ * 失败用户气泡旁的「重新发送」按钮。
  *
- * 设计要点（对应实施文档第三节）：
- * - **只在中断时出现**：`state.retryRequestId` 为空就整块不渲染，
- *   所以平时不会占据一个常驻提示行；
+ * 设计要点：
+ * - 只挂在失败请求的用户消息上，避免底栏按钮与失败消息分离；
  * - 图标是回旋箭头（[Icons.Filled.RotateRight]），内容描述为「重新发送」；
  * - 点击立即防重入（`busy`/`retrying` 期间禁用），不会连点发出多次请求；
- * - 失败原因作为副标题展示，让用户知道上次为什么中断，而不是只看到一个孤立的箭头。
+ * - 失败原因与按钮并排展示，让用户知道上次为什么中断。
  */
 @Composable
 private fun RetrySendButton(
@@ -1316,8 +1317,20 @@ private fun RetrySendButton(
     reason: String?,
     busy: Boolean,
     onClick: () -> Unit,
+    modifier: Modifier = Modifier,
 ) {
-    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+    Row(modifier = modifier.testTag("assistant-retry-$requestId"),
+        horizontalArrangement = Arrangement.End, verticalAlignment = Alignment.CenterVertically) {
+        reason?.takeIf { it.isNotBlank() }?.let { text ->
+            Text(
+                text = "发送失败 · $text",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f, fill = false),
+            )
+        }
         IconButton(
             onClick = onClick,
             enabled = !busy,
@@ -1331,14 +1344,6 @@ private fun RetrySendButton(
                 } else {
                     MaterialTheme.colorScheme.primary
                 },
-            )
-        }
-        reason?.takeIf { it.isNotBlank() }?.let { text ->
-            Text(
-                text = text,
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 1,
             )
         }
     }

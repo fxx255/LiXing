@@ -7,6 +7,8 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import java.security.MessageDigest
+import java.time.LocalDate
+import com.example.lixing.domain.time.StudyClock
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -35,8 +37,22 @@ class SyncEngine @Inject constructor(
     suspend fun sync(transport: SyncTransport): SyncReport =
         sync(transport, identity.deviceId())
 
+    suspend fun sync(transport: SyncTransport, achieveThreshold: Float): SyncReport =
+        sync(transport, identity.deviceId(), achieveThreshold)
+
+    suspend fun sync(
+        transport: SyncTransport, achieveThreshold: Float, studyToday: LocalDate,
+        rescueCardsPerMonth: Int,
+    ): SyncReport = sync(transport, identity.deviceId(), achieveThreshold, studyToday, rescueCardsPerMonth)
+
     /** 测试与内部复用：显式指定本端设备 id，模拟不同设备。 */
-    internal suspend fun sync(transport: SyncTransport, localDeviceId: String): SyncReport =
+    internal suspend fun sync(
+        transport: SyncTransport,
+        localDeviceId: String,
+        achieveThreshold: Float = 0.6f,
+        studyToday: LocalDate = StudyClock().today(),
+        rescueCardsPerMonth: Int = 1,
+    ): SyncReport =
         withContext(io) {
             // Re-read historical baselines once after fixing the old "skip failed row, advance cursor" bug.
             if (store.cursors()[REPAIR_CURSOR_KEY] != REPAIR_REVISION) {
@@ -86,7 +102,7 @@ class SyncEngine @Inject constructor(
                     }
                     if (!hasBaseline || snapshot.clock > cursor) {
                         val outcome = applyPeerRows(if (hasBaseline) snapshot.rows.filter { it.clock > cursor } else snapshot.rows,
-                            peer, localDeviceId)
+                            peer, localDeviceId, achieveThreshold, studyToday, rescueCardsPerMonth)
                         appliedRows += outcome.appliedRows
                         appliedTombstones += outcome.appliedTombstones
                         skippedRows += outcome.skippedRows
@@ -106,7 +122,8 @@ class SyncEngine @Inject constructor(
                         if (parseErrors.isNotEmpty()) continue
                         val pending = rows.filter { it.clock > cursor }
                         if (pending.isNotEmpty()) {
-                            val outcome = applyPeerRows(pending, peer, localDeviceId)
+                            val outcome = applyPeerRows(pending, peer, localDeviceId, achieveThreshold,
+                                studyToday, rescueCardsPerMonth)
                             appliedRows += outcome.appliedRows
                             appliedTombstones += outcome.appliedTombstones
                             skippedRows += outcome.skippedRows
@@ -136,7 +153,8 @@ class SyncEngine @Inject constructor(
             val logSize = files.firstOrNull { it.name == ownLogName }?.sizeBytes ?: 0L
             // 没发过基线（新设备或刚恢复过备份）也要重写快照，否则历史数据永远推不上去
             val writeSnapshot = !hasSnapshot || logSize > COMPACT_LOG_BYTES || selfCursor < 0L ||
-                cursors["__database_version__"] != LiXingDatabase.VERSION.toLong()
+                cursors["__database_version__"] != LiXingDatabase.VERSION.toLong() ||
+                cursors["__sync_format__"] != SYNC_FORMAT.toLong()
 
             val changes = store.readChangesSince(if (writeSnapshot) -1L else selfCursor)
                 .map { it.copy(originDeviceId = it.originDeviceId.ifBlank { localDeviceId }) }
@@ -176,6 +194,7 @@ class SyncEngine @Inject constructor(
 
             store.saveCursor(SELF_CURSOR_KEY, clock)
             store.saveCursor("__database_version__", LiXingDatabase.VERSION.toLong())
+            store.saveCursor("__sync_format__", SYNC_FORMAT.toLong())
 
             SyncReport(
                 pushedRows = changes.count { !it.deleted },
@@ -218,8 +237,11 @@ class SyncEngine @Inject constructor(
         MessageDigest.getInstance("SHA-256").digest(json.encodeToString(rows).toByteArray(Charsets.UTF_8))
             .joinToString("") { "%02x".format(it) }
 
-    private suspend fun applyPeerRows(rows: List<SyncRow>, peer: String, localDeviceId: String): ApplyOutcome =
-        try { store.applyRemote(rows, peer, localDeviceId) }
+    private suspend fun applyPeerRows(
+        rows: List<SyncRow>, peer: String, localDeviceId: String, achieveThreshold: Float,
+        studyToday: LocalDate, rescueCardsPerMonth: Int,
+    ): ApplyOutcome =
+        try { store.applyRemote(rows, peer, localDeviceId, achieveThreshold, studyToday, rescueCardsPerMonth) }
         catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
         catch (error: Exception) {
             store.recordPlanningConflict(peer, rows, error.safeMessage())

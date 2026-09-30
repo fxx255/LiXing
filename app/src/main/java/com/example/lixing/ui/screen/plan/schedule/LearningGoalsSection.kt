@@ -1,6 +1,7 @@
 package com.example.lixing.ui.screen.plan.schedule
 
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -23,7 +24,6 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.example.lixing.data.local.entity.LearningGoalEntity
 import com.example.lixing.data.local.entity.StudyResourceEntity
@@ -45,46 +45,51 @@ fun LearningGoalsSection(
     var editingGoal by remember { mutableStateOf<LearningGoalEntity?>(null) }
     var addingResource by remember { mutableStateOf(false) }
     var addingGoal by remember { mutableStateOf(false) }
+    var showCatalog by remember { mutableStateOf(false) }
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        Text("学习资料与目标", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            OutlinedButton(onClick = { editingResource = null; addingResource = true }) { Text("添加资料") }
-            OutlinedButton(onClick = { editingGoal = null; addingGoal = true }) { Text("添加目标") }
+        OutlinedButton(onClick = { showCatalog = !showCatalog }, modifier = Modifier.fillMaxWidth()) {
+            Text(if (showCatalog) "收起学习资料与目标" else "查看学习资料与目标")
         }
-        if (state.resources.isEmpty() && state.goals.isEmpty()) {
-            Text("可以先录入题册、章节范围与截止日期，再逐日安排。", style = MaterialTheme.typography.bodySmall)
-        }
-        state.resources.filterNot { it.isArchived }.forEach { resource ->
-            Surface(shape = MaterialTheme.shapes.medium, modifier = Modifier.fillMaxWidth()) {
-                Row(Modifier.padding(8.dp), horizontalArrangement = Arrangement.SpaceBetween) {
-                    Text("${resource.name}${resource.edition.takeIf(String::isNotBlank)?.let { " · $it" }.orEmpty()}",
-                        modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
-                    TextButton(onClick = { editingResource = resource; addingResource = true }) { Text("编辑") }
+        if (showCatalog) {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(onClick = { editingResource = null; addingResource = true }) { Text("添加资料") }
+                OutlinedButton(onClick = { editingGoal = null; addingGoal = true }) { Text("添加目标") }
+            }
+            if (state.resources.isEmpty() && state.goals.isEmpty()) {
+                Text("可以先录入题册、章节范围与截止日期，再逐日安排。", style = MaterialTheme.typography.bodySmall)
+            }
+            state.resources.filterNot { it.isArchived }.forEach { resource ->
+                Surface(shape = MaterialTheme.shapes.medium, modifier = Modifier.fillMaxWidth()) {
+                    Row(Modifier.padding(8.dp), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text("${resource.name}${resource.edition.takeIf(String::isNotBlank)?.let { " · $it" }.orEmpty()}",
+                            modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
+                        TextButton(onClick = { editingResource = resource; addingResource = true }) { Text("编辑") }
+                    }
                 }
             }
-        }
-        state.goals.forEach { goal ->
-            val scope = ContentSelectionCodec.decode(goal.scopeJson)?.displayText().orEmpty()
-            val progress = state.goalStats.firstOrNull { it.goalId == goal.id }
-            Surface(shape = MaterialTheme.shapes.medium, modifier = Modifier.fillMaxWidth()) {
-                Row(Modifier.padding(8.dp), horizontalArrangement = Arrangement.SpaceBetween) {
-                    Column(Modifier.weight(1f)) {
-                        Text(goal.title, style = MaterialTheme.typography.bodyMedium)
-                        Text(listOfNotNull(scope.takeIf(String::isNotBlank), goal.dueDate?.let { "截止 $it" })
-                            .joinToString(" · "), style = MaterialTheme.typography.bodySmall)
-                        progress?.targetCount?.let { target ->
-                            Text("已确认 ${progress.knownCompleted}/$target · 剩余 ${progress.remainingCount ?: 0}",
-                                style = MaterialTheme.typography.bodySmall)
+            state.goals.forEach { goal ->
+                val scope = ContentSelectionCodec.decode(goal.scopeJson)?.displayText().orEmpty()
+                val progress = state.goalStats.firstOrNull { it.goalId == goal.id }
+                Surface(shape = MaterialTheme.shapes.medium, modifier = Modifier.fillMaxWidth()) {
+                    Row(Modifier.padding(8.dp), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Column(Modifier.weight(1f)) {
+                            Text(goal.title, style = MaterialTheme.typography.bodyMedium)
+                            Text(listOfNotNull(scope.takeIf(String::isNotBlank), goal.dueDate?.let { "截止 $it" })
+                                .joinToString(" · "), style = MaterialTheme.typography.bodySmall)
+                            progress?.targetCount?.let { target ->
+                                Text("已确认 ${progress.knownCompleted}/$target · 剩余 ${progress.remainingCount ?: 0}",
+                                    style = MaterialTheme.typography.bodySmall)
+                            }
+                            progress?.remainingRanges?.takeIf { it.isNotEmpty() }?.let { ranges ->
+                                Text("待做编号：${ContentRangeText.format(ranges.take(8))}${if (ranges.size > 8) " 等" else ""}",
+                                    style = MaterialTheme.typography.bodySmall)
+                            }
+                            progress?.quantityOnly?.takeIf { it > 0 }?.let { count ->
+                                Text("另有 $count 项只记录了数量，未对应具体编号", style = MaterialTheme.typography.bodySmall)
+                            }
                         }
-                        progress?.remainingRanges?.takeIf { it.isNotEmpty() }?.let { ranges ->
-                            Text("待做编号：${ContentRangeText.format(ranges.take(8))}${if (ranges.size > 8) " 等" else ""}",
-                                style = MaterialTheme.typography.bodySmall)
-                        }
-                        progress?.quantityOnly?.takeIf { it > 0 }?.let { count ->
-                            Text("另有 $count 项只记录了数量，未对应具体编号", style = MaterialTheme.typography.bodySmall)
-                        }
+                        TextButton(onClick = { editingGoal = goal; addingGoal = true }) { Text("编辑") }
                     }
-                    TextButton(onClick = { editingGoal = goal; addingGoal = true }) { Text("编辑") }
                 }
             }
         }
@@ -112,14 +117,16 @@ private fun ResourceDialog(
     AlertDialog(onDismissRequest = onDismiss, title = { Text(if (original == null) "添加学习资料" else "编辑学习资料") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedButton(onClick = { menu = true }, enabled = original == null) {
-                    Text(state.subjects.firstOrNull { it.id == subjectId }?.name ?: "选择科目")
-                }
-                DropdownMenu(menu, onDismissRequest = { menu = false }) {
-                    state.subjects.filterNot { it.isArchived }.forEach { subject ->
-                        DropdownMenuItem(text = { Text(subject.name) }, onClick = {
-                            subjectId = subject.id; menu = false
-                        })
+                Box {
+                    OutlinedButton(onClick = { menu = true }, enabled = original == null) {
+                        Text(state.subjects.firstOrNull { it.id == subjectId }?.name ?: "选择科目")
+                    }
+                    DropdownMenu(menu, onDismissRequest = { menu = false }) {
+                        state.subjects.filterNot { it.isArchived }.forEach { subject ->
+                            DropdownMenuItem(text = { Text(subject.name) }, onClick = {
+                                subjectId = subject.id; menu = false
+                            })
+                        }
                     }
                 }
                 OutlinedTextField(name, { name = it }, label = { Text("教材 / 题册 / 课程名称") }, singleLine = true)
@@ -157,25 +164,29 @@ private fun GoalDialog(
     AlertDialog(onDismissRequest = onDismiss, title = { Text(if (original == null) "添加学习目标" else "编辑学习目标") },
         text = {
             Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedButton(onClick = { subjectMenu = true }, enabled = original == null) {
-                    Text(state.subjects.firstOrNull { it.id == subjectId }?.name ?: "选择科目")
-                }
-                DropdownMenu(subjectMenu, onDismissRequest = { subjectMenu = false }) {
-                    state.subjects.filterNot { it.isArchived }.forEach { subject ->
-                        DropdownMenuItem(text = { Text(subject.name) }, onClick = {
-                            subjectId = subject.id; resourceId = null; subjectMenu = false
-                        })
+                Box {
+                    OutlinedButton(onClick = { subjectMenu = true }, enabled = original == null) {
+                        Text(state.subjects.firstOrNull { it.id == subjectId }?.name ?: "选择科目")
+                    }
+                    DropdownMenu(subjectMenu, onDismissRequest = { subjectMenu = false }) {
+                        state.subjects.filterNot { it.isArchived }.forEach { subject ->
+                            DropdownMenuItem(text = { Text(subject.name) }, onClick = {
+                                subjectId = subject.id; resourceId = null; subjectMenu = false
+                            })
+                        }
                     }
                 }
-                OutlinedButton(onClick = { resourceMenu = true }, enabled = original == null) {
-                    Text(state.resources.firstOrNull { it.id == resourceId }?.name ?: "选择资料（可选）")
-                }
-                DropdownMenu(resourceMenu, onDismissRequest = { resourceMenu = false }) {
-                    DropdownMenuItem(text = { Text("不关联资料") }, onClick = { resourceId = null; resourceMenu = false })
-                    state.resources.filter { it.subjectId == subjectId && !it.isArchived }.forEach { resource ->
-                        DropdownMenuItem(text = { Text(resource.name) }, onClick = {
-                            resourceId = resource.id; resourceMenu = false
-                        })
+                Box {
+                    OutlinedButton(onClick = { resourceMenu = true }, enabled = original == null) {
+                        Text(state.resources.firstOrNull { it.id == resourceId }?.name ?: "选择资料（可选）")
+                    }
+                    DropdownMenu(resourceMenu, onDismissRequest = { resourceMenu = false }) {
+                        DropdownMenuItem(text = { Text("不关联资料") }, onClick = { resourceId = null; resourceMenu = false })
+                        state.resources.filter { it.subjectId == subjectId && !it.isArchived }.forEach { resource ->
+                            DropdownMenuItem(text = { Text(resource.name) }, onClick = {
+                                resourceId = resource.id; resourceMenu = false
+                            })
+                        }
                     }
                 }
                 OutlinedTextField(title, { title = it }, label = { Text("目标名称") }, singleLine = true)

@@ -96,6 +96,8 @@ data class ParsedAssistantReply(
      * 让用户「还没点确认就锁屏 / 切走」再回来时方案不丢。
      */
     val rawEnglishActionsJson: String? = null,
+    /** 会话主题概括，仅用于历史列表，不显示在回答气泡中。 */
+    val conversationTitle: String? = null,
 )
 
 /**
@@ -333,9 +335,8 @@ object AssistantResponseParser {
         val diagrams = DiagramParser.parseSlots(root["diagrams"] as? JsonArray, warnings)
 
         return ParsedAssistantReply(
-            // 裸 PlotSpec 或只有 plots 的协议包没有可展示的正文；不要把整段 JSON
-            // 重新放回气泡，否则用户会看到绘图操作参数。
-            reply = reply.ifEmpty { if (plotSlots.isNotEmpty()) "" else trimmed },
+            // 仅有标题或绘图元数据时没有可展示的正文，不能把协议 JSON 放回气泡。
+            reply = reply.ifEmpty { if (plotSlots.isNotEmpty() || "conversation_title" in root) "" else trimmed },
             actions = actions,
             warnings = warnings,
             englishActions = englishActions,
@@ -345,6 +346,9 @@ object AssistantResponseParser {
             plotSlots = plotSlots,
             diagramSlots = diagrams,
             rawPlanActionsJson = rawPlanActionsJson,
+            conversationTitle = AssistantConversationTitle.normalize(
+                (root["conversation_title"] as? JsonPrimitive)?.takeIf { it.isString }?.contentOrNull,
+            ),
         )
     }
 
@@ -587,6 +591,7 @@ object AssistantResponseParser {
             diagrams = diagrams.filterNotNull(),
             plotSlots = plots,
             diagramSlots = diagrams,
+            conversationTitle = AssistantConversationTitle.fromIncompleteResponse(normalized),
         )
     }
 

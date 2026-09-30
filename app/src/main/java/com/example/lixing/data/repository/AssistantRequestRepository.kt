@@ -1,6 +1,7 @@
 package com.example.lixing.data.repository
 
 import com.example.lixing.data.local.dao.AssistantRequestDao
+import com.example.lixing.data.assistant.AssistantConversationTitle
 import com.example.lixing.data.local.entity.AssistantMessageEntity
 import com.example.lixing.data.local.entity.AssistantRequestEntity
 import com.example.lixing.di.IoDispatcher
@@ -178,6 +179,7 @@ class AssistantRequestRepository @Inject constructor(
         text: String,
         pendingReview: String,
         answerImagePaths: List<String>,
+        conversationTitle: String? = null,
     ): Boolean = withContext(io) {
         // 同 complete()：回答位置不存在时事务回滚，这里统一成 false。
         runCatching {
@@ -189,6 +191,7 @@ class AssistantRequestRepository @Inject constructor(
                 pendingReview = pendingReview,
                 imagePaths = encodeList(answerImagePaths),
                 updatedAt = Instant.now(),
+                conversationTitle = AssistantConversationTitle.normalize(conversationTitle),
             )
         }.getOrDefault(false)
     }
@@ -274,7 +277,7 @@ class AssistantRequestRepository @Inject constructor(
                     attemptId = orphan.attemptId,
                     partialText = orphan.partialText,
                     kind = AssistantFailureKind.NETWORK.name,
-                    message = "应用上次退出时这一轮还没结束，已停止。可点左侧重试继续。",
+                    message = "应用上次退出时这一轮还没结束，已停止。可在原问题旁点重新发送。",
                     updatedAt = now,
                 )
             }

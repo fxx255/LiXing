@@ -4,7 +4,7 @@ import com.example.lixing.data.backup.DbCell
 import kotlinx.serialization.Serializable
 
 /** 同步协议版本。只有破坏性变更才 +1；两端不一致时拒绝同步而不是写坏数据。 */
-const val SYNC_FORMAT = 2
+const val SYNC_FORMAT = 3
 
 /** 每张表统一的同步列：Lamport 逻辑时钟。 */
 const val SYNC_CLOCK_COLUMN = "sync_modified_at"

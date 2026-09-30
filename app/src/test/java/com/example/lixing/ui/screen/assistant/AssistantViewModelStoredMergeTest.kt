@@ -92,6 +92,7 @@ class AssistantViewModelStoredMergeTest {
 
     /** resolveIdentityFor(profileId) 的返回值（null = 档案已删除）。 */
     private var resolvedIdentityForPinned: AiResolvedIdentity? = null
+    private var lastRetrySnapshotJson: String? = null
 
     private lateinit var store: ViewModelStore
     private lateinit var viewModel: AssistantViewModel
@@ -213,6 +214,7 @@ class AssistantViewModelStoredMergeTest {
         )
         activeProfile = null
         resolvedIdentityForPinned = null
+        lastRetrySnapshotJson = null
 
         chatRepository = mockk<AssistantChatRepository> {
             every { observeConversations() } returns emptyFlow()
@@ -272,10 +274,26 @@ class AssistantViewModelStoredMergeTest {
             every { isRunning() } answers { activeState.value.isRunning }
             // recoverOnStartup() = awaitStartup()，实际签名为 suspend () -> Unit。
             coEvery { recoverOnStartup() } returns Unit
+            coEvery { captureRetrySnapshot(any(), any(), any(), any(), any()) } coAnswers {
+                val record = firstArg<AssistantRequestEntity>()
+                val profile = activeProfile
+                val baseUrl = profile?.baseUrl ?: prefsForRetry.aiBaseUrl
+                AssistantRequestSnapshot(
+                    model = profile?.model ?: prefsForRetry.aiModel,
+                    endpointIdentity = endpointIdentityOf(baseUrl),
+                    protocol = com.example.lixing.assistant.GenerationPreparer.protocolOf(
+                        baseUrl, profile?.searchProtocol),
+                    primaryProfileId = profile?.id.orEmpty(),
+                    sourceUserText = record.userText,
+                    version = AssistantRequestSnapshot.VERSION_V2,
+                    prepared = false,
+                )
+            }
         }
 
         coEvery { requestRepository.beginRetry(any(), any(), any(), any()) } coAnswers {
             val id = firstArg<String>()
+            lastRetrySnapshotJson = thirdArg()
             val previous = requestsByConversation.values.flatten().first { it.requestId == id }
             previous.copy(attemptId = secondArg(), status = "PREPARING").also { next ->
                 requestsByConversation[previous.conversationId] =
@@ -818,6 +836,17 @@ class AssistantViewModelStoredMergeTest {
         assertEquals("req-1", viewModel.state.value.retryRequestId)
     }
 
+    @Test fun `configuration failure keeps resend attached to failed user bubble`() = runTest(dispatcher) {
+        messagesA.value = listOf(row("A", "u1", "user", "原问题"), row("A", "a1", "assistant", ""))
+        requestsByConversation["A"] = listOf(requestRow(
+            "req-1", "A", userMessageId = "u1", answerMessageId = "a1",
+            failureKind = AssistantFailureKind.CONFIG_INVALID,
+        ))
+        viewModel.openConversation("A"); runToIdle()
+        assertEquals("req-1", viewModel.state.value.retryRequestId)
+        assertEquals("u1", viewModel.state.value.retryUserMessageId)
+    }
+
     @Test fun `rejected retry handoff restores interrupted status and partial`() = runTest(dispatcher) {
         seedRetry()
         coEvery { generationManager.submitRetry(any(), any(), any(), any(), any(), any(), any()) } throws
@@ -878,22 +907,26 @@ class AssistantViewModelStoredMergeTest {
         assertTrue(activeState.value.isRunning)
     }
 
-    @Test fun `retry validates context before claiming attempt and keeps valid empty context`() = runTest(dispatcher) {
+    @Test fun `retry captures current provider before claiming attempt`() = runTest(dispatcher) {
         seedRetry()
         val gate = CompletableDeferred<Unit>()
-        coEvery { contextBuilder.build(any(), any()) } coAnswers { gate.await(); "" }
+        coEvery { generationManager.captureRetrySnapshot(any(), any(), any(), any(), any()) } coAnswers {
+            gate.await()
+            pinnedSnapshot(primaryProfileId = "profile-pinned").copy(version = AssistantRequestSnapshot.VERSION_V2)
+        }
         viewModel.retryInterrupted(); runToIdle()
         coVerify(exactly = 0) { requestRepository.beginRetry(any(), any(), any(), any()) }
         viewModel.updateInput("生成期间的新草稿")
         viewModel.retryInterrupted(); runToIdle()
         gate.complete(Unit); runToIdle()
-        coVerify(exactly = 1) { generationManager.submitRetry(any(), any(), any(), any(), any(), "", any()) }
+        coVerify(exactly = 1) { generationManager.submitRetry(any(), any(), any(), any(), any(), null, any()) }
         assertEquals("生成期间的新草稿", viewModel.state.value.input)
     }
 
-    @Test fun `retry history read failure releases retry flag and preserves partial`() = runTest(dispatcher) {
+    @Test fun `retry snapshot failure releases retry flag and preserves partial`() = runTest(dispatcher) {
         seedRetry()
-        coEvery { chatRepository.messages("A") } throws java.io.IOException("synthetic read failure")
+        coEvery { generationManager.captureRetrySnapshot(any(), any(), any(), any(), any()) } throws
+            java.io.IOException("synthetic read failure")
         viewModel.retryInterrupted(); runToIdle()
         assertFalse(viewModel.state.value.retrying)
         assertTrue(viewModel.state.value.error != null)
@@ -901,13 +934,14 @@ class AssistantViewModelStoredMergeTest {
         coVerify(exactly = 0) { requestRepository.beginRetry(any(), any(), any(), any()) }
     }
 
-    @Test fun `deleted pinned profile is rejected even if current profile could match`() = runTest(dispatcher) {
+    @Test fun `deleted old profile does not block resend with current provider`() = runTest(dispatcher) {
         seedRetry()
         resolvedIdentityForPinned = null
         viewModel.retryInterrupted(); runToIdle()
         assertFalse(viewModel.state.value.retrying)
-        assertTrue(viewModel.state.value.error != null)
-        coVerify(exactly = 0) { requestRepository.beginRetry(any(), any(), any(), any()) }
+        assertNull(viewModel.state.value.error)
+        assertEquals("pinned-model", AssistantSnapshotCodec.decode(lastRetrySnapshotJson.orEmpty())?.model)
+        coVerify(exactly = 1) { requestRepository.beginRetry(any(), any(), any(), any()) }
     }
 
     @Test fun `late started after manager finished cannot resurrect busy`() = runTest(dispatcher) {
@@ -935,18 +969,13 @@ class AssistantViewModelStoredMergeTest {
         assertEquals("较新的完整正文", viewModel.state.value.messages.last().content)
     }
 
-    // ---------------- B2：重试身份 = 钉住的档案，与当前活动档案无关 ----------------
+    // ---------------- B2：用户点击重发时采用当前活动服务商 ----------------
 
     /**
-     * Batch B「retryIdentityMismatch must resolve snapshot.primaryProfileId with
-     * AiCredentialStore.resolveIdentityFor」：快照钉住了档案 P（Responses 协议），
-     * 用户已把**活动档案**切到别处。重试仍按钉住档案校验：一致 ⇒ 放行。
-     *
-     * 这是 Batch B 的目标行为；当前生产实现读的是活动档案，活动档案失配 ⇒
-     * 该测试在生产补上钉住档案解析前会失败（记录为生产缺口，而不是放松断言）。
+     * 切换活动服务商后点击原气泡重发，新 attempt 的快照使用当前服务商。
      */
     @Test
-    fun `pinned profile identity passes validation even when active profile moved elsewhere`() =
+    fun `resend targets current provider after active profile changes`() =
         runTest(dispatcher) {
             val (profile, identity) = pinnedProfileFixture("profile-pinned")
             activeProfile = AiModelProfile(
@@ -986,9 +1015,13 @@ class AssistantViewModelStoredMergeTest {
             runToIdle()
 
             assertNull(
-                "钉住档案身份一致 ⇒ 重试必须放行（error=${viewModel.state.value.error}）",
+                "切换服务商后重发必须放行（error=${viewModel.state.value.error}）",
                 viewModel.state.value.error,
             )
+            val newSnapshot = AssistantSnapshotCodec.decode(lastRetrySnapshotJson.orEmpty())
+            assertEquals("profile-other", newSnapshot?.primaryProfileId)
+            assertEquals("other-model", newSnapshot?.model)
+            assertEquals(endpointIdentityOf("https://other.example.com/v1"), newSnapshot?.endpointIdentity)
             assertTrue(
                 "放行 ⇒ 提交后 busy（snapshot 走 submitRetry 锁住生成）",
                 viewModel.state.value.busy,
@@ -1007,13 +1040,13 @@ class AssistantViewModelStoredMergeTest {
         }
 
     /**
-     * 钉住档案自身失配（模型名被改）⇒ 必须拒绝并给出一致的具体说明。
+     * 原档案被修改后也采用用户当前选中的配置重发。
      */
     @Test
-    fun `changed pinned profile model is rejected with a specific mismatch message`() =
+    fun `changed old profile model no longer blocks resend`() =
         runTest(dispatcher) {
             val (profile, identity) = pinnedProfileFixture("profile-pinned")
-            activeProfile = profile
+            activeProfile = profile.copy(model = "renamed-model")
             resolvedIdentityForPinned = identity.copy(model = "renamed-model")
             prefsForRetry = UserPreferences(
                 aiAssistantEnabled = true,
@@ -1041,11 +1074,9 @@ class AssistantViewModelStoredMergeTest {
             runToIdle()
 
             assertFalse(viewModel.state.value.retrying)
-            assertTrue(
-                "钉住档案模型变更必须被拒绝（error=${viewModel.state.value.error}）",
-                viewModel.state.value.error?.contains("renamed-model") == true,
-            )
-            coVerify(exactly = 0) { generationManager.submitRetry(any(), any(), any(), any(), any(), any(), any()) }
+            assertNull(viewModel.state.value.error)
+            assertEquals("renamed-model", AssistantSnapshotCodec.decode(lastRetrySnapshotJson.orEmpty())?.model)
+            coVerify(exactly = 1) { generationManager.submitRetry(any(), any(), any(), any(), any(), any(), any()) }
         }
 
     // ---------------- B3：陈旧 Started / Completed 事件围栏 ----------------

@@ -267,7 +267,8 @@ class GenerationPreparer @Inject constructor(
      *   转写路由会真的重新转写，绝不把图直发文字主模型；
      * - `prepared = true` ⇒ 用快照里已保存的转写文本/上下文，直接进入生成。
      *
-     * 两条路都沿用快照钉下的身份与设置；易变的计划/日期数据在本方法内刷新。
+     * 两条路都沿用本次 attempt 的快照身份与设置；用户点击重发时可先用当前
+     * 服务商生成新快照。易变的计划/日期数据在本方法内刷新。
      */
     suspend fun prepareRetry(
         userText: String,

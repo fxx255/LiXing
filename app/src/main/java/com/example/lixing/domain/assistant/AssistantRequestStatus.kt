@@ -38,8 +38,7 @@ enum class AssistantRequestStatus {
 /**
  * 失败归类。
  *
- * 需要区分的原因很实际：只有「可重试」的几类才应该在输入框左侧给出重旋箭头，
- * 主动取消和配置失效则应当明确告诉用户去做什么，而不是给一个点了还会失败的按钮。
+ * 用户可以调整配置后重发原问题，因此配置失效也保留重发入口；主动取消除外。
  */
 enum class AssistantFailureKind {
     /** 连接/读取失败、DNS、TLS 等网络层问题。 */
@@ -67,10 +66,10 @@ enum class AssistantFailureKind {
     UNKNOWN,
     ;
 
-    /** 是否应当提供「重新发送」入口。取消与配置失效不提供。 */
+    /** 是否应当提供「重新发送」入口；主动取消不提供。 */
     val isRetryable: Boolean
         get() = this == NETWORK || this == SERVER || this == NO_CONTENT ||
-            this == INVALID_RESPONSE || this == ATTACHMENT_MISSING || this == UNKNOWN
+            this == INVALID_RESPONSE || this == ATTACHMENT_MISSING || this == CONFIG_INVALID || this == UNKNOWN
 
     companion object {
         fun fromName(raw: String?): AssistantFailureKind? =

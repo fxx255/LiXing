@@ -12,6 +12,31 @@ import org.junit.Test
 class AssistantResponseParserTest {
 
     @Test
+    fun `summary title is parsed separately and invalid metadata is ignored`() {
+        val parsed = AssistantResponseParser.parse(
+            """{"conversation_title":"  二重积分的对称性判断  ","reply":"命题不成立。","plan_actions":[]}""",
+        )
+        assertEquals("二重积分的对称性判断", parsed.conversationTitle)
+        assertEquals("命题不成立。", parsed.reply)
+        for (metadata in listOf("null", "123", "[]", "\"图片题目\"", "\"  \"")) {
+            val result = AssistantResponseParser.parse("""{"reply":"正常正文","conversation_title":$metadata}""")
+            assertEquals(null, result.conversationTitle)
+            assertEquals("正常正文", result.reply)
+        }
+        assertEquals(null, AssistantResponseParser.parse("普通文本回复").conversationTitle)
+        assertEquals("", AssistantResponseParser.parse("""{"conversation_title":"主题标题"}""").reply)
+    }
+
+    @Test
+    fun `truncated reply keeps only a complete leading summary title`() {
+        val partial = AssistantResponseParser.parse("""{"conversation_title":"二重积分的对称性判断","reply":"解释到一半""")
+        assertEquals("二重积分的对称性判断", partial.conversationTitle)
+        assertEquals("解释到一半", partial.reply)
+        val nested = AssistantResponseParser.parse("""{"other":{"conversation_title":"错误的内层标题"},"reply":"解释到一半""")
+        assertEquals(null, nested.conversationTitle)
+    }
+
+    @Test
     fun `dated planning parses a batch and rejects partial batches`() {
         val valid = """{"reply":"未来两天的建议","plan_actions":[
             {"kind":"ADD_DATED_TASK","date":"2026-09-30","subjectId":"math","timeSlotId":"am","title":"第 190-210 题","goalId":"goal-1","resourceId":"book-1","resourceName":"题册","questionFirst":190,"questionLast":210,"plannedMinutes":60,"reason":"按量推进"},

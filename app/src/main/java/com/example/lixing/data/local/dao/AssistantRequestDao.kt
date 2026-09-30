@@ -253,6 +253,19 @@ interface AssistantRequestDao {
     @Query("UPDATE assistant_conversation SET updated_at = :updatedAt WHERE id = :id")
     suspend fun touchConversation(id: String, updatedAt: Instant)
 
+    /** 首次有效回答才命名；旧的图片占位标题允许在后续回答中补齐。 */
+    @Query("""
+        UPDATE assistant_conversation SET title = :title
+        WHERE id = :conversationId AND (
+            title IN ('新对话', '图片题目') OR NOT EXISTS (
+                SELECT 1 FROM assistant_message
+                WHERE conversation_id = :conversationId AND role = 'assistant'
+                  AND id != :answerMessageId AND TRIM(content) != ''
+            )
+        )
+    """)
+    suspend fun nameConversationFromAnswer(conversationId: String, answerMessageId: String, title: String)
+
     @Query("UPDATE assistant_message SET content = :content WHERE id = :messageId")
     suspend fun updateMessageContent(messageId: String, content: String): Int
 
@@ -336,6 +349,7 @@ interface AssistantRequestDao {
         pendingReview: String,
         imagePaths: String,
         updatedAt: Instant,
+        conversationTitle: String? = null,
     ): Boolean {
         val owned = getRequest(requestId) ?: return false
         if (owned.answerMessageId != answerMessageId) return false
@@ -347,6 +361,9 @@ interface AssistantRequestDao {
             throw IllegalStateException("回答位置不存在（messageId=$answerMessageId），收尾回滚")
         }
         applyAnswerEnvelopeRow(answerMessageId, pendingReview, imagePaths)
+        if (!conversationTitle.isNullOrBlank()) {
+            nameConversationFromAnswer(owned.conversationId, answerMessageId, conversationTitle)
+        }
         return true
     }
 

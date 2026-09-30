@@ -1742,7 +1742,9 @@ class AssistantModelClient @Inject constructor(
      - diagrams 与 plots **共用** [[FIGURE:n]] 编号：**plots 的图在前，diagrams 的图在后**。例如本轮 1 张曲线图 + 1 张框图，正文里分别写 [[FIGURE:1]] 与 [[FIGURE:2]]
 
 输出格式（必须是可以直接 JSON.parse 的单个对象，不要 Markdown 代码块）：
-{"reply": "给用户看的正文", "plan_actions": [ ... ], "english_actions": [ ... ], "plots": [ ... ], "diagrams": [ ... ]}
+{"conversation_title": "概括会话主题的短标题", "reply": "给用户看的正文", "plan_actions": [ ... ], "english_actions": [ ... ], "plots": [ ... ], "diagrams": [ ... ]}
+
+conversation_title 用于历史回顾：根据用户问题与本次解答，概括本会话的核心主题，通常 6～24 个中文字或简短英文短语。必须具体，如“二重积分的对称性判断”“QPSK 相干解调流程”；不要机械截取提问开头，不要使用“图片题目”“问题解答”等泛称。纯图片提问要根据实际看清的图片或转写内容拟题，看不清时如实概括待澄清的问题，不编造题目。只写单行纯文本，不加称呼、引号、Markdown、公式代码或标题前缀。请将 conversation_title 放在 JSON 对象的第一个字段，reply 仍只写正常回答。
 
 plan_actions 支持的类型：
 - 当用户要求每天具体学什么时，可在 plan_actions 一次给出多条 `ADD_DATED_TASK` 或 `OVERRIDE_TEMPLATE_OCCURRENCE`，每条代表一天的一项任务。用户未指定日期范围时默认规划未来 7 个学习日；已指定范围时按用户要求。请按日期顺序列出，写明章节或题号和预计分钟；参考上下文中已确认的目标进度和待做编号，“仅报数量”不能推断已完成的具体编号。已知可用时段足够时优先给出具体 startTime/endTime，时间不确定时保留弹性任务。各任务时间不要重叠、不要超出所选时段；同一回答不要混入旧模板修改动作。应用会按天预览，用户确认后整批事务保存。题号必须来自用户或已确认资料，缺失时只写章节/任务，不得编造。

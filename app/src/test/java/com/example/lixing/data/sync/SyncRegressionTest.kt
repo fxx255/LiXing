@@ -6,6 +6,7 @@ import com.example.lixing.data.local.LiXingDatabase
 import com.example.lixing.data.local.entity.*
 import com.example.lixing.domain.english.EnglishEntryType
 import com.example.lixing.domain.model.*
+import com.example.lixing.domain.rules.PointRules
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.flow.first
@@ -43,7 +44,11 @@ class SyncRegressionTest {
             }
         val store = SyncLocalStore(db, Dispatchers.IO)
         val engine = SyncEngine(store, SyncIdentity(context), Dispatchers.IO)
-        suspend fun sync() = engine.sync(cloud, id)
+        suspend fun sync(studyToday: LocalDate? = null) = if (studyToday == null) {
+            engine.sync(cloud, id)
+        } else {
+            engine.sync(cloud, id, 0.6f, studyToday, 1)
+        }
         suspend fun word() = db.englishEntryDao().get("word")!!
     }
 
@@ -84,6 +89,21 @@ class SyncRegressionTest {
         a.store.withApplyingGuard { a.db.englishEntryDao().upsert(word()) }
         assertTrue(a.sync().isSuccess); assertTrue(z.sync().isSuccess)
         assertNotNull("migrated rows at clock zero are not older than absence", z.db.englishEntryDao().get("word"))
+    }
+
+    @Test fun `protocol upgrade rewrites the existing device snapshot`() = runTest {
+        val phone = Device("phone")
+        phone.db.englishEntryDao().upsert(word())
+        assertTrue(phone.sync().isSuccess)
+        val name = SyncFiles.snapshot("phone")
+        val old = json.decodeFromString<SyncSnapshot>(cloud.files.getValue(name))
+        cloud.files[name] = json.encodeToString(old.copy(format = 2))
+        phone.store.saveCursor("__sync_format__", 2)
+
+        val upgraded = phone.sync()
+        assertTrue(upgraded.isSuccess)
+        assertTrue(upgraded.snapshotWritten)
+        assertEquals(SYNC_FORMAT, json.decodeFromString<SyncSnapshot>(cloud.files.getValue(name)).format)
     }
 
     @Test fun `legacy plan and historical checkin skipped by old versions are repaired`() = runTest {
@@ -213,6 +233,98 @@ class SyncRegressionTest {
         b.db.dailyTaskDao().deleteById("task-b")
         assertTrue(b.sync().isSuccess); assertTrue(a.sync().isSuccess)
         assertNull(a.db.dailyTaskDao().getTask("task-a"))
+    }
+
+    @Test fun `offline checkin beats another devices later automatic settlement and restores summary`() = runTest {
+        val phone = Device("phone"); val tablet = Device("tablet"); val third = Device("third")
+        seedPlan(phone.db)
+        val date = LocalDate.of(2026, 9, 30)
+        phone.db.dailyTaskDao().insert(task("shared").copy(date = date, plannedMinutes = 480))
+        phone.db.dailyTaskDao().insert(task("small").copy(date = date, templateId = null, plannedMinutes = 60))
+        phone.db.dayRecordDao().upsert(DayRecordEntity(date = date))
+        phone.db.gamificationDao().upsertStreak(CheckInStreakEntity())
+        assertTrue(phone.sync().isSuccess)
+        assertTrue(tablet.sync().isSuccess)
+
+        val original = phone.db.dailyTaskDao().getTask("shared")!!
+        phone.db.dailyTaskDao().update(original.copy(status = TaskStatus.DONE, actualValue = 20))
+        phone.db.dayRecordDao().upsert(DayRecordEntity(date = date,
+            totalTasks = 2, doneTasks = 1, completionRate = 480f / 540f))
+        phone.db.gamificationDao().upsertStreak(CheckInStreakEntity(
+            currentStreak = 1, lastAchievedDate = date, totalAchievedDays = 1,
+            rescueCardsLeft = 1, rescueCardsMonth = 202609))
+
+        tablet.db.dailyTaskDao().update(tablet.db.dailyTaskDao().getTask("shared")!!.copy(status = TaskStatus.MISSED))
+        tablet.db.dailyTaskDao().update(tablet.db.dailyTaskDao().getTask("small")!!.copy(status = TaskStatus.MISSED))
+        tablet.db.gamificationDao().insertLedger(PointLedgerEntity(id = "false-penalty", date = date,
+            delta = -5, reason = PointReason.MISSED_PENALTY, dailyTaskId = "shared",
+            dedupeKey = PointRules.keyMissed("shared")))
+        tablet.db.dayRecordDao().upsert(DayRecordEntity(date = date,
+            totalTasks = 2, missedTasks = 2, completionRate = 0f, pointsEarned = -5,
+            isSettled = true, usedRescueCard = true))
+        tablet.db.gamificationDao().upsertStreak(CheckInStreakEntity(
+            currentStreak = 0, rescueCardsLeft = 0, rescueCardsMonth = 202609))
+        val today = date.plusDays(1)
+        assertTrue(tablet.sync(today).isSuccess)
+        assertTrue(phone.sync(today).isSuccess)
+        assertTrue(tablet.sync(today).isSuccess)
+        assertTrue(third.sync(today).isSuccess)
+
+        for (device in listOf(phone, tablet, third)) {
+            assertEquals(TaskStatus.DONE, device.db.dailyTaskDao().getTask("shared")!!.status)
+            val record = device.db.dayRecordDao().getRecord(date)!!
+            assertEquals(1, record.doneTasks)
+            assertEquals(1, record.missedTasks)
+            assertEquals(480f / 540f, record.completionRate, 0.001f)
+            assertTrue(record.isAchieved)
+            assertFalse(record.usedRescueCard)
+            assertEquals(0, record.pointsEarned)
+            assertTrue(device.db.gamificationDao().getLedgerOfDay(date).isEmpty())
+            assertEquals(1, device.db.gamificationDao().getStreak()!!.currentStreak)
+            assertEquals(1, device.db.gamificationDao().getStreak()!!.rescueCardsLeft)
+        }
+    }
+
+    @Test fun `explicit revoke is not mistaken for automatic missed status`() = runTest {
+        val phone = Device("phone"); val tablet = Device("tablet")
+        seedPlan(phone.db)
+        phone.db.dailyTaskDao().insert(task("shared"))
+        assertTrue(phone.sync().isSuccess)
+        assertTrue(tablet.sync().isSuccess)
+        phone.db.dailyTaskDao().update(phone.db.dailyTaskDao().getTask("shared")!!
+            .copy(status = TaskStatus.PENDING, skipReason = "USER_REVOKED"))
+        tablet.db.dailyTaskDao().update(tablet.db.dailyTaskDao().getTask("shared")!!
+            .copy(status = TaskStatus.MISSED))
+        assertTrue(tablet.sync().isSuccess)
+        assertTrue(phone.sync().isSuccess)
+        assertTrue(tablet.sync().isSuccess)
+        assertEquals("USER_REVOKED", phone.db.dailyTaskDao().getTask("shared")!!.skipReason)
+        assertEquals("USER_REVOKED", tablet.db.dailyTaskDao().getTask("shared")!!.skipReason)
+    }
+
+    @Test fun `next day makeup keeps the original missed penalty`() = runTest {
+        val phone = Device("phone"); val tablet = Device("tablet")
+        seedPlan(phone.db)
+        phone.db.dailyTaskDao().insert(task("shared"))
+        assertTrue(phone.sync().isSuccess)
+        assertTrue(tablet.sync().isSuccess)
+        phone.db.dailyTaskDao().update(phone.db.dailyTaskDao().getTask("shared")!!
+            .copy(status = TaskStatus.DONE, actualValue = 20, isMakeup = true))
+        tablet.db.dailyTaskDao().update(tablet.db.dailyTaskDao().getTask("shared")!!
+            .copy(status = TaskStatus.MISSED))
+        tablet.db.gamificationDao().insertLedger(PointLedgerEntity(id = "real-penalty", date = DATE,
+            delta = -5, reason = PointReason.MISSED_PENALTY, dailyTaskId = "shared",
+            dedupeKey = PointRules.keyMissed("shared")))
+        tablet.db.dayRecordDao().upsert(DayRecordEntity(date = DATE, isSettled = true, usedRescueCard = true))
+        tablet.db.gamificationDao().upsertStreak(CheckInStreakEntity(
+            rescueCardsLeft = 0, rescueCardsMonth = 202609))
+        assertTrue(tablet.sync().isSuccess)
+        assertTrue(phone.sync().isSuccess)
+        assertTrue(tablet.sync().isSuccess)
+        assertEquals(TaskStatus.DONE, tablet.db.dailyTaskDao().getTask("shared")!!.status)
+        assertEquals(-5, tablet.db.gamificationDao().getPointsOfDay(DATE))
+        assertTrue(tablet.db.dayRecordDao().getRecord(DATE)!!.usedRescueCard)
+        assertEquals(0, tablet.db.gamificationDao().getStreak()!!.rescueCardsLeft)
     }
 
     @Test fun `restoring data resets old tombstones and clock before the next edit`() = runTest {

@@ -404,6 +404,50 @@ class AssistantSubmitPathTest {
         assertEquals("重试必须重新发送原问题", "原问题：什么是导数", lastUser?.content)
     }
 
+    @Test
+    fun `resend after switching provider replaces snapshot and keeps original message`() = runBlocking {
+        val requestId = submitAndInterrupt("原问题：解释相位", "半截")
+        val original = requestRepository.get(requestId)!!
+        val selected = primaryIdentity.copy(
+            profileId = "profile-2",
+            baseUrl = "https://another.example/v1",
+            model = "another-model",
+        )
+        every { aiCredentialStore.resolveActiveIdentity(any(), any()) } returns selected
+        val snapshot = manager.captureRetrySnapshot(
+            record = original,
+            attachmentPaths = emptyList(),
+            contextKinds = emptySet(),
+            forceWebSearch = false,
+            inPlanChangeFlow = false,
+        )
+        assertEquals("profile-2", snapshot.primaryProfileId)
+        assertEquals("another-model", snapshot.model)
+        assertEquals("https://another.example/v1", snapshot.endpointIdentity)
+        assertFalse(snapshot.prepared)
+        val retried = requestRepository.beginRetry(
+            requestId, "att-new-provider",
+            com.example.lixing.data.assistant.AssistantSnapshotCodec.encode(snapshot),
+            emptyList(),
+        )!!
+        manager.submitRetry(
+            requestId = requestId,
+            attemptId = retried.attemptId,
+            userText = retried.userText,
+            history = emptyList(),
+            attachmentPaths = emptyList(),
+            refreshedContext = null,
+            forceWebSearch = false,
+        )
+        assertEquals(AssistantRequestStatus.COMPLETED.name, awaitTerminal(requestId))
+        val completed = requestRepository.get(requestId)!!
+        assertEquals(original.userMessageId, completed.userMessageId)
+        assertEquals(original.answerMessageId, completed.answerMessageId)
+        assertEquals("another-model", com.example.lixing.data.assistant.AssistantSnapshotCodec
+            .decode(completed.snapshotJson)?.model)
+        assertEquals("原问题：解释相位", capturedMessages.last().last { it.role == "user" }.content)
+    }
+
     /** 上一次中断的部分正文不能被当成本轮新结果丢掉（重试期间保留）。 */
     @Test
     fun `retry does not lose the previous partial text before the new result arrives`() = runBlocking {

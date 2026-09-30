@@ -427,4 +427,34 @@ class AssistantRequestRepositoryTest {
         assertEquals(paths, repository.decodeList(request.attachmentPaths))
         assertEquals(emptyList<String>(), repository.decodeList(""))
     }
+
+    @Test
+    fun `image only first answer names its conversation and later questions keep the title`() = runBlocking {
+        db.assistantChatDao().insertConversation(
+            com.example.lixing.data.local.entity.AssistantConversationEntity(id = "c1", title = "图片题目"),
+        )
+        val first = repository.createRequest("c1", "u1", "a1", "att1", "",
+            listOf("/photos/question.jpg"), "")
+        assertTrue(repository.completeWithReview(first.requestId, "att1", "a1", "完整解析", "", emptyList(),
+            conversationTitle = "二重积分的对称性判断"))
+        assertEquals("二重积分的对称性判断", db.assistantChatDao().getConversation("c1")!!.title)
+        assertEquals("完整解析", db.assistantRequestDao().getMessage("a1")!!.content)
+
+        val followup = repository.createRequest("c1", "u2", "a2", "att2", "换一个反例", emptyList(), "")
+        assertTrue(repository.completeWithReview(followup.requestId, "att2", "a2", "反例", "", emptyList(),
+            conversationTitle = "单位圆盘反例"))
+        assertEquals("二重积分的对称性判断", db.assistantChatDao().getConversation("c1")!!.title)
+    }
+
+    @Test
+    fun `stale answer cannot rename conversation and missing title keeps initial text`() = runBlocking {
+        seedConversation()
+        val initial = db.assistantChatDao().getConversation("c1")!!.title
+        val request = repository.createRequest("c1", "u1", "a1", "att1", "问题", emptyList(), "")
+        assertFalse(repository.completeWithReview(request.requestId, "old-attempt", "a1", "旧正文", "", emptyList(),
+            conversationTitle = "旧标题"))
+        assertEquals(initial, db.assistantChatDao().getConversation("c1")!!.title)
+        assertTrue(repository.completeWithReview(request.requestId, "att1", "a1", "新正文", "", emptyList()))
+        assertEquals(initial, db.assistantChatDao().getConversation("c1")!!.title)
+    }
 }

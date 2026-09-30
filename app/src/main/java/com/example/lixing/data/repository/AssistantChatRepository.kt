@@ -38,7 +38,7 @@ class AssistantChatRepository @Inject constructor(
     fun observeMessages(conversationId: String): Flow<List<AssistantMessageEntity>> =
         dao.observeMessages(conversationId)
 
-    /** 以第一条用户消息创建会话，标题截取前 24 个字符。 */
+    /** 先用提问前 24 个字符作临时标题；首轮回答提交时原子更新为概括标题。 */
     suspend fun startConversation(firstUserMessage: String): String = withContext(io) {
         val now = Instant.now()
         val conversation = AssistantConversationEntity(

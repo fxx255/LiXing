@@ -651,7 +651,7 @@ class AssistantGenerationManagerTest {
     }
 
     @Test
-    fun `config invalid failure is classified and not retryable`() = runBlocking {
+    fun `config invalid failure can be resent after changing provider`() = runBlocking {
         val requestId = seed()
         coEvery {
             modelClient.chatStreaming(any(), any(), any(), any(), any(), any(), any(), any<suspend (AssistantStreamEvent) -> Unit>())
@@ -662,8 +662,8 @@ class AssistantGenerationManagerTest {
         assertEquals(AssistantRequestStatus.INTERRUPTED.name, awaitTerminal(requestId))
         val stored = repository.get(requestId)!!
         assertEquals(AssistantFailureKind.CONFIG_INVALID.name, stored.failureKind)
-        assertFalse(
-            "配置失效不该给一个点了还会失败的按钮",
+        assertTrue(
+            "用户可换服务商后在原问题旁重新发送",
             AssistantFailureKind.CONFIG_INVALID.isRetryable,
         )
     }
@@ -737,6 +737,26 @@ class AssistantGenerationManagerTest {
         assertEquals("失败槽位必须留空而不是被挤掉", "", imagePaths[1])
         // ③ 锚点平移：第 2 轮的 [[FIGURE:1]] 应指向合并列表里的第 4 张。
         assertTrue("续写轮的锚点必须平移", content.contains("[[FIGURE:4]]"))
+    }
+
+    @Test
+    fun `summary title survives continuation and stays out of the answer bubble`() = runBlocking {
+        val requestId = seed()
+        stubSequence(
+            payloads = listOf(
+                """{"conversation_title":"二重积分的对称性判断","reply":"先通过交换变量分析积分区域的对称性，再说明被积函数变化时能够得到的结论。"}""",
+                """{"reply":"然后使用单位圆盘构造反例，原命题不成立。","conversation_title":"反例计算"}""",
+            ),
+            truncatedFlags = listOf(true, false),
+        )
+        manager.start(request(requestId = requestId, maxContinuations = 2), requestId)
+        assertEquals(AssistantRequestStatus.COMPLETED.name, awaitTerminal(requestId))
+        assertEquals("二重积分的对称性判断", db.assistantChatDao().getConversation("c1")!!.title)
+        assertEquals("另一个会话", db.assistantChatDao().getConversation("c2")!!.title)
+        val answer = db.assistantRequestDao().getMessage("a1")!!.content
+        assertTrue(answer.contains("单位圆盘"))
+        assertFalse(answer.contains("conversation_title"))
+        assertFalse(answer.contains("二重积分的对称性判断"))
     }
 
     /** 续写中途失败：**早先的正文与图不能丢**。 */

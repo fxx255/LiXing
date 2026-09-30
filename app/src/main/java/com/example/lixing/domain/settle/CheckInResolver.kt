@@ -63,6 +63,7 @@ object CheckInResolver {
                     isLate = false,
                     isMakeup = false,
                     makeupReason = null,
+                    skipReason = "USER_REVOKED",
                 ),
                 status = TaskStatus.PENDING,
                 isLate = false,
@@ -111,6 +112,7 @@ object CheckInResolver {
                 isLate = isLate,
                 isMakeup = isMakeup,
                 makeupReason = if (isMakeup && isFirstCheck) makeupReason else task.makeupReason,
+                skipReason = "",
             ),
             status = status,
             isLate = isLate,
@@ -128,6 +130,7 @@ object CheckInResolver {
         isLate = false,
         isMakeup = false,
         makeupReason = null,
+        skipReason = "USER_REVOKED",
     )
 
     /** BOOLEAN 类型只认 0/1；量化类型不允许负数。 */

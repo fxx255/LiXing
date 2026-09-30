@@ -972,6 +972,7 @@ class AssistantViewModel @Inject constructor(
                 lastContextNote = null,
                 applyMessage = null,
                 retryRequestId = null,
+                retryUserMessageId = null,
                 retryAnswerMessageId = null,
                 retryReason = null,
                 retrying = false,
@@ -1141,6 +1142,7 @@ class AssistantViewModel @Inject constructor(
                 pendingPhotoPaths = emptyList(),
                 error = null,
                 retryRequestId = null,
+                retryUserMessageId = null,
                 retryAnswerMessageId = null,
                 retryReason = null,
                 retrying = false,
@@ -1457,6 +1459,7 @@ class AssistantViewModel @Inject constructor(
                 retrying = false,
                 error = null,
                 retryRequestId = null,
+                retryUserMessageId = null,
                 retryAnswerMessageId = null,
                 retryReason = null,
                 // 保留 manager 当前已有的推理/正文状态（快速开始的生成），
@@ -1516,7 +1519,7 @@ class AssistantViewModel @Inject constructor(
 
     // ---------------- 应用级任务：提交、重试、取消 ----------------
     /**
-     * 输入框左侧「重新发送」。
+     * 失败用户气泡旁的「重新发送」。
      *
      * 复用**原用户消息和回答 ID**：最终只会有一条用户消息和一个回答位置，
      * 不会重复插入用户消息、也不会重复确认动作。新一轮用新 attemptId，
@@ -1572,6 +1575,7 @@ class AssistantViewModel @Inject constructor(
                             it.copy(
                                 retrying = false,
                                 retryRequestId = null,
+                                retryUserMessageId = null,
                                 retryAnswerMessageId = null,
                                 retryReason = null,
                                 error = "你已经发过新的问题了，这条中断已保留为历史记录",
@@ -1600,43 +1604,18 @@ class AssistantViewModel @Inject constructor(
                     }
                     return@launch
                 }
-                // 配置未改验证：把**当初实际调用的身份**（模型 + 端点 + 协议）与
-                // 当前会调用的身份逐项比对。不一致就不能把旧题目静默发给另一个供应商。
-                val prefs = prefsRepository.current()
-                val identityMismatch = retryIdentityMismatch(existing.snapshotJson)
-                if (identityMismatch != null) {
-                    fail(
-                        opToken,
-                        "$identityMismatch。请重新发送这条问题，" +
-                            "避免把题目发给你没预期的模型或供应商。",
-                    )
-                    return@launch
-                }
-                // ── 所有挂起的校验/上下文都在 beginRetry **之前**完成 ──
-                // 重试要**刷新易变的计划/任务数据与当前日期**；重建失败时退回提交时
-                // 留下的那份只读上下文。**空刷新是有效结果**：绝不复活已删除的旧
-                // sourceContext —— 保持空上下文，让「计划已不存在」如实发给模型。
-                val storedSnapshot = com.example.lixing.data.assistant.AssistantSnapshotCodec
-                    .decode(existing.snapshotJson)
-                val refreshedContext: String? = try {
-                    val kinds = inferAssistantContext(existing.userText) + capturedContextKinds
-                    val today = StudyClock(dayStart = prefs.dayStartTime).today()
-                    contextBuilder.build(kinds, today)
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (e: Exception) {
-                    null // 重建失败：回退快照里钉下的只读上下文（由 preparer 兜底）。
-                }
-                // 重试要重发**同一道题**：数据库里的 userText 对图片题可能只是占位文案，
-                // 快照里存着当初真正发给模型的原文（含转写结果）。
-                val retryUserText = storedSnapshot?.sourceUserText?.takeIf { it.isNotBlank() }
-                    ?: existing.userText
-                val history = buildModelHistory(
-                    chatRepository.messages(ownerConversation)
-                        .filter { it.id != existing.answerMessageId }
-                        .filter { it.id != existing.userMessageId }
-                        .map { AssistantMessage(it.role, it.content) },
+                // 点击气泡上的重发即明确选择把原问题发给当前服务商。
+                // 重新捕获身份、历史、上下文选择与图片路由，并与新 attempt 一起原子写入请求行。
+                val oldSnapshot = com.example.lixing.data.assistant.AssistantSnapshotCodec.decode(existing.snapshotJson)
+                val retrySnapshot = generationManager.captureRetrySnapshot(
+                    record = existing,
+                    attachmentPaths = attachments,
+                    contextKinds = capturedContextKinds,
+                    forceWebSearch = capturedForceWebSearch,
+                    inPlanChangeFlow = oldSnapshot?.inPlanChangeFlow ?: false,
                 )
+                // 原始文字与图片分开保存；新服务商按当前看图能力重新处理原附件。
+                // 新快照标记 prepared=false，准备器会用当前设置重新生成上下文。
                 // 围栏：以上挂起期间若有更晚的重试点击 / 导航，本次全部作废。
                 if (opToken != retryOperationSeq || navigationEpoch != capturedEpoch) return@launch
                 val newAttempt = java.util.UUID.randomUUID().toString()
@@ -1645,7 +1624,7 @@ class AssistantViewModel @Inject constructor(
                 val updated = requestRepository.beginRetry(
                     requestId = requestId,
                     newAttemptId = newAttempt,
-                    refreshedSnapshotJson = null,
+                    refreshedSnapshotJson = com.example.lixing.data.assistant.AssistantSnapshotCodec.encode(retrySnapshot),
                     refreshedAttachments = attachments,
                 )
                 // beginRetry **提交成功**：无论返回路径是否被取消，回滚都按已知 id 执行。
@@ -1662,11 +1641,10 @@ class AssistantViewModel @Inject constructor(
                 generationManager.submitRetry(
                     requestId = requestId,
                     attemptId = newAttempt,
-                    history = history,
+                    history = emptyList(),
                     attachmentPaths = attachments,
-                    // null 表示"无刷新结果"；空串是有效刷新（不复活旧 sourceContext）。
-                    refreshedContext = refreshedContext,
-                    userText = retryUserText,
+                    refreshedContext = null,
+                    userText = existing.userText,
                     forceWebSearch = capturedForceWebSearch,
                 )
                 // 接受成功后 busy 从**管理器当前状态**派生：submitRetry 返回时
@@ -1676,6 +1654,7 @@ class AssistantViewModel @Inject constructor(
                     _state.update {
                         it.copy(
                             retryRequestId = null,
+                            retryUserMessageId = null,
                             retryAnswerMessageId = null,
                             retryReason = null,
                             busy = generationManager.state.value.let { active ->
@@ -1739,57 +1718,6 @@ class AssistantViewModel @Inject constructor(
         }
     }
 
-    /**
-     * 重试前的身份校验：当初提交时钉下的身份与**现在会实际调用**的身份是否一致。
-     *
-     * ## 快照缺失时**不能**跳过校验
-     *
-     * 早先 `decode(...) ?: return null` 把「快照为空」当成"旧记录，放行"。
-     * 但快照为空恰恰发生在**准备阶段就被打断**的请求上 —— 那时根本没跑完
-     * `prepare()`，快照从未写入。放行它意味着：一个我们**完全不知道**
-     * 当初发给谁的请求，会被静默发到当前配置的任意供应商。
-     *
-     * 现在区分两种情况：
-     * - 快照**存在且一致** ⇒ 放行；
-     * - 快照**缺失** ⇒ 明确告知无法核验、建议重新发送（不静默放行）。
-     */
-    private suspend fun retryIdentityMismatch(snapshotJson: String): String? {
-        val snapshot = com.example.lixing.data.assistant.AssistantSnapshotCodec.decode(snapshotJson)
-        if (snapshot == null) {
-            return "这条请求缺少可核验的配置记录（可能是准备阶段就被中断了），" +
-                "无法确认当初使用的是哪个模型与接口"
-        }
-        // **钉住快照里的主档案**（与 preparer 同语义）：快照记录了当初实际使用的
-        // primaryProfileId —— 原档案仍可用时按它校验（切换活动档案不算不一致）；
-        // **原档案已删除/密钥失效时必须拒绝**，绝不静默回退到另一个供应商
-        // （preparer 对缺失的钉住档案同样是失败）。仅当快照根本没有钉住档案
-        // （legacy 偏好配置）时才回退到当前活动配置。
-        val prefs = prefsRepository.current()
-        val identity = if (snapshot.primaryProfileId.isNotBlank()) {
-            aiCredentialStore.resolveIdentityFor(snapshot.primaryProfileId)
-                ?: return "这条请求当时使用的模型配置已不存在，无法按原配置重试。请重新发送这道题。"
-        } else {
-            aiCredentialStore.resolveActiveIdentity(prefs.aiBaseUrl, prefs.aiModel)
-                ?: return "当前没有可用的模型配置（密钥缺失），无法按原配置重试"
-        }
-        val baseUrl = identity.baseUrl
-        val model = identity.model
-        val protocol = com.example.lixing.assistant.GenerationPreparer.protocolOf(
-            baseUrl,
-            identity.searchProtocol,
-        )
-        val endpoint = com.example.lixing.data.assistant.endpointIdentityOf(baseUrl)
-        return when {
-            model != snapshot.model ->
-                "原请求使用的模型是「${snapshot.model}」，当前已改为「$model」"
-            endpoint != snapshot.endpointIdentity ->
-                "原请求使用的接口是「${snapshot.endpointIdentity}」，当前已改为「$endpoint」"
-            protocol != snapshot.protocol ->
-                "原请求使用的协议是「${snapshot.protocol}」，当前已改为「$protocol」"
-            else -> null
-        }
-    }
-
     /** 用户主动取消当前生成：真正取消网络请求，**不自动重发**。 */
     fun cancelGeneration() {
         val requestId = generationManager.activeRequestId() ?: return
@@ -1817,7 +1745,7 @@ class AssistantViewModel @Inject constructor(
     }
 
     /**
-     * 重新计算「输入框左侧重试入口」是否该出现。
+     * 重新计算失败用户气泡旁的重发入口是否该出现。
      *
      * 规则：取**当前会话请求行**里最新一条 INTERRUPTED 且可重试的请求，并且
      * 它必须是**最新一条用户消息**对应的请求 —— 更新的成功提问之后绝不能残留
@@ -1831,7 +1759,8 @@ class AssistantViewModel @Inject constructor(
     private suspend fun refreshRetryEntry() {
         val conversationId = _state.value.currentConversationId
         if (conversationId == null) {
-            _state.update { it.copy(retryRequestId = null, retryAnswerMessageId = null, retryReason = null) }
+            _state.update { it.copy(retryRequestId = null, retryUserMessageId = null,
+                retryAnswerMessageId = null, retryReason = null) }
             return
         }
         val entryEpoch = ++retryEntryEpoch
@@ -1880,6 +1809,7 @@ class AssistantViewModel @Inject constructor(
             if (!retryEntryOwns(latestUserIdAtStart)) return@update it
             it.copy(
                 retryRequestId = if (showable) candidate?.requestId else null,
+                retryUserMessageId = if (showable) candidate?.userMessageId else null,
                 retryAnswerMessageId = if (showable) candidate?.answerMessageId else null,
                 retryReason = if (showable) describeFailure(kind) else null,
             )

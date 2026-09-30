@@ -11,6 +11,7 @@ import com.example.lixing.data.sync.webdav.WebDavCredentialStore
 import com.example.lixing.data.sync.webdav.WebDavException
 import com.example.lixing.data.sync.webdav.WebDavTransportFactory
 import com.example.lixing.di.IoDispatcher
+import com.example.lixing.domain.time.StudyClock
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
@@ -327,7 +328,9 @@ class SyncRepository @Inject constructor(
             }
         }
 
-        val report = engine.sync(source.transport(config))
+        val prefs = prefsRepository.current()
+        val report = engine.sync(source.transport(config), prefs.achieveThreshold,
+            StudyClock(dayStart = prefs.dayStartTime).today(), prefs.rescueCardsPerMonth)
         val now = System.currentTimeMillis()
         recordStats(report, now)
 

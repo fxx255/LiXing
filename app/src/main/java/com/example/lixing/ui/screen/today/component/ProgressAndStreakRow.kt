@@ -142,7 +142,7 @@ private fun ProgressRing(
 
         Spacer(Modifier.height(8.dp))
         Text(
-            text = "今日 $doneCount/$totalCount",
+            text = "计划完成度 · $doneCount/$totalCount 项",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )

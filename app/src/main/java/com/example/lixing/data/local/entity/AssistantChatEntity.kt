@@ -8,7 +8,7 @@ import androidx.room.PrimaryKey
 import java.util.UUID
 import java.time.Instant
 
-/** 一次 AI 助手会话。标题取自第一条用户消息。 */
+/** 一次 AI 助手会话。初始标题取自提问，首次有效回答后保存模型概括的主题。 */
 @Entity(tableName = "assistant_conversation")
 data class AssistantConversationEntity(
     @PrimaryKey

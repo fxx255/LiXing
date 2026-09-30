@@ -70,12 +70,10 @@ data class AssistantUiState(
     val reasoningExpanded: Boolean = true,
     /** Forces provider-backed web search even when the prompt has no obvious search phrase. */
     val forceWebSearch: Boolean = false,
-    /**
-     * 输入框左侧「重新发送」入口：[retryRequestId] 非空时才显示。
-     *
-     * 只在**当前会话最新未完成且可重试**的请求上出现；没有中断时不占据常驻提示行。
-     */
+    /** 当前会话最新可重发请求；入口显示在对应用户气泡旁。 */
     val retryRequestId: String? = null,
+    /** 失败请求对应的用户消息 id，避免把重发入口放在别的气泡上。 */
+    val retryUserMessageId: String? = null,
     /** 可重试请求对应的是哪条回答消息，用于把状态标在那条气泡上。 */
     val retryAnswerMessageId: String? = null,
     /** 显示给用户的失败归类说明（例如「网络中断」）。 */

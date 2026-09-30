@@ -8,12 +8,20 @@ import androidx.room.withTransaction
 import com.example.lixing.data.backup.DbCell
 import com.example.lixing.data.local.LiXingDatabase
 import com.example.lixing.data.local.entity.PlanningSyncConflictEntity
+import com.example.lixing.data.local.entity.DayRecordEntity
+import com.example.lixing.domain.settle.DayStatsCalculator
+import com.example.lixing.domain.model.TaskStatus
+import com.example.lixing.domain.rules.LevelRules
+import com.example.lixing.domain.rules.PointRules
+import com.example.lixing.domain.settle.StreakCalculator
+import com.example.lixing.domain.time.StudyClock
 import com.example.lixing.di.IoDispatcher
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import java.security.MessageDigest
+import java.time.LocalDate
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -171,11 +179,26 @@ class SyncLocalStore @Inject constructor(
         rows: List<SyncRow>,
         remoteDeviceId: String,
         localDeviceId: String,
+        achieveThreshold: Float = 0.6f,
+        studyToday: LocalDate = StudyClock().today(),
+        rescueCardsPerMonth: Int = 1,
     ): ApplyOutcome = withContext(io) {
         var appliedRows = 0
         var appliedTombstones = 0
         var skipped = 0
         val errors = mutableListOf<String>()
+        val affectedDates = rows.mapNotNull { row ->
+            val epochDay = when (row.table) {
+                "daily_task", "point_ledger" -> row.columns["date"]?.value?.toLongOrNull()
+                    ?: if (row.deleted) db.query(
+                        "SELECT `date` FROM `${row.table}` WHERE `id` = ?",
+                        arrayOf(localId(row.table, row.rowId)),
+                    ).use { if (it.moveToFirst()) it.getLong(0) else null } else null
+                "day_record" -> row.rowId.toLongOrNull()
+                else -> null
+            }
+            epochDay?.let(LocalDate::ofEpochDay)
+        }.toSet()
         val containsPlanning = rows.any { it.table in setOf(
             "scheduled_task", "plan_day_policy", "plan_change_set", "learning_goal", "learning_unit", "study_resource",
             "task_content_progress", "manual_study_time",
@@ -245,6 +268,77 @@ class SyncLocalStore @Inject constructor(
                     }
                     affected.forEach { com.example.lixing.data.repository.reconcileEnglishMemory(database.englishEntryDao(), it) }
                 }
+                // day_record is a projection. A stale remote percentage must not outlive
+                // the task rows that were just reconciled in this same transaction.
+                val refundedRescues = mutableMapOf<Int, Int>()
+                for (date in affectedDates) {
+                    val tasks = database.dailyTaskDao().getTasksOfDay(date)
+                    val current = database.dayRecordDao().getRecord(date)
+                    if (tasks.isEmpty() && current == null) continue
+                    // A different device may already have charged a missed penalty before
+                    // an offline same-day check-in arrived. A genuine next-day makeup keeps
+                    // its original missed penalty, as in the normal check-in flow.
+                    val completedIds = tasks.filter {
+                        (it.status == TaskStatus.DONE || it.status == TaskStatus.PARTIAL) && !it.isMakeup
+                    }.map { it.id }
+                    if (completedIds.isNotEmpty()) {
+                        val keys = completedIds.map(PointRules::keyMissed)
+                        database.gamificationDao().deleteLedgerByDedupeKeys(keys)
+                    }
+                    val stats = DayStatsCalculator.calculate(tasks)
+                    val achieved = current?.isDayOff != true && stats.isAchieved(achieveThreshold)
+                    val rescueNoLongerNeeded = current?.usedRescueCard == true && achieved &&
+                        DayStatsCalculator.calculate(tasks.map { task ->
+                            if (task.isMakeup && task.status.isEngaged) {
+                                task.copy(status = TaskStatus.MISSED, actualValue = 0)
+                            } else task
+                        }).isAchieved(achieveThreshold)
+                    if (rescueNoLongerNeeded) {
+                        val month = StreakCalculator.monthKeyOf(date)
+                        refundedRescues[month] = (refundedRescues[month] ?: 0) + 1
+                    }
+                    database.dayRecordDao().upsert((current ?: DayRecordEntity(date = date)).copy(
+                        totalTasks = stats.totalTasks,
+                        doneTasks = stats.doneTasks,
+                        partialTasks = stats.partialTasks,
+                        missedTasks = stats.missedTasks,
+                        skippedTasks = stats.skippedTasks,
+                        completionRate = stats.completionRate,
+                        focusMinutes = stats.focusMinutes,
+                        pointsEarned = database.gamificationDao().getPointsOfDay(date),
+                        isAchieved = achieved,
+                        isFullDay = !current.let { it?.isDayOff ?: false } && stats.isFullDay,
+                        usedRescueCard = current?.usedRescueCard == true && !rescueNoLongerNeeded,
+                    ))
+                }
+                if (affectedDates.isNotEmpty() || grouped.containsKey("point_ledger") || grouped.containsKey("user_profile")) {
+                    val gamification = database.gamificationDao()
+                    gamification.getProfile()?.let { profile ->
+                        val total = gamification.getTotalPoints().coerceAtLeast(0)
+                        val level = LevelRules.levelOf(total)
+                        gamification.upsertProfile(profile.copy(
+                            totalPoints = total,
+                            level = level,
+                            title = LevelRules.titleOf(level),
+                        ))
+                    }
+                }
+                if (affectedDates.isNotEmpty() || grouped.containsKey("check_in_streak")) {
+                    val gamification = database.gamificationDao()
+                    gamification.getStreak()?.let { current ->
+                        val records = database.dayRecordDao().getRecordsBetween(studyToday.minusDays(399), studyToday)
+                        val rebuilt = StreakCalculator.rebuildCurrent(records, studyToday)
+                        gamification.upsertStreak(current.copy(
+                            currentStreak = rebuilt.days,
+                            longestStreak = maxOf(current.longestStreak, rebuilt.days),
+                            lastAchievedDate = rebuilt.lastContinuousDate,
+                            totalAchievedDays = database.dayRecordDao().countAchievedDays(),
+                            rescueCardsLeft = refundedRescues[current.rescueCardsMonth]?.let { refunded ->
+                                (current.rescueCardsLeft + refunded).coerceAtMost(rescueCardsPerMonth)
+                            } ?: current.rescueCardsLeft,
+                        ))
+                    }
+                }
                 bumpClockTo(rows.maxOfOrNull { it.clock } ?: 0L)
             } finally {
                 setApplying(false)
@@ -263,12 +357,28 @@ class SyncLocalStore @Inject constructor(
         row: SyncRow,
         localDeviceId: String,
         remoteDeviceId: String,
-    ): SyncMerger.Decision = SyncMerger.decide(
-        local = localState(spec, row.rowId),
-        remote = row,
-        localDeviceId = localDeviceId,
-        remoteDeviceId = remoteDeviceId,
-    )
+    ): SyncMerger.Decision {
+        val usual = SyncMerger.decide(
+            local = localState(spec, row.rowId), remote = row,
+            localDeviceId = localDeviceId, remoteDeviceId = remoteDeviceId,
+        )
+        if (spec.name != "daily_task" || row.deleted) return usual
+        val remote = TaskExecutionSyncPolicy.State(
+            status = row.columns["status"]?.value.orEmpty(),
+            actualValue = row.columns["actual_value"]?.value?.toIntOrNull() ?: 0,
+            checked = row.columns["checked_at"]?.value != null,
+            skipReason = row.columns["skip_reason"]?.value.orEmpty(),
+        )
+        val local = db.query(
+            "SELECT `status`, `actual_value`, `checked_at`, `skip_reason` FROM `daily_task` WHERE `id` = ?",
+            arrayOf(row.rowId),
+        ).use { cursor ->
+            if (!cursor.moveToFirst()) null else TaskExecutionSyncPolicy.State(
+                cursor.getString(0), cursor.getInt(1), !cursor.isNull(2), cursor.getString(3).orEmpty(),
+            )
+        }
+        return TaskExecutionSyncPolicy.decide(local, remote, usual)
+    }
 
     /** A remote plan cannot replace an execution snapshot that this device already started. */
     private fun checkPlanningConflict(spec: SyncTableSpec, row: SyncRow) {

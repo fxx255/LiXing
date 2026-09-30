@@ -3,6 +3,7 @@ package com.example.lixing.domain.settle
 import com.example.lixing.data.local.entity.DailyTaskEntity
 import com.example.lixing.domain.model.TaskStatus
 import com.example.lixing.domain.rules.PointRules
+import java.time.LocalDate
 
 /**
  * 一天的统计结果。由 [DayStatsCalculator] 从任务列表算出，
@@ -15,7 +16,7 @@ data class DayStats(
     val missedTasks: Int,
     val skippedTasks: Int,
     val pendingTasks: Int,
-    /** 加权完成率 0f~1f：DONE 记 1，PARTIAL 按实际/目标折算，请假不计入分母。 */
+    /** 计划完成率 0f~1f：新日期按预计时长加权，历史日期按任务数计算。 */
     val completionRate: Float,
     /** 关键任务是否全部完成。 */
     val keystoneAllDone: Boolean,
@@ -69,8 +70,24 @@ data class DayStats(
 /** 从任务列表算出 [DayStats]。纯函数。 */
 object DayStatsCalculator {
 
+    /** 已结算的旧日期保留原有任务数口径。 */
+    private val TIME_WEIGHT_START = LocalDate.of(2026, 9, 30)
+
+    private fun taskWeight(task: DailyTaskEntity): Float =
+        (task.plannedMinutes?.takeIf { it > 0 }
+            ?: task.targetValue.takeIf { task.targetType == com.example.lixing.domain.model.TargetType.MINUTES && it > 0 }
+            ?: 60).toFloat()
+
+    private fun taskProgress(task: DailyTaskEntity): Float = when (task.status) {
+        TaskStatus.DONE -> 1f
+        TaskStatus.PARTIAL -> PointRules.completionRatio(
+            task.actualValue, task.targetValue, task.targetType).coerceIn(0f, 1f)
+        else -> 0f
+    }
+
     fun calculate(tasks: List<DailyTaskEntity>): DayStats {
         if (tasks.isEmpty()) return DayStats.EMPTY
+        val timeWeighted = tasks.first().date >= TIME_WEIGHT_START
 
         var done = 0
         var partial = 0
@@ -95,8 +112,17 @@ object DayStatsCalculator {
             if (active.isEmpty()) continue
             val engaged = active.count { it.status.isEngaged }
             if (engaged < required) slotRequirementsMet = false
-            weightedDenominator += 1f
-            weightedSum += engaged.toFloat() / required
+            if (timeWeighted) {
+                // 可选组完成任意 required 项即视为完成该组；组内短任务不能因
+                // 同组存在较长的备选项而被误算为部分完成。
+                val groupWeight = active.map(::taskWeight).sortedDescending().take(required).sum()
+                val groupProgress = active.map(::taskProgress).sortedDescending().take(required).sum() / required
+                weightedDenominator += groupWeight
+                weightedSum += groupWeight * groupProgress
+            } else {
+                weightedDenominator += 1f
+                weightedSum += engaged.toFloat() / required
+            }
         }
 
         for (task in tasks) {
@@ -106,23 +132,23 @@ object DayStatsCalculator {
                 TaskStatus.DONE -> {
                     done++
                     if ((task.slotRequiredTaskCount).coerceAtLeast(0) <= 0) {
-                        weightedSum += 1f; weightedDenominator += 1f
+                        val weight = if (timeWeighted) taskWeight(task) else 1f
+                        weightedSum += weight; weightedDenominator += weight
                     }
                 }
 
                 TaskStatus.PARTIAL -> {
                     partial++
                     if (task.slotRequiredTaskCount.coerceAtLeast(0) <= 0) {
-                        weightedSum += PointRules
-                            .completionRatio(task.actualValue, task.targetValue, task.targetType)
-                            .coerceIn(0f, 1f)
-                        weightedDenominator += 1f
+                        val weight = if (timeWeighted) taskWeight(task) else 1f
+                        weightedSum += taskProgress(task) * weight
+                        weightedDenominator += weight
                     }
                 }
 
-                TaskStatus.MISSED -> { missed++; if (task.slotRequiredTaskCount <= 0) weightedDenominator += 1f }
+                TaskStatus.MISSED -> { missed++; if (task.slotRequiredTaskCount <= 0) weightedDenominator += if (timeWeighted) taskWeight(task) else 1f }
                 TaskStatus.SKIPPED -> skipped++
-                TaskStatus.PENDING -> { pending++; if (task.slotRequiredTaskCount <= 0) weightedDenominator += 1f }
+                TaskStatus.PENDING -> { pending++; if (task.slotRequiredTaskCount <= 0) weightedDenominator += if (timeWeighted) taskWeight(task) else 1f }
             }
 
             // 请假的关键任务不计入「关键任务是否全做完」

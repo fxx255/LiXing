@@ -43,7 +43,7 @@ import javax.inject.Inject
 data class DailyScheduleUiState(
     val planId: String? = null,
     val dayStart: LocalTime = LocalTime.MIDNIGHT,
-    val weekStart: LocalDate = LocalDate.now().with(TemporalAdjusters.previousOrSame(DayOfWeek.MONDAY)),
+    val selectedDate: LocalDate = LocalDate.now(),
     val tasksByDate: Map<LocalDate, List<DailyTaskEntity>> = emptyMap(),
     val scheduled: List<ScheduledTaskEntity> = emptyList(),
     val dayPolicies: List<PlanDayPolicyEntity> = emptyList(),
@@ -64,18 +64,18 @@ class DailyScheduleViewModel @Inject constructor(
     private val planning: PlanningRepository,
     private val prefs: UserPreferencesRepository,
 ) : ViewModel() {
-    private val weekStart = MutableStateFlow(LocalDate.now().with(TemporalAdjusters.previousOrSame(DayOfWeek.MONDAY)))
+    private val selectedDate = MutableStateFlow(LocalDate.now())
     private val _state = MutableStateFlow(DailyScheduleUiState())
     val state: StateFlow<DailyScheduleUiState> = _state.asStateFlow()
 
     init {
         viewModelScope.launch {
-            weekStart.value = StudyClock(dayStart = prefs.current().dayStartTime).today()
-                .with(TemporalAdjusters.previousOrSame(DayOfWeek.MONDAY))
+            selectedDate.value = StudyClock(dayStart = prefs.current().dayStartTime).today()
         }
         viewModelScope.launch {
-            combine(plans.activePlan.filterNotNull(), weekStart) { plan, start -> plan to start }
-                .flatMapLatest { (plan, start) ->
+            combine(plans.activePlan.filterNotNull(), selectedDate) { plan, date -> plan to date }
+                .flatMapLatest { (plan, date) ->
+                    val start = date.with(TemporalAdjusters.previousOrSame(DayOfWeek.MONDAY))
                     combine(
                         planning.observeSchedules(plan.id, start, start.plusDays(6)).combine(
                             planning.observeDayPolicies(plan.id, start, start.plusDays(6))) { schedules, policies ->
@@ -93,7 +93,7 @@ class DailyScheduleViewModel @Inject constructor(
                         DailyScheduleUiState(
                             planId = plan.id,
                             dayStart = prefs.current().dayStartTime,
-                            weekStart = start,
+                            selectedDate = date,
                             tasksByDate = preview,
                             scheduled = scheduleData.first,
                             dayPolicies = scheduleData.second,
@@ -111,7 +111,8 @@ class DailyScheduleViewModel @Inject constructor(
         }
     }
 
-    fun shiftWeek(weeks: Long) { weekStart.value = weekStart.value.plusWeeks(weeks) }
+    fun selectDate(date: LocalDate) { selectedDate.value = date }
+    fun shiftDay(days: Long) { selectedDate.value = selectedDate.value.plusDays(days) }
     fun clearMessage() { _state.update { it.copy(message = null) } }
 
     fun saveDayPolicy(date: LocalDate, windows: List<AvailabilityWindow>, maxMinutes: Int?, reason: String) {

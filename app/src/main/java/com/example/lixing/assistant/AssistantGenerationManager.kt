@@ -830,6 +830,28 @@ class AssistantGenerationManager @Inject constructor(
     private fun String.isInFlightStatus(): Boolean =
         this == AssistantRequestStatus.PREPARING.name || this == AssistantRequestStatus.RUNNING.name
 
+    /** Rebuild retry routing from the provider selected when the user taps resend. */
+    suspend fun captureRetrySnapshot(
+        record: AssistantRequestEntity,
+        attachmentPaths: List<String>,
+        contextKinds: Set<com.example.lixing.domain.assistant.AssistantContextKind>,
+        forceWebSearch: Boolean,
+        inPlanChangeFlow: Boolean,
+    ): com.example.lixing.data.assistant.AssistantRequestSnapshot =
+        preparer.captureInitialSnapshot(
+            submission = Submission(
+                conversationId = record.conversationId,
+                userText = record.userText,
+                attachmentPaths = attachmentPaths,
+                contextKinds = contextKinds,
+                forceWebSearch = forceWebSearch,
+                inPlanChangeFlow = inPlanChangeFlow,
+            ),
+            conversationId = record.conversationId,
+            userMessageId = record.userMessageId,
+            answerMessageId = record.answerMessageId,
+        )
+
     private suspend fun runRetry(
         record: AssistantRequestEntity,
         attemptId: String,
@@ -871,7 +893,7 @@ class AssistantGenerationManager @Inject constructor(
                     userMessageId = record.userMessageId,
                     answerMessageId = record.answerMessageId,
                     attemptId = attemptId,
-                    userText = userText,
+                    userText = prepared.outgoingText,
                     // 用 preparer 组装好的历史（快照权威 + 本轮原问题）。
                     history = prepared.history,
                     context = prepared.context,
@@ -1171,6 +1193,7 @@ class AssistantGenerationManager @Inject constructor(
             var continuation = 0
             var barrenRounds = 0
             var lastResult: ParsedAssistantReply? = null
+            var conversationTitle: String? = null
             var effectiveContext = request.context
             var planRetryUsed = false
             var shouldStop = false
@@ -1306,6 +1329,7 @@ class AssistantGenerationManager @Inject constructor(
 
                 // **保留全部合并正文**：续写必须在前文基础上追加，
                 // 绝不能只留最后一轮（那会把用户已经看到的长正文整段抹掉）。
+                if (conversationTitle == null) conversationTitle = reply.conversationTitle
                 confirmedText = mergeAssistantContinuation(confirmedText, part)
                 partial = confirmedText
                 // 按轮序累积所有图的槽位（含失败槽位），失败槽位同样占号，
@@ -1325,7 +1349,7 @@ class AssistantGenerationManager @Inject constructor(
 
             // 收尾：正文与请求状态**原子提交**。
             timer.markCompleted()
-            val result = lastResult
+            val result = lastResult?.copy(conversationTitle = conversationTitle)
                 ?: throw AssistantModelException(
                     AssistantModelException.Kind.INVALID_RESPONSE,
                     "模型没有返回任何内容",
@@ -1573,6 +1597,7 @@ class GenerationFinalizer @Inject constructor(
             text = mergedText,
             pendingReview = reviewPayload,
             answerImagePaths = imagePaths,
+            conversationTitle = result.conversationTitle,
         )
         Result(saved = saved, imagePaths = imagePaths, reviewPayload = reviewPayload)
     }
