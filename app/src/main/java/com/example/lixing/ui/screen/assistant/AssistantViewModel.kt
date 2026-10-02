@@ -381,7 +381,14 @@ class AssistantViewModel @Inject constructor(
             // 管理器已经没有活动任务：清掉围栏与「生成中」，并**从库里补齐终态**。
             activeRequestId = null
             activeAttemptId = null
-            _state.update { it.copy(busy = false, retrying = false) }
+            _state.update {
+                it.copy(
+                    busy = false,
+                    retrying = false,
+                    activeReasoning = "",
+                    activeAnswerStarted = false,
+                )
+            }
             // 只在本屏确实有一个「进行中的回答位置」时才回读，
             // 避免每次 active 抖动都去读库。
             activeAnswerMessageId?.let { answerId ->
@@ -770,7 +777,8 @@ class AssistantViewModel @Inject constructor(
                 activeRequestId = event.requestId
                 activeAttemptId = event.attemptId
                 activeAnswerMessageId = event.answerMessageId
-                _state.update { it.copy(busy = true, retrying = false, error = null) }
+                renderActiveState(current)
+                _state.update { it.copy(retrying = false, error = null) }
             }
 
             is com.example.lixing.assistant.AssistantGenerationManager.GenerationEvent.Reasoning -> {
@@ -1125,6 +1133,9 @@ class AssistantViewModel @Inject constructor(
             it.copy(
                 messages = emptyList(),
                 currentConversationId = null,
+                activeReasoning = "",
+                activeAnswerStarted = false,
+                reasoningExpanded = true,
                 pendingActions = emptyList(),
                 pendingActionsOwnerIndex = null,
                 pendingActionsOwnerMessageId = null,
@@ -1282,6 +1293,9 @@ class AssistantViewModel @Inject constructor(
         if (text.isEmpty() && photoPaths.isEmpty()) return
         if (current.busy || current.retrying) return
         if (!pendingSubmissions.compareAndSet(0, 1)) return // 已有一次提交在途
+        _state.update {
+            it.copy(activeReasoning = "", activeAnswerStarted = false, reasoningExpanded = true)
+        }
         // 捕获点击瞬间的完整归属与设置。
         val ownerSlot = current.currentConversationId // null = 未落库新会话
         val epoch = navigationEpoch
@@ -1427,7 +1441,10 @@ class AssistantViewModel @Inject constructor(
             // manager 可重放状态里若已有本轮的推理/正文（快速开始的生成），
             // **保留**而不是清空 —— 否则已到达的增量会闪没。
             val managerActive = generationManager.state.value
-            val ownsActive = managerActive.requestId == request.requestId
+            val ownsActive = managerActive.isRunning &&
+                managerActive.requestId == request.requestId &&
+                managerActive.attemptId == request.attemptId &&
+                managerActive.conversationId == conversationId
             state.copy(
                 input = if (clearInput) "" else state.input,
                 pendingPhotoPaths = if (clearPhotos) emptyList() else state.pendingPhotoPaths,
@@ -1462,18 +1479,10 @@ class AssistantViewModel @Inject constructor(
                 retryUserMessageId = null,
                 retryAnswerMessageId = null,
                 retryReason = null,
-                // 保留 manager 当前已有的推理/正文状态（快速开始的生成），
-                // 绝不清空 —— ownsActive 时优先采纳 manager 可重放状态里的值。
-                activeReasoning = if (ownsActive) {
-                    managerActive.reasoning.ifEmpty { state.activeReasoning }
-                } else {
-                    state.activeReasoning
-                },
-                activeAnswerStarted = if (ownsActive) {
-                    state.activeAnswerStarted || managerActive.answerStarted
-                } else {
-                    state.activeAnswerStarted
-                },
+                // 只有管理器已经发布了同一轮的活动状态时才采用它；
+                // 否则从全新的思考状态开始，避免复用上一轮内容。
+                activeReasoning = if (ownsActive) managerActive.reasoning else "",
+                activeAnswerStarted = if (ownsActive) managerActive.answerStarted else false,
                 reasoningExpanded = true,
                 // busy 从**管理器当前状态**派生：submit 返回时请求可能已经
                 // 跑完（快速完成），无条件 true 会让界面永远卡在「生成中」。
@@ -1881,7 +1890,9 @@ class AssistantViewModel @Inject constructor(
                 state.copy(messages = replaceMessageImagesIn(answerMessageId, state.messages, paths))
             }
         }
-        _state.update { it.copy(busy = false, retrying = false) }
+        _state.update {
+            it.copy(busy = false, retrying = false, activeReasoning = "", activeAnswerStarted = false)
+        }
         activeAnswerMessageId = null
         activeRequestId = null
         activeAttemptId = null

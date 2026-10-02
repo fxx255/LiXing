@@ -114,21 +114,31 @@ private data class StreamingMarkdownRenderCache(
 )
 
 @Composable
-private fun StreamingMarkdownChunk(snapshot: StreamingMarkdownSnapshot) {
+internal fun StreamingMarkdownChunk(snapshot: StreamingMarkdownSnapshot) {
     val textColor = MaterialTheme.colorScheme.onSurface.toArgb()
     val linkColor = MaterialTheme.colorScheme.primary.toArgb()
     var widthPx by remember { mutableIntStateOf(0) }
+    var host by remember { mutableStateOf<TextView?>(null) }
+    LaunchedEffect(host, snapshot.tailId, snapshot.tail, widthPx) {
+        val view = host ?: return@LaunchedEffect
+        if (widthPx <= 0) return@LaunchedEffect
+        withFrameNanos { }
+        view.requestLayout()
+    }
     AndroidView(
         modifier = Modifier.fillMaxWidth().clipToBounds().onSizeChanged { widthPx = it.width },
-        factory = { context -> createMarkdownTextView(context, textColor, linkColor) },
+        factory = { context ->
+            createMarkdownTextView(context, textColor, linkColor).also { host = it }
+        },
         update = { view ->
+            host = view
             renderStreamingMarkdown(view, snapshot, widthPx, textColor, linkColor)
         },
     )
 }
 
 /** Reuse already parsed formula spans while appending the still-growing suffix. */
-private fun renderStreamingMarkdown(
+internal fun renderStreamingMarkdown(
     view: TextView,
     snapshot: StreamingMarkdownSnapshot,
     widthPx: Int,

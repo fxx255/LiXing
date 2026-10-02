@@ -1,6 +1,7 @@
 package com.example.lixing.domain.diagram
 
 import android.graphics.Paint
+import com.example.lixing.rendering.LatexRendering
 import ru.noties.jlatexmath.JLatexMathDrawable
 
 enum class DiagramTextRole(val fontSizePx: Float) {
@@ -93,8 +94,7 @@ internal object DiagramText {
             if (token == "\n") { flush(); return@forEach }
             val formula = if (token.startsWith('$') && token.endsWith('$') && token.length > 2) {
                 runCatching {
-                    JLatexMathDrawable.builder(token.substring(1, token.length - 1))
-                        .textSize(role.fontSizePx).build()
+                    LatexRendering.build(token.substring(1, token.length - 1), role.fontSizePx)
                 }.getOrNull()
             } else null
             val run = DiagramTextRun(token,

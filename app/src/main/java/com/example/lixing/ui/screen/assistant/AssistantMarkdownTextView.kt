@@ -16,6 +16,7 @@ import android.widget.TextView
 import com.example.lixing.data.assistant.normalizeAssistantMarkdown
 import com.example.lixing.data.assistant.sanitizeAssistantLatex
 import com.example.lixing.data.assistant.wrapLongFormulas
+import com.example.lixing.rendering.LatexRendering
 import io.noties.markwon.Markwon
 import io.noties.markwon.ext.latex.JLatexMathPlugin
 import io.noties.markwon.ext.tables.TablePlugin
@@ -23,7 +24,6 @@ import io.noties.markwon.inlineparser.MarkwonInlineParserPlugin
 import java.io.File
 import java.time.Instant
 import java.util.concurrent.Executors
-import ru.noties.jlatexmath.JLatexMathDrawable
 
 internal fun createMarkdownTextView(
     context: Context,
@@ -105,11 +105,17 @@ internal fun createMarkdownTextView(
         textSize = MARKDOWN_TEXT_SIZE_SP
         val fallbackSizePx = 14f * resources.displayMetrics.scaledDensity
         val renderer = Markwon.builder(context)
+            .textSetter { view, markdown, bufferType, onComplete ->
+                val theme = (view.tag as Markwon).configuration().theme()
+                view.setText(baselineAlignedLatex(markdown, theme), bufferType)
+                onComplete.run()
+            }
             .usePlugin(MarkwonInlineParserPlugin.create())
             .usePlugin(TablePlugin.create(tableThemeFor(context)))
             .usePlugin(
                 JLatexMathPlugin.create(this.textSize) { builder ->
                     builder.inlinesEnabled(true)
+                    builder.executorService(LatexRendering.executor)
                     builder.theme().textColor(textColor)
                     // 单条公式解析失败时画占位，绝不让 ParseException 冒泡成整页闪退。
                     // 失败的 latex 与异常类型一并写入本地日志，便于事后定位（用户截图
@@ -283,6 +289,7 @@ internal fun appendRenderErrorLog(context: Context, markdown: String, error: Thr
                 val entry = buildString {
                     appendLine("=== ${Instant.now()} ===")
                     appendLine("error: ${error::class.java.simpleName}: ${error.message}")
+                    appendLine(error.stackTraceToString().take(8_000))
                     appendLine(markdown.take(1_500))
                     appendLine()
                 }
@@ -308,7 +315,7 @@ internal fun formulaMaxWidthPx(view: TextView, measuredWidthPx: Int): Int {
 internal fun formulaWidthMeasurer(view: TextView): (String) -> Int {
     val textSizePx = 17f * view.resources.displayMetrics.scaledDensity
     return { latex ->
-        runCatching { JLatexMathDrawable.builder(latex).textSize(textSizePx).build().intrinsicWidth }
+        runCatching { LatexRendering.build(latex, textSizePx).intrinsicWidth }
             .getOrDefault((latex.length * textSizePx * 0.62f).toInt())
     }
 }

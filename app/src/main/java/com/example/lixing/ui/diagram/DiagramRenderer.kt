@@ -7,7 +7,7 @@ import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.RectF
 import com.example.lixing.domain.diagram.*
-import ru.noties.jlatexmath.JLatexMathDrawable
+import com.example.lixing.rendering.LatexRendering
 import kotlin.math.atan2
 import kotlin.math.sqrt
 
@@ -424,8 +424,7 @@ object DiagramRenderer {
                 // light text color; otherwise their default black disappears.
                 val drawable = if (palette === DARK && run.formula != null) {
                     runCatching {
-                        JLatexMathDrawable.builder(run.text.removeSurrounding("$"))
-                            .textSize(role.fontSizePx).color(palette.ink).build()
+                        LatexRendering.build(run.text.removeSurrounding("$"), role.fontSizePx, palette.ink)
                     }.getOrNull() ?: run.formula
                 } else run.formula
                 if (drawable != null) {

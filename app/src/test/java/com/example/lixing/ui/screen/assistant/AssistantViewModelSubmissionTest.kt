@@ -214,6 +214,26 @@ class AssistantViewModelSubmissionTest {
         assertTrue(vm.state.value.activeAnswerStarted)
     }
 
+    @Test fun newSubmissionClearsPreviousReasoningBeforePreparationCompletes() = runTest(dispatcher) {
+        open("A")
+        active.value = AssistantGenerationManager.ActiveState(
+            requestId = "old-request", attemptId = "old-attempt", conversationId = "A",
+            phase = AssistantRequestStatus.INTERRUPTED, reasoning = "上一轮思考链", answerStarted = true,
+        )
+        vm.updateInput("新问题")
+        val gate = CompletableDeferred<Unit>()
+        coEvery { manager.submit(any(), any(), any(), any(), any()) } coAnswers {
+            gate.await()
+            record("A")
+        }
+        vm.send()
+        tick()
+        assertEquals("", vm.state.value.activeReasoning)
+        assertFalse(vm.state.value.activeAnswerStarted)
+        gate.complete(Unit)
+        tick()
+    }
+
     @Test fun fastCompletionDoesNotBecomeBusyAgainOrLoseFinalText() = runTest(dispatcher) {
         completeBeforeReturn = true
         open("A"); vm.updateInput("问题"); vm.send(); tick()

@@ -137,6 +137,21 @@ class MarkwonLatexSourceTest {
         }
     }
 
+    @Test fun reportedArcsineWithSizedParenthesesSurvivesRealPipeline() {
+        val formula = """=\arcsin\Bigl(2\sqrt{(1-x)-(1-x)^{2}}\Bigr)"""
+        val dd = "\$\$"
+        val markdown = "$dd\ng(1-x)\n$dd\n\n$dd\n$formula\n$dd\n\n" +
+            "$dd\n" + """=\arcsin\left(2\sqrt{x-x^{2}}\right)=g(x)""" + "\n$dd"
+        for (width in listOf(160, 240, 420, 900)) {
+            val prepared = wrapLongFormulas(
+                sanitizeAssistantLatex(normalizeAssistantMarkdown(markdown)),
+                width,
+            ) { JLatexMathDrawable.builder(it).textSize(36f).build().intrinsicWidth }
+            collect(prepared)
+            assertEveryRawSourceBuilds("reported arcsine width=$width")
+        }
+    }
+
     /** 该回答里的其余公式同样要在真实链路上成立。 */
     @Test fun otherFormulasFromThatAnswerSurviveRealPipeline() {
         val formulas = listOf(

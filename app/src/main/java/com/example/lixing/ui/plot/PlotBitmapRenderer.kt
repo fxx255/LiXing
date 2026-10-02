@@ -17,6 +17,7 @@ import com.example.lixing.domain.plot.niceTicks
 import com.example.lixing.domain.plot.prettifyPlotLabel
 import com.example.lixing.domain.plot.sampleShadePolygons
 import com.example.lixing.domain.plot.sampleSeries
+import com.example.lixing.rendering.LatexRendering
 import ru.noties.jlatexmath.JLatexMathDrawable
 import kotlin.math.abs
 import kotlin.math.min
@@ -249,10 +250,7 @@ class PlotBitmapRenderer(
         val key = "$textSizePx::$latex"
         texCache[key]?.let { return it }
         return runCatching {
-            JLatexMathDrawable.builder(latex)
-                .textSize(textSizePx)
-                .color(theme.text)
-                .build()
+            LatexRendering.build(latex, textSizePx, theme.text)
         }.getOrNull()?.also { texCache[key] = it }
     }
 
