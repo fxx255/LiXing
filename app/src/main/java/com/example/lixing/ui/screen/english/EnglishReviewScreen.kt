@@ -47,6 +47,8 @@ fun EnglishReviewScreen(onBack: () -> Unit, onOpenNotebook: () -> Unit,
     val speech = remember { EnglishSpeech(context) }
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     var licenses by remember { mutableStateOf(false) }
+    var audioSource by remember { mutableStateOf<com.example.lixing.data.dictionary.PronunciationAudio?>(null) }
+    audioSource?.let { source -> PronunciationSourceDialog(source) { audioSource = null } }
     DisposableEffect(speech, lifecycle) {
         val observer = LifecycleEventObserver { _, event -> if (event == Lifecycle.Event.ON_STOP) speech.stop() }
         lifecycle.addObserver(observer)
@@ -58,11 +60,15 @@ fun EnglishReviewScreen(onBack: () -> Unit, onOpenNotebook: () -> Unit,
             if (vibrator?.hasVibrator() == true) vibrator.vibrate(VibrationEffect.createOneShot(28, VibrationEffect.DEFAULT_AMPLITUDE))
         }
     }
-    LaunchedEffect(state.current?.id) {
+    LaunchedEffect(state.current?.id, state.preferences.englishAutoSpeak,
+        state.preferences.englishBritishVoice, state.preferences.englishOnlinePronunciation) {
         speech.stop()
-        if (state.preferences.englishAutoSpeak) state.current?.let { speech.speak(it.content, state.preferences.englishBritishVoice) }
+        if (state.preferences.englishAutoSpeak) state.current?.let {
+            speech.speak(it.content, state.preferences.englishBritishVoice, state.preferences.englishOnlinePronunciation)
+        }
     }
-    val speak: (String) -> Unit = { speech.speak(it, state.preferences.englishBritishVoice) }
+    val speak: (String) -> Unit = { speech.speak(it, state.preferences.englishBritishVoice, state.preferences.englishOnlinePronunciation) }
+    val speakExample: (String) -> Unit = { speech.speak(it, state.preferences.englishBritishVoice, online = false) }
     if (licenses) DictionaryLicensesDialog { licenses = false }
     Scaffold(
         topBar = { TopAppBar(title = { Text("背诵复习") }, navigationIcon = {
@@ -119,6 +125,11 @@ fun EnglishReviewScreen(onBack: () -> Unit, onOpenNotebook: () -> Unit,
                                     Text(state.word?.phonetic.orEmpty(), style = MaterialTheme.typography.bodyLarge)
                                     IconButton(onClick = { speak(entry.content) }) { Icon(Icons.Default.VolumeUp, "播放单词发音") }
                                 }
+                                speech.source?.let { source ->
+                                    TextButton(onClick = { audioSource = source }) {
+                                        Text("有道词典 · ${if (source.british) "英式" else "美式"}发音 · 来源", style = MaterialTheme.typography.labelSmall)
+                                    }
+                                }
                             }
                             HorizontalDivider()
                             if (!state.revealed) {
@@ -129,7 +140,7 @@ fun EnglishReviewScreen(onBack: () -> Unit, onOpenNotebook: () -> Unit,
                                     OutlinedButton(onClick = viewModel::reveal) { Text("查看释义") }
                                 }
                             } else {
-                                key(entry.id) { WordDetails(state, speak, viewModel::supplement) }
+                                key(entry.id) { WordDetails(state, speakExample, viewModel::supplement) }
                             }
                         }
                         if (state.revealed) ReviewGestureButton(
@@ -218,7 +229,7 @@ private fun WordDetails(state: ReviewSessionState, speak: (String) -> Unit, supp
             val grade = runCatching { ReviewGrade.valueOf(log.grade) }.getOrNull()
             Text("$date   ${grade?.let(::gradeLabel) ?: log.grade}", style = MaterialTheme.typography.bodySmall)
         }
-        item { Text("圆钮：点击发音 · 上滑认识 · 右滑模糊 · 下滑忘记\n长按圆钮后拖动，可调整并记住位置。", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+        item { Text("圆钮：点击发音 · 上滑认识 · 左滑模糊 · 下滑忘记\n长按圆钮后拖动，可调整并记住位置。", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
     }
 }
 
@@ -270,11 +281,24 @@ private fun DictionaryLicensesDialog(onDismiss: () -> Unit) {
         text = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
             val names = listOf("ECDICT-LICENSE.txt", "WordNet-LICENSE.txt", "Tatoeba-README.txt", "FSRS-LICENSE.txt")
             "离线词库：ECDICT 常用词条、WordNet 3.0 英文释义、Tatoeba 中英例句。词形与例句覆盖不保证完整。\n" +
-                "例句作者和原文链接随每条例句保留；Tatoeba 文本采用 CC BY 2.0（https://creativecommons.org/licenses/by/2.0/）。发音使用系统离线 TTS。\n\n" +
+                "例句作者和原文链接随每条例句保留；Tatoeba 文本采用 CC BY 2.0（https://creativecommons.org/licenses/by/2.0/）。\n" +
+                "单词和短语优先使用有道词典页面的英美在线发音，无需 API Key，首次播放仅发送当前单词或短语，音频缓存在本机；音频未作修改。没有可用音频、断网或朗读例句时，使用系统已安装的高质量离线英文语音。可在设置中关闭免费在线发音。在线发音的可用性由外部服务决定。\n\n" +
                 names.joinToString("\n\n") { name -> name + "\n" + context.assets.open("dictionary/licenses/$name").bufferedReader().use { it.readText() } }
         }
     }
     AlertDialog(onDismissRequest = onDismiss, title = { Text("免费词源与许可") },
         text = { Text(text, Modifier.verticalScroll(rememberScrollState()), style = MaterialTheme.typography.bodySmall) },
         confirmButton = { TextButton(onClick = onDismiss) { Text("关闭") } })
+}
+
+@Composable
+private fun PronunciationSourceDialog(source: com.example.lixing.data.dictionary.PronunciationAudio, onDismiss: () -> Unit) {
+    val uri = LocalUriHandler.current
+    AlertDialog(onDismissRequest = onDismiss, title = { Text("发音来源") },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState())) {
+                Text("有道词典 · ${if (source.british) "英式" else "美式"}发音\n使用词典页面的在线发音，音频保持原样；不需要 API Key。")
+                TextButton(onClick = { runCatching { uri.openUri(source.sourceUrl) } }) { Text("查看原始词典页面") }
+            }
+        }, confirmButton = { TextButton(onClick = onDismiss) { Text("关闭") } })
 }

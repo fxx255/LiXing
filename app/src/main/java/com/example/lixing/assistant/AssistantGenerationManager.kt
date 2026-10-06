@@ -275,6 +275,7 @@ class AssistantGenerationManager @Inject constructor(
         val partialText: String = "",
         val reasoning: String = "",
         val answerStarted: Boolean = false,
+        val contextUsage: com.example.lixing.data.assistant.AssistantContextUsage? = null,
     ) {
         val isRunning: Boolean get() = phase?.isInFlight == true
     }
@@ -1157,6 +1158,7 @@ class AssistantGenerationManager @Inject constructor(
         var callsWithUsage = 0
         var callsWithoutUsage = 0
         var lastUsage: UsageSample? = null
+        var contextUsage: com.example.lixing.data.assistant.AssistantContextUsage? = null
         val collectUsage: (UsageSample?) -> Unit = { sample ->
             if (sample == null) {
                 callsWithoutUsage++
@@ -1166,6 +1168,8 @@ class AssistantGenerationManager @Inject constructor(
             }
             // 逐次留痕：失败/缺失也计一次，进入"样本不可得"而不是被丢掉。
             diagnostics.recordHttpUsage(request.usageGroupKey, sample)
+            contextUsage = contextUsage?.withServerUsage(sample)
+            updateActive(owner) { it.copy(contextUsage = contextUsage) }
         }
         /** 真实 HTTP 调用总数。 */
         fun totalHttpCalls(): Int = callsWithUsage + callsWithoutUsage
@@ -1225,14 +1229,22 @@ class AssistantGenerationManager @Inject constructor(
                     policy = request.policy,
                 ) { event ->
                     when (event) {
+                        is AssistantStreamEvent.ContextUsage -> {
+                            contextUsage = event.usage
+                            updateActive(owner) { it.copy(contextUsage = event.usage) }
+                            requestRepository.saveContextUsageForAttempt(requestId, request.attemptId, event.usage)
+                        }
                         is AssistantStreamEvent.ReasoningDelta -> {
+                            contextUsage = contextUsage?.let {
+                                it.copy(estimatedOutputTokens = it.estimatedOutputTokens + com.example.lixing.data.assistant.AssistantTokenEstimator.textTokens(event.text))
+                            }
                             timer.markReasoning()
                             // 推理走独立事件，**永不**写入正文 —— 只有推理没有答案时
                             // 最终是可恢复失败，绝不把推理链当成用户答案。
                             _active.update {
                                 // 双身份围栏：requestId **和** attemptId 都要匹配。
                                 if (it.requestId == requestId && it.attemptId == request.attemptId) {
-                                    it.copy(reasoning = it.reasoning + event.text)
+                                    it.copy(reasoning = it.reasoning + event.text, contextUsage = contextUsage)
                                 } else {
                                     it
                                 }
@@ -1247,6 +1259,10 @@ class AssistantGenerationManager @Inject constructor(
                             )
                         }
                         is AssistantStreamEvent.AnswerDelta -> {
+                            contextUsage = contextUsage?.let {
+                                it.copy(estimatedOutputTokens = it.estimatedOutputTokens + com.example.lixing.data.assistant.AssistantTokenEstimator.textTokens(event.text))
+                            }
+                            updateActive(owner) { it.copy(contextUsage = contextUsage) }
                             timer.markAnswerByte()
                             // 只推**解码出的可见正文**：外层 JSON、plan_actions、
                             // plots、diagrams、控制标记都不会露给用户。
@@ -1290,6 +1306,7 @@ class AssistantGenerationManager @Inject constructor(
                 }
 
                 lastResult = reply
+                contextUsage?.let { requestRepository.saveContextUsageForAttempt(requestId, request.attemptId, it) }
                 val streamedReply = decoder.finish()
                 var part = stripControlMarkers(
                     com.example.lixing.data.assistant.reconcileStreamedReply(streamedReply, reply.reply),

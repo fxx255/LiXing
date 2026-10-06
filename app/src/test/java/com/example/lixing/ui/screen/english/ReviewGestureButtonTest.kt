@@ -31,7 +31,7 @@ class ReviewGestureButtonTest {
         button.performTouchInput { click() }
         compose.runOnIdle { assertEquals(1, spoken); assertTrue(grades.isEmpty()) }
         button.performTouchInput { swipe(center, center + Offset(0f, -100f), 150) }
-        button.performTouchInput { swipe(center, center + Offset(100f, 0f), 150) }
+        button.performTouchInput { swipe(center, center + Offset(-100f, 0f), 150) }
         button.performTouchInput { swipe(center, center + Offset(0f, 100f), 150) }
         compose.runOnIdle { assertEquals(listOf(ReviewGrade.GOOD, ReviewGrade.HARD, ReviewGrade.AGAIN), grades) }
     }
@@ -51,9 +51,23 @@ class ReviewGestureButtonTest {
         }
         compose.runOnIdle { assertTrue(grades.isEmpty()) }
     }
-    @Test fun `ambiguous diagonals and leftward drags do not grade`() {
-        assertNull(gestureGrade(-100f, 0f, 36f))
+    @Test fun `ambiguous diagonals and rightward drags do not grade`() {
+        assertEquals(ReviewGrade.HARD, gestureGrade(-100f, 0f, 36f))
+        assertNull(gestureGrade(100f, 0f, 36f))
+        assertNull(gestureGrade(-100f, -100f, 36f))
         assertNull(gestureGrade(100f, 100f, 36f))
         assertNull(gestureGrade(10f, -20f, 36f))
+    }
+
+    @Test fun `right swipe neither speaks nor grades`() {
+        var spoken = 0
+        val grades = mutableListOf<ReviewGrade>()
+        compose.setContent { MaterialTheme { Box(Modifier.size(320.dp, 480.dp)) {
+            ReviewGestureButton(.5f, .5f, true, "word", { _, _ -> }, { spoken++ }, { grades += it })
+        } } }
+        compose.onNodeWithContentDescription("发音与评分圆钮").performTouchInput {
+            swipe(center, center + Offset(100f, 0f), 150)
+        }
+        compose.runOnIdle { assertEquals(0, spoken); assertTrue(grades.isEmpty()) }
     }
 }

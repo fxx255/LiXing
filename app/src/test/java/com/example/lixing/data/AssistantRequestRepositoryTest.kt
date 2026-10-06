@@ -36,6 +36,27 @@ import org.robolectric.annotation.Config
 @Config(application = android.app.Application::class)
 class AssistantRequestRepositoryTest {
 
+    @Test
+    fun `context usage persists without rewriting the question and is attempt fenced`() = runBlocking {
+        seedConversation()
+        val snapshot = com.example.lixing.data.assistant.AssistantRequestSnapshot(
+            version = 2, prepared = true, sourceUserText = "原题", contextWindowTokens = 300_000,
+        )
+        val request = repository.createRequest(
+            "c1", "u1", "a1", "att1", "问题", emptyList(),
+            com.example.lixing.data.assistant.AssistantSnapshotCodec.encode(snapshot),
+        )
+        val usage = com.example.lixing.data.assistant.AssistantContextUsage(300_000, 1200, 8192, 1300, 200)
+        assertFalse(repository.saveContextUsageForAttempt(request.requestId, "stale", usage))
+        assertTrue(repository.saveContextUsageForAttempt(request.requestId, "att1", usage))
+        val restored = com.example.lixing.data.assistant.AssistantSnapshotCodec.decode(repository.get(request.requestId)!!.snapshotJson)!!
+        assertEquals(snapshot.copy(contextUsage = usage), restored)
+        assertEquals("问题", db.assistantChatDao().getMessages("c1").first().content)
+        repository.complete(request.requestId, "att1", "a1", "回答")
+        assertFalse(repository.saveContextUsageForAttempt(request.requestId, "att1", usage.copy(serverInputTokens = 9000)))
+        assertEquals(usage, com.example.lixing.data.assistant.AssistantSnapshotCodec.decode(repository.get(request.requestId)!!.snapshotJson)!!.contextUsage)
+    }
+
     private lateinit var db: LiXingDatabase
     private lateinit var repository: AssistantRequestRepository
 

@@ -91,6 +91,9 @@ data class AssistantRequestSnapshot(
     val manualContextKinds: List<String> = emptyList(),
     /** 本轮是否处于「计划变更流程」。 */
     val inPlanChangeFlow: Boolean = false,
+    val historyBudget: AiHistoryBudget = AiHistoryBudget.STANDARD,
+    val contextWindowTokens: Int? = null,
+    val contextUsage: AssistantContextUsage? = null,
 ) {
     /**
      * 这份快照是否携带重试所需的完整复原信息。
@@ -138,6 +141,9 @@ fun AssistantRequestSnapshot.toPolicy(): AssistantRequestPolicy = AssistantReque
     searchProtocol = protocol,
     reasoningEffort = reasoningEffort,
     effectiveWebSearchEnabled = effectiveWebSearchEnabled,
+    historyBudget = historyBudget,
+    contextWindowTokens = contextWindowTokens,
+    contextWindowPinned = true,
 )
 
 /** 历史只保存本机图片路径；发送时才重新压缩，不持久化 base64。 */
@@ -173,6 +179,9 @@ data class AssistantRequestPolicy(
     val reasoningEffort: String = "",
     /** 提交时钉下的**全局联网开关生效值**（重试沿用，不读当前开关）。 */
     val effectiveWebSearchEnabled: Boolean = false,
+    val historyBudget: AiHistoryBudget? = null,
+    val contextWindowTokens: Int? = null,
+    val contextWindowPinned: Boolean = false,
 ) {
     /** 快照可直接转成策略；两者字段一一对应。 */
     companion object

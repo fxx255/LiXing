@@ -74,6 +74,7 @@ data class UserPreferences(
     val englishHapticsEnabled: Boolean = true,
     val englishAutoSpeak: Boolean = false,
     val englishBritishVoice: Boolean = false,
+    val englishOnlinePronunciation: Boolean = true,
     val englishOnlineDictionary: Boolean = false,
     val englishButtonX: Float = 0.92f,
     val englishButtonY: Float = 0.75f,

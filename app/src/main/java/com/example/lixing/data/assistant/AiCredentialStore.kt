@@ -27,6 +27,8 @@ data class AiModelProfile(
     val searchProtocol: AiSearchProtocol,
     val reasoningEffort: AiReasoningEffort,
     val hasApiKey: Boolean,
+    val historyBudget: AiHistoryBudget = AiHistoryBudget.STANDARD,
+    val contextWindowTokens: Int? = null,
 )
 
 data class AiProfileCredentials(val baseUrl: String, val model: String, val apiKey: String)
@@ -46,6 +48,8 @@ data class AiResolvedIdentity(
     val visionEnabled: Boolean,
     val searchProtocol: AiSearchProtocol,
     val reasoningEffort: AiReasoningEffort,
+    val historyBudget: AiHistoryBudget = AiHistoryBudget.STANDARD,
+    val contextWindowTokens: Int? = null,
 )
 
 /** 协议标识：只含主机+路径，不含查询串与凭证，用于诊断与重试校验。 */
@@ -78,6 +82,8 @@ private data class StoredAiModelProfile(
     val searchProtocol: AiSearchProtocol = AiSearchProtocol.RESPONSES,
     val reasoningEffort: AiReasoningEffort = AiReasoningEffort.LOW,
     val apiKey: String,
+    val historyBudget: AiHistoryBudget = AiHistoryBudget.STANDARD,
+    val contextWindowTokens: Int? = null,
 ) {
     fun summary() = AiModelProfile(
         id,
@@ -88,6 +94,8 @@ private data class StoredAiModelProfile(
         searchProtocol,
         reasoningEffort,
         apiKey.isNotBlank(),
+        historyBudget,
+        contextWindowTokens,
     )
 }
 
@@ -184,8 +192,11 @@ class AiCredentialStore @Inject constructor(
         visionEnabled: Boolean,
         searchProtocol: AiSearchProtocol = AiSearchProtocol.RESPONSES,
         reasoningEffort: AiReasoningEffort = AiReasoningEffort.LOW,
+        historyBudget: AiHistoryBudget = AiHistoryBudget.STANDARD,
+        contextWindowTokens: Int? = null,
     ): AiModelProfile {
         val cleanName = name.trim()
+        AiContextWindow.validate(contextWindowTokens)
         val cleanBaseUrl = baseUrl.trim()
         val cleanModel = model.trim()
         require(cleanName.isNotEmpty()) { "请填写配置名称" }
@@ -205,6 +216,8 @@ class AiCredentialStore @Inject constructor(
             searchProtocol = searchProtocol,
             reasoningEffort = reasoningEffort,
             apiKey = resolvedKey,
+            historyBudget = historyBudget,
+            contextWindowTokens = contextWindowTokens,
         )
         saveProfiles(
             if (existing == null) profiles + saved
@@ -281,6 +294,8 @@ class AiCredentialStore @Inject constructor(
             visionEnabled = profile?.visionEnabled ?: false,
             searchProtocol = profile?.searchProtocol ?: AiSearchProtocol.RESPONSES,
             reasoningEffort = profile?.reasoningEffort ?: AiReasoningEffort.LOW,
+            historyBudget = profile?.historyBudget ?: AiHistoryBudget.STANDARD,
+            contextWindowTokens = profile?.contextWindowTokens,
         )
     }
 
@@ -298,6 +313,8 @@ class AiCredentialStore @Inject constructor(
                     visionEnabled = it.visionEnabled,
                     searchProtocol = it.searchProtocol,
                     reasoningEffort = it.reasoningEffort,
+                    historyBudget = it.historyBudget,
+                    contextWindowTokens = it.contextWindowTokens,
                 )
             }
 

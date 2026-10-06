@@ -29,6 +29,7 @@ data class AssistantUiState(
     val contextKinds: Set<AssistantContextKind> = emptySet(),
     /** 上一次实际附带的上下文说明，展示在输入框上方。 */
     val lastContextNote: String? = null,
+    val contextUsage: com.example.lixing.data.assistant.AssistantContextUsage? = null,
     val pendingActions: List<PendingPlanAction> = emptyList(),
     /** [pendingActions] 由哪一条消息产生；按钮只挂在那条气泡下面。null 表示没有待确认项。 */
     val pendingActionsOwnerIndex: Int? = null,

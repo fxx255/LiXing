@@ -9,6 +9,7 @@ import com.example.lixing.data.backup.VersionedBackupRepository
 import com.example.lixing.data.assistant.AiCredentialStore
 import com.example.lixing.data.assistant.AiModelProfile
 import com.example.lixing.data.assistant.AiReasoningEffort
+import com.example.lixing.data.assistant.AiHistoryBudget
 import com.example.lixing.data.assistant.AiSearchProtocol
 import com.example.lixing.data.assistant.AssistantModelClient
 import com.example.lixing.data.cloud.BaiduNetdiskRepository
@@ -224,6 +225,7 @@ class SettingsViewModel @Inject constructor(
     fun setEnglishHapticsEnabled(value: Boolean) = viewModelScope.launch { prefsRepository.setEnglishHapticsEnabled(value) }
     fun setEnglishAutoSpeak(value: Boolean) = viewModelScope.launch { prefsRepository.setEnglishAutoSpeak(value) }
     fun setEnglishBritishVoice(value: Boolean) = viewModelScope.launch { prefsRepository.setEnglishBritishVoice(value) }
+    fun setEnglishOnlinePronunciation(value: Boolean) = viewModelScope.launch { prefsRepository.setEnglishOnlinePronunciation(value) }
     fun setEnglishOnlineDictionary(value: Boolean) = viewModelScope.launch { prefsRepository.setEnglishOnlineDictionary(value) }
 
     fun setEnglishDailyNewLimit(count: Int) =
@@ -480,6 +482,8 @@ class SettingsViewModel @Inject constructor(
         visionEnabled: Boolean,
         searchProtocol: AiSearchProtocol,
         reasoningEffort: AiReasoningEffort,
+        historyBudget: AiHistoryBudget = AiHistoryBudget.STANDARD,
+        contextWindowTokens: Int? = null,
     ) {
         viewModelScope.launch {
             _aiTesting.value = true
@@ -494,6 +498,8 @@ class SettingsViewModel @Inject constructor(
                     visionEnabled = visionEnabled,
                     searchProtocol = searchProtocol,
                     reasoningEffort = reasoningEffort,
+                    historyBudget = historyBudget,
+                    contextWindowTokens = contextWindowTokens,
                 )
                 applyAiProfile(saved)
                 refreshAiProfiles()

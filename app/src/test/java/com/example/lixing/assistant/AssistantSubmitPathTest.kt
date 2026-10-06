@@ -4,6 +4,8 @@ import android.content.Context
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import com.example.lixing.data.assistant.AssistantContextBuilder
+import com.example.lixing.data.assistant.AiHistoryBudget
+import com.example.lixing.data.assistant.toPolicy
 import com.example.lixing.data.assistant.AssistantDiagnostics
 import com.example.lixing.data.assistant.AssistantFigure
 import com.example.lixing.data.assistant.AssistantModelClient
@@ -183,6 +185,30 @@ class AssistantSubmitPathTest {
      * 一旦那条消息被排除（重试/转写替换）就整轮不发问题。
      */
     @Test
+    fun `reported context usage is saved with the submitted window for conversation recovery`() = runBlocking {
+        every { aiCredentialStore.resolveActiveIdentity(any(), any()) } returns
+            primaryIdentity.copy(contextWindowTokens = 600_000)
+        coEvery { modelClient.chatStreaming(any(), any(), any(), any(), any(), any(), any(), any()) } coAnswers {
+            val onEvent = arg<suspend (AssistantStreamEvent) -> Unit>(7)
+            val onUsage = arg<(com.example.lixing.data.assistant.UsageSample?) -> Unit>(5)
+            onEvent(AssistantStreamEvent.ContextUsage(com.example.lixing.data.assistant.AssistantContextUsage(600_000, 1000, 8192)))
+            val payload = """{"reply":"完整回答"}"""
+            onEvent(AssistantStreamEvent.AnswerDelta(payload))
+            onUsage(com.example.lixing.data.assistant.UsageSample(1200, 1000, 200))
+            AssistantResponseParser.parse(payload, normalizeMarkdown = false)
+        }
+        val request = manager.submit(AssistantGenerationManager.Submission("c1", "问题", emptyList()))
+        assertEquals(AssistantRequestStatus.COMPLETED.name, awaitTerminal(request.requestId))
+        val snapshot = com.example.lixing.data.assistant.AssistantSnapshotCodec.decode(requestRepository.get(request.requestId)!!.snapshotJson)!!
+        assertEquals(600_000, snapshot.contextWindowTokens)
+        val usage = snapshot.contextUsage!!
+        assertFalse(usage.isEstimated)
+        assertEquals(600_000, usage.windowTokens)
+        assertEquals(1400L, usage.occupiedTokens)
+        assertEquals(1200L, usage.serverInputTokens)
+    }
+
+    @Test
     fun `the current user turn is actually sent to the model`() = runBlocking {
         stubCapturing()
         val request = manager.submit(
@@ -308,6 +334,55 @@ class AssistantSubmitPathTest {
         } finally {
             photo.delete()
         }
+    }
+
+    @Test
+    fun `photo only history restores the original default prompt for a follow up`() = runBlocking {
+        stubCapturing(visionEnabled = true)
+        every { aiCredentialStore.resolveActiveIdentity(any(), any()) } returns
+            primaryIdentity.copy(visionEnabled = true)
+        val photo = java.io.File.createTempFile("history-photo-only", ".png")
+        val bitmap = android.graphics.Bitmap.createBitmap(16, 16, android.graphics.Bitmap.Config.ARGB_8888)
+        photo.outputStream().use { bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it) }
+        bitmap.recycle()
+        try {
+            val first = manager.submit(AssistantGenerationManager.Submission(
+                conversationId = "c1", userText = "", attachmentPaths = listOf(photo.absolutePath),
+            ))
+            assertEquals(AssistantRequestStatus.COMPLETED.name, awaitTerminal(first.requestId))
+            assertEquals("", chatRepository.messages("c1").single { it.id == first.userMessageId }.content)
+            val followUp = manager.submit(AssistantGenerationManager.Submission(
+                conversationId = "c1", userText = "错判概率能否写成 erfc 函数", attachmentPaths = emptyList(),
+            ))
+            assertEquals(AssistantRequestStatus.COMPLETED.name, awaitTerminal(followUp.requestId))
+            val prior = capturedMessages.last().single { it.id == first.userMessageId }
+            assertEquals(GenerationPreparer.DEFAULT_VISION_PROMPT, prior.content)
+            assertEquals(1, prior.imageBase64s.size)
+            assertEquals("错判概率能否写成 erfc 函数", capturedMessages.last().last().content)
+        } finally {
+            photo.delete()
+        }
+    }
+
+    @Test
+    fun `initial snapshot bounds history using the submitted profile budget`() = runBlocking {
+        repeat(30) { index ->
+            chatRepository.appendMessage("c1", if (index % 2 == 0) "user" else "assistant", "history-$index")
+        }
+        every { aiCredentialStore.resolveActiveIdentity(any(), any()) } returns
+            primaryIdentity.copy(historyBudget = AiHistoryBudget.EXTENDED)
+        val submission = AssistantGenerationManager.Submission("c1", "follow up", emptyList())
+        val expanded = preparer.captureInitialSnapshot(submission, "c1", "new-user", "new-answer")
+        assertEquals(AiHistoryBudget.EXTENDED, expanded.historyBudget)
+        assertEquals(30, expanded.originalHistory.size)
+        every { aiCredentialStore.resolveActiveIdentity(any(), any()) } returns
+            primaryIdentity.copy(historyBudget = AiHistoryBudget.COMPACT)
+        val compact = preparer.captureInitialSnapshot(submission, "c1", "new-user", "new-answer")
+        assertEquals(AiHistoryBudget.COMPACT, compact.historyBudget)
+        assertEquals(12, compact.originalHistory.size)
+        assertEquals(expanded.originalHistory.takeLast(12), compact.originalHistory)
+        assertEquals(AiHistoryBudget.EXTENDED, expanded.toPolicy().historyBudget)
+        assertEquals(30, expanded.originalHistory.size)
     }
 
     @Test

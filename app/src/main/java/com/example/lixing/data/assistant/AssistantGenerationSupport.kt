@@ -121,7 +121,11 @@ fun offsetFigureAnchors(text: String, base: Int): String {
  * 自动续写会把长回答切成多段 assistant 消息，这里先合并相邻片段，
  * 否则模型看到的是「一串半截回答」，很容易接不上；再按条数与总字符裁剪。
  */
-fun buildModelHistory(messages: List<AssistantMessage>): List<AssistantMessage> {
+fun buildModelHistory(
+    messages: List<AssistantMessage>,
+    budget: AiHistoryBudget = AiHistoryBudget.STANDARD,
+    tokenBudget: Long? = null,
+): List<AssistantMessage> {
     if (messages.isEmpty()) return emptyList()
     val merged = mutableListOf<AssistantMessage>()
     for (message in messages) {
@@ -134,11 +138,16 @@ fun buildModelHistory(messages: List<AssistantMessage>): List<AssistantMessage> 
     }
     var chars = 0
     val kept = ArrayDeque<AssistantMessage>()
-    for (message in merged.takeLast(HISTORY_MAX_MESSAGES).asReversed()) {
+    var tokens = 0L
+    val candidates = if (tokenBudget == null) merged.takeLast(budget.maxMessages) else merged
+    for (message in candidates.asReversed()) {
         val cost = message.content.length + 8
-        if (kept.isNotEmpty() && chars + cost > HISTORY_MAX_CHARS) break
+        val tokenCost = if (tokenBudget != null) AssistantTokenEstimator.messageTokens(message) else 0L
+        if (tokenBudget != null && tokens + tokenCost > tokenBudget) break
+        if (tokenBudget == null && kept.isNotEmpty() && chars + cost > budget.maxChars) break
         kept.addFirst(message)
         chars += cost
+        tokens += tokenCost
     }
     return kept.toList()
 }

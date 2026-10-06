@@ -18,6 +18,37 @@ import org.junit.Test
  */
 class AssistantRequestSnapshotTest {
 
+    @Test
+    fun `token window and usage round trip and remain pinned even when unknown`() {
+        val usage = AssistantContextUsage(600_000, 1234, 8192, 1300, 200)
+        val snapshot = AssistantRequestSnapshot(contextWindowTokens = 600_000, contextUsage = usage)
+        val decoded = AssistantSnapshotCodec.decode(AssistantSnapshotCodec.encode(snapshot))!!
+        assertEquals(snapshot, decoded)
+        assertEquals(600_000, decoded.toPolicy().contextWindowTokens)
+        assertTrue(decoded.toPolicy().contextWindowPinned)
+        val old = AssistantSnapshotCodec.decode("""{"model":"old"}""")!!
+        assertNull(old.contextWindowTokens)
+        assertNull(old.contextUsage)
+        assertTrue(old.toPolicy().contextWindowPinned)
+    }
+
+    @Test
+    fun `history budget round trips and is pinned in the runtime policy`() {
+        AiHistoryBudget.entries.forEach { budget ->
+            val snapshot = AssistantRequestSnapshot(historyBudget = budget)
+            val decoded = AssistantSnapshotCodec.decode(AssistantSnapshotCodec.encode(snapshot))!!
+            assertEquals(budget, decoded.historyBudget)
+            assertEquals(budget, decoded.toPolicy().historyBudget)
+        }
+    }
+
+    @Test
+    fun `old snapshots use the original history budget`() {
+        val snapshot = AssistantSnapshotCodec.decode("""{"model":"old-model","version":2}""")!!
+        assertEquals(AiHistoryBudget.STANDARD, snapshot.historyBudget)
+        assertEquals(AiHistoryBudget.STANDARD, snapshot.toPolicy().historyBudget)
+    }
+
     // ── 端点身份：必须去掉凭证与查询串 ──
 
     @Test
@@ -129,7 +160,7 @@ class AssistantRequestSnapshotTest {
             sourceUserText = "题目",
         )
         val encoded = AssistantSnapshotCodec.encode(snapshot).lowercase()
-        listOf("authorization", "api_key", "apikey", "bearer", "sk-", "secret", "token").forEach {
+        listOf("authorization", "api_key", "apikey", "bearer", "sk-", "secret", "access_token", "apitoken").forEach {
             assertFalse("快照不得包含 $it", encoded.contains(it))
         }
     }

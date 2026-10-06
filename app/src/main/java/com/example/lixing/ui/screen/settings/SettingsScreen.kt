@@ -85,6 +85,9 @@ import kotlinx.coroutines.withTimeoutOrNull
 import java.util.Locale
 import com.example.lixing.data.assistant.AiModelProfile
 import com.example.lixing.data.assistant.AiReasoningEffort
+import com.example.lixing.data.assistant.AiHistoryBudget
+import com.example.lixing.data.assistant.AiContextWindow
+import com.example.lixing.data.assistant.formatContextTokens
 import com.example.lixing.data.assistant.AiSearchProtocol
 import com.example.lixing.data.update.AppUpdateController
 import com.example.lixing.ui.theme.DarkModePref
@@ -712,8 +715,9 @@ private fun EnglishReviewSection(
             onChange = { viewModel.setEnglishDailyNewLimit(it.toInt()) },
         )
         SwitchRow("评分震动", "每次成功评分后轻震一次", prefs.englishHapticsEnabled, viewModel::setEnglishHapticsEnabled)
-        SwitchRow("自动朗读", "展示新单词时播放系统英文发音", prefs.englishAutoSpeak, viewModel::setEnglishAutoSpeak)
-        SwitchRow("使用英式发音", "关闭使用美式发音；取决于系统已安装语音", prefs.englishBritishVoice, viewModel::setEnglishBritishVoice)
+        SwitchRow("自动朗读", "展示新单词时播放英文发音", prefs.englishAutoSpeak, viewModel::setEnglishAutoSpeak)
+        SwitchRow("使用英式发音", "关闭使用美式发音；没有可用音频时使用对应系统语音", prefs.englishBritishVoice, viewModel::setEnglishBritishVoice)
+        SwitchRow("免费在线发音", "优先使用有道英美发音，首次联网仅发送当前单词或短语并缓存；关闭后仅用系统离线语音", prefs.englishOnlinePronunciation, viewModel::setEnglishOnlinePronunciation)
         SwitchRow("免费联网补充", "按需向 Free Dictionary API 查询当前单词；默认仅用本地词库", prefs.englishOnlineDictionary, viewModel::setEnglishOnlineDictionary)
         Text("复习按记忆表现动态安排。认识：正确回忆；模糊：能回忆但迟疑；忘记：看答案才想起。", style = MaterialTheme.typography.bodySmall)
     }
@@ -1204,6 +1208,7 @@ private fun AiAssistantSection(viewModel: SettingsViewModel, prefs: com.example.
                                             AiReasoningEffort.HIGH -> " · 高思考"
                                         },
                                     )
+                                    append(profile.contextWindowTokens?.let { " · 窗口 ${formatContextTokens(it.toLong())} tokens" } ?: " · 窗口未知")
                                 },
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -1293,7 +1298,7 @@ private fun AiAssistantSection(viewModel: SettingsViewModel, prefs: com.example.
             onClearWebSearchResult = viewModel::clearAiWebSearchResult,
             onModelsInvalidated = viewModel::clearAiModels,
             onDismiss = { editorOpen = false; viewModel.clearAiWebSearchResult() },
-            onSave = { name, baseUrl, model, apiKey, visionEnabled, searchProtocol, reasoningEffort ->
+            onSave = { name, baseUrl, model, apiKey, visionEnabled, searchProtocol, reasoningEffort, contextWindowTokens ->
                 viewModel.saveAndTestAiProfile(
                     id = profile?.id,
                     name = name,
@@ -1303,6 +1308,8 @@ private fun AiAssistantSection(viewModel: SettingsViewModel, prefs: com.example.
                     visionEnabled = visionEnabled,
                     searchProtocol = searchProtocol,
                     reasoningEffort = reasoningEffort,
+                    historyBudget = profile?.historyBudget ?: AiHistoryBudget.STANDARD,
+                    contextWindowTokens = contextWindowTokens,
                 )
                 editorOpen = false
             },
@@ -1337,7 +1344,7 @@ private fun AiProfileEditorDialog(
     onClearWebSearchResult: () -> Unit,
     onModelsInvalidated: () -> Unit,
     onDismiss: () -> Unit,
-    onSave: (String, String, String, String, Boolean, AiSearchProtocol, AiReasoningEffort) -> Unit,
+    onSave: (String, String, String, String, Boolean, AiSearchProtocol, AiReasoningEffort, Int?) -> Unit,
 ) {
     var name by remember(profile?.id) { mutableStateOf(profile?.name.orEmpty()) }
     var baseUrl by remember(profile?.id) { mutableStateOf(profile?.baseUrl.orEmpty()) }
@@ -1351,6 +1358,10 @@ private fun AiProfileEditorDialog(
         mutableStateOf(profile?.reasoningEffort ?: AiReasoningEffort.LOW)
     }
     var modelMenuOpen by remember(profile?.id) { mutableStateOf(false) }
+    var contextWindowText by remember(profile?.id) {
+        mutableStateOf(profile?.contextWindowTokens?.toString().orEmpty())
+    }
+    var historyBudgetMenuOpen by remember(profile?.id) { mutableStateOf(false) }
     var error by remember(profile?.id) { mutableStateOf<String?>(null) }
 
     AlertDialog(
@@ -1513,6 +1524,43 @@ private fun AiProfileEditorDialog(
                         )
                     }
                 }
+                Text("模型上下文窗口（tokens）", style = MaterialTheme.typography.labelLarge)
+                OutlinedTextField(
+                    value = contextWindowText,
+                    onValueChange = { contextWindowText = it; error = null },
+                    label = { Text("窗口上限，留空表示未知") },
+                    placeholder = { Text("如 300000 / 600000 / 1000000") },
+                    singleLine = true,
+                    keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                        keyboardType = androidx.compose.ui.text.input.KeyboardType.Number,
+                    ),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Box {
+                    OutlinedButton(onClick = { historyBudgetMenuOpen = true }) {
+                        Text("选择常用窗口")
+                    }
+                    DropdownMenu(
+                        expanded = historyBudgetMenuOpen,
+                        onDismissRequest = { historyBudgetMenuOpen = false },
+                    ) {
+                        DropdownMenuItem(
+                            text = { Text("未知（不计算百分比）") },
+                            onClick = { contextWindowText = ""; historyBudgetMenuOpen = false; error = null },
+                        )
+                        AiContextWindow.presets.forEach { tokens ->
+                            DropdownMenuItem(
+                                text = { Text("${formatContextTokens(tokens.toLong())} tokens") },
+                                onClick = { contextWindowText = tokens.toString(); historyBudgetMenuOpen = false; error = null },
+                            )
+                        }
+                    }
+                }
+                Text(
+                    text = "按服务商支持的上限填写，不会扩大服务端实际窗口。配置后按估算 token 裁剪最早历史，并计入系统提示、本机数据、图片与输出预留；当前问题、续写和补全的原问题不截断，仍超限会提示。不同模型分词与图片计费不同，发送前占用只是估算，回复后优先使用接口 usage。留空不猜窗口，旧历史裁剪仍生效。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
                 error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
             }
         },
@@ -1520,7 +1568,10 @@ private fun AiProfileEditorDialog(
             TextButton(
                 enabled = !testing,
                 onClick = {
+                    val windowTokens = contextWindowText.trim().toIntOrNull()
                     error = when {
+                        contextWindowText.isNotBlank() && (windowTokens == null || windowTokens !in AiContextWindow.MIN_TOKENS..AiContextWindow.MAX_TOKENS) ->
+                            "窗口请输入 16000～2000000 tokens，或留空"
                         name.isBlank() -> "请填写配置名称"
                         baseUrl.isBlank() -> "请填写接口地址"
                         model.isBlank() -> "请填写模型名"
@@ -1528,7 +1579,7 @@ private fun AiProfileEditorDialog(
                         else -> null
                     }
                     if (error == null) {
-                        onSave(name, baseUrl, model, apiKey, visionEnabled, searchProtocol, reasoningEffort)
+                        onSave(name, baseUrl, model, apiKey, visionEnabled, searchProtocol, reasoningEffort, windowTokens)
                     }
                 },
             ) { Text("保存并测试") }

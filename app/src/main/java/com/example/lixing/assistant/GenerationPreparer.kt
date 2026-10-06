@@ -12,6 +12,7 @@ import com.example.lixing.data.assistant.AssistantRequestSnapshot
 import com.example.lixing.data.assistant.AssistantSnapshotCodec
 import com.example.lixing.data.assistant.SnapshotHistoryMessage
 import com.example.lixing.data.assistant.buildModelHistory
+import com.example.lixing.data.assistant.AiHistoryBudget
 import com.example.lixing.data.assistant.endpointIdentityOf
 import com.example.lixing.data.assistant.shouldUseWebSearch
 import com.example.lixing.data.assistant.toPolicy
@@ -209,7 +210,8 @@ class GenerationPreparer @Inject constructor(
         val model = identity?.model ?: prefs.aiModel
         val endpoint = endpointIdentityOf(baseUrl)
         // 历史在**此刻**就钉下：之后用户改会话/删消息都不能改变这轮的上下文。
-        val bounded = boundedHistory(conversationId, userMessageId, answerMessageId)
+        val budget = identity?.historyBudget ?: AiHistoryBudget.STANDARD
+        val bounded = boundedHistory(conversationId, userMessageId, answerMessageId, budget, identity?.contextWindowTokens)
         // 照片路由也在此刻决定（legacy 偏好 aiVisionEnabled 仍然生效）。
         // 快照的可路由集合只有 none/direct/transcribe；「有附件但主模型不能看图、
         // 也没有可用识别档案」这个降级信号由 **hasImages=true + photoRoute=none**
@@ -234,6 +236,8 @@ class GenerationPreparer @Inject constructor(
             endpointIdentity = endpoint,
             protocol = protocolOf(baseUrl, identity?.searchProtocol),
             reasoningEffort = (identity?.reasoningEffort ?: AiReasoningEffort.LOW).name,
+            historyBudget = budget,
+            contextWindowTokens = identity?.contextWindowTokens,
             webSearchEnabled = shouldUseWebSearch(submission.userText, submission.forceWebSearch),
             hasImages = submission.attachmentPaths.isNotEmpty(),
             sourceUserText = submission.userText,
@@ -513,6 +517,8 @@ class GenerationPreparer @Inject constructor(
         conversationId: String,
         userMessageId: String,
         answerMessageId: String,
+        budget: AiHistoryBudget = AiHistoryBudget.STANDARD,
+        contextWindowTokens: Int? = null,
     ): List<AssistantMessage> {
         val messages = chatRepository.messages(conversationId)
         val trimmed = messages.filterNot { message ->
@@ -527,7 +533,7 @@ class GenerationPreparer @Inject constructor(
                 imagePaths = chatRepository.decodeImagePaths(it.imagePaths),
                 id = it.id,
             )
-        })
+        }, budget, contextWindowTokens?.toLong())
     }
 
     private suspend fun historyFromSnapshot(snapshot: AssistantRequestSnapshot): List<AssistantMessage> {
@@ -550,10 +556,15 @@ class GenerationPreparer @Inject constructor(
         }
         return snapshot.originalHistory.mapIndexed { index, message ->
             val images = imagesByIndex[index].orEmpty()
-            val text = if (message.role == "user" && message.imagePaths.isNotEmpty() && images.isEmpty()) {
-                val note = "（此前附有图片；原图内容请参考当轮回答）"
-                if (message.text.isBlank()) note else "${message.text}\n$note"
-            } else message.text
+            val text = when {
+                message.role == "user" && message.imagePaths.isNotEmpty() && images.isEmpty() -> {
+                    val note = "（此前附有图片；原图内容请参考当轮回答）"
+                    if (message.text.isBlank()) note else "${message.text}\n$note"
+                }
+                message.role == "user" && images.isNotEmpty() && message.text.isBlank() ->
+                    DEFAULT_VISION_PROMPT
+                else -> message.text
+            }
             AssistantMessage(message.role, text, imageBase64s = images, id = message.id)
         }
     }

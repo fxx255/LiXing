@@ -314,6 +314,22 @@ class AssistantRequestRepository @Inject constructor(
         )
     }
 
+    suspend fun saveContextUsageForAttempt(
+        requestId: String,
+        attemptId: String,
+        usage: com.example.lixing.data.assistant.AssistantContextUsage,
+    ): Boolean = withContext(io) {
+        val record = dao.getRequest(requestId) ?: return@withContext false
+        if (record.attemptId != attemptId) return@withContext false
+        val snapshot = com.example.lixing.data.assistant.AssistantSnapshotCodec.decode(record.snapshotJson)
+            ?: return@withContext false
+        dao.savePreparedSnapshot(
+            requestId, attemptId,
+            com.example.lixing.data.assistant.AssistantSnapshotCodec.encode(snapshot.copy(contextUsage = usage)),
+            Instant.now(), null, null, null, null,
+        )
+    }
+
     suspend fun delete(requestId: String) = withContext(io) { dao.deleteRequest(requestId) }
 
     /** 删除会话时清理其请求记录（消息由外键级联删除完成）。 */

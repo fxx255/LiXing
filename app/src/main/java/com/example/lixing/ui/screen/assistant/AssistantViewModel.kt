@@ -411,6 +411,7 @@ class AssistantViewModel @Inject constructor(
         _state.update {
             it.copy(
                 activeReasoning = active.reasoning,
+                contextUsage = active.contextUsage,
                 activeAnswerStarted = active.answerStarted,
                 // 直接跟随，绝不用 `||`（那会让 busy 粘住）。
                 busy = active.isRunning,
@@ -716,6 +717,14 @@ class AssistantViewModel @Inject constructor(
     ) {
         val epoch = navigationEpoch
         if (_state.value.currentConversationId != conversationId) return
+        val active = generationManager.state.value
+        val storedUsage = requests.maxByOrNull { it.createdAt }?.let {
+            com.example.lixing.data.assistant.AssistantSnapshotCodec.decode(it.snapshotJson)?.contextUsage
+        }
+        _state.update { state ->
+            if (state.currentConversationId != conversationId || navigationEpoch != epoch) state
+            else state.copy(contextUsage = if (active.isRunning && active.conversationId == conversationId) active.contextUsage else storedUsage)
+        }
         val partials = requests.filter {
             it.status != com.example.lixing.domain.assistant.AssistantRequestStatus.COMPLETED.name &&
                 it.partialText.isNotBlank()
@@ -959,6 +968,7 @@ class AssistantViewModel @Inject constructor(
             it.copy(
                 historyOpen = false,
                 currentConversationId = id,
+                contextUsage = null,
                 messages = emptyList(),
                 input = "",
                 pendingPhotoPaths = emptyList(),
@@ -1133,6 +1143,7 @@ class AssistantViewModel @Inject constructor(
             it.copy(
                 messages = emptyList(),
                 currentConversationId = null,
+                contextUsage = null,
                 activeReasoning = "",
                 activeAnswerStarted = false,
                 reasoningExpanded = true,
@@ -1294,7 +1305,7 @@ class AssistantViewModel @Inject constructor(
         if (current.busy || current.retrying) return
         if (!pendingSubmissions.compareAndSet(0, 1)) return // 已有一次提交在途
         _state.update {
-            it.copy(activeReasoning = "", activeAnswerStarted = false, reasoningExpanded = true)
+            it.copy(activeReasoning = "", activeAnswerStarted = false, reasoningExpanded = true, contextUsage = null)
         }
         // 捕获点击瞬间的完整归属与设置。
         val ownerSlot = current.currentConversationId // null = 未落库新会话

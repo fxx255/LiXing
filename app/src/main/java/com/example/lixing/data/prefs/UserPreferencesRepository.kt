@@ -68,6 +68,7 @@ class UserPreferencesRepository @Inject constructor(
             englishHapticsEnabled = p[PreferencesKeys.ENGLISH_HAPTICS_ENABLED] ?: true,
             englishAutoSpeak = p[PreferencesKeys.ENGLISH_AUTO_SPEAK] ?: false,
             englishBritishVoice = p[PreferencesKeys.ENGLISH_BRITISH_VOICE] ?: false,
+            englishOnlinePronunciation = p[PreferencesKeys.ENGLISH_ONLINE_PRONUNCIATION] ?: true,
             englishOnlineDictionary = p[PreferencesKeys.ENGLISH_ONLINE_DICTIONARY] ?: false,
             englishButtonX = p[PreferencesKeys.ENGLISH_BUTTON_X] ?: 0.92f,
             englishButtonY = p[PreferencesKeys.ENGLISH_BUTTON_Y] ?: 0.75f,
@@ -190,6 +191,7 @@ class UserPreferencesRepository @Inject constructor(
     suspend fun setEnglishHapticsEnabled(value: Boolean) = edit { it[PreferencesKeys.ENGLISH_HAPTICS_ENABLED] = value }
     suspend fun setEnglishAutoSpeak(value: Boolean) = edit { it[PreferencesKeys.ENGLISH_AUTO_SPEAK] = value }
     suspend fun setEnglishBritishVoice(value: Boolean) = edit { it[PreferencesKeys.ENGLISH_BRITISH_VOICE] = value }
+    suspend fun setEnglishOnlinePronunciation(value: Boolean) = edit { it[PreferencesKeys.ENGLISH_ONLINE_PRONUNCIATION] = value }
     suspend fun setEnglishOnlineDictionary(value: Boolean) = edit { it[PreferencesKeys.ENGLISH_ONLINE_DICTIONARY] = value }
     suspend fun setEnglishButtonPosition(x: Float, y: Float) = edit {
         it[PreferencesKeys.ENGLISH_BUTTON_X] = x.coerceIn(0f, 1f)
@@ -319,6 +321,7 @@ class UserPreferencesRepository @Inject constructor(
             out[PreferencesKeys.ENGLISH_HAPTICS_ENABLED] = p.englishHapticsEnabled
             out[PreferencesKeys.ENGLISH_AUTO_SPEAK] = p.englishAutoSpeak
             out[PreferencesKeys.ENGLISH_BRITISH_VOICE] = p.englishBritishVoice
+            out[PreferencesKeys.ENGLISH_ONLINE_PRONUNCIATION] = p.englishOnlinePronunciation
             out[PreferencesKeys.ENGLISH_ONLINE_DICTIONARY] = p.englishOnlineDictionary
             out[PreferencesKeys.ENGLISH_BUTTON_X] = p.englishButtonX
             out[PreferencesKeys.ENGLISH_BUTTON_Y] = p.englishButtonY

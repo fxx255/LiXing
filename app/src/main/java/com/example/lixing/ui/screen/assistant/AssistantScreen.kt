@@ -100,6 +100,7 @@ import androidx.core.content.FileProvider
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.lixing.data.local.entity.AssistantConversationEntity
+import com.example.lixing.data.assistant.AssistantContextUsage
 import com.example.lixing.domain.assistant.AssistantContextKind
 import com.example.lixing.ui.photo.PhotoEdits
 import com.example.lixing.ui.screen.today.dialog.PhotoCropDialog
@@ -109,10 +110,55 @@ import java.io.File
 import java.time.Instant
 import java.time.format.DateTimeFormatter
 import kotlin.math.sin
+import kotlin.math.roundToInt
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 private data class PhotoViewerState(val paths: List<String>, val initialIndex: Int)
+
+@Composable
+internal fun AssistantContextUsageIndicator(usage: AssistantContextUsage) {
+    val fraction = usage.fraction
+    val percentage = when {
+        fraction == null -> "—"
+        fraction > 0f && fraction < 0.01f -> "<1%"
+        else -> "${(fraction * 100).roundToInt()}%"
+    }
+    val indicatorColor = if (fraction != null && fraction >= 0.9f) {
+        MaterialTheme.colorScheme.error
+    } else {
+        MaterialTheme.colorScheme.primary
+    }
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        Box(
+            modifier = Modifier.size(48.dp).semantics {
+                contentDescription = if (fraction == null) "上下文窗口未知" else "上下文占用 $percentage"
+            },
+            contentAlignment = Alignment.Center,
+        ) {
+            CircularProgressIndicator(
+                progress = { fraction?.coerceIn(0f, 1f) ?: 0f },
+                modifier = Modifier.fillMaxSize(),
+                color = indicatorColor,
+                trackColor = MaterialTheme.colorScheme.surfaceVariant,
+                strokeWidth = 3.dp,
+            )
+            Text(percentage, style = MaterialTheme.typography.labelSmall, color = indicatorColor)
+        }
+        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+            Text(usage.summary(), style = MaterialTheme.typography.labelSmall)
+            Text(
+                if (usage.isEstimated) "估算${if (usage.hasImages) "（含图片）" else ""} · 输出预留 ${usage.reservedOutputTokens} tokens"
+                else "输入 ${usage.serverInputTokens} / 输出 ${usage.serverOutputTokens ?: "未知"} tokens · 非累计消费",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+}
 
 /** AI 学习助手页：对话 + 可选上下文 + 计划修改预览确认。 */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -656,6 +702,9 @@ fun AssistantScreen(
 
             Surface(tonalElevation = 2.dp, modifier = Modifier.imePadding()) {
                 Column(Modifier.padding(horizontal = 16.dp, vertical = 10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    state.contextUsage?.let { usage ->
+                        AssistantContextUsageIndicator(usage)
+                    }
                     if (extrasExpanded) {
                         Row(
                             modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),

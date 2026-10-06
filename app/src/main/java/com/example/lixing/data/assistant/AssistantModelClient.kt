@@ -50,6 +50,7 @@ class AssistantModelException(
 
 /** Incremental output emitted by providers that support Chat Completions streaming. */
 sealed interface AssistantStreamEvent {
+    data class ContextUsage(val usage: AssistantContextUsage) : AssistantStreamEvent
     data class ReasoningDelta(val text: String) : AssistantStreamEvent
     data class AnswerDelta(val text: String) : AssistantStreamEvent
     data object AnswerReset : AssistantStreamEvent
@@ -169,6 +170,7 @@ class AssistantModelClient @Inject constructor(
             webSearchEnabled = chatCompletionsSearch,
             userProfile = userProfile,
         )
+        onEvent(AssistantStreamEvent.ContextUsage(AssistantTokenEstimator.payloadUsage(payload, configured.contextWindowTokens)))
         val request = Request.Builder()
             .url(completionsUrl(configured.baseUrl))
             .header("Authorization", "Bearer ${configured.apiKey}")
@@ -474,6 +476,8 @@ class AssistantModelClient @Inject constructor(
             apiKey = targetKey,
             searchProtocol = protocol ?: active?.searchProtocol ?: AiSearchProtocol.RESPONSES,
             reasoningEffort = active?.reasoningEffort ?: AiReasoningEffort.LOW,
+            historyBudget = active?.historyBudget ?: AiHistoryBudget.STANDARD,
+            contextWindowTokens = active?.contextWindowTokens,
             effectiveWebSearchEnabled = prefs.aiWebSearchEnabled,
         )
     }
@@ -602,22 +606,7 @@ class AssistantModelClient @Inject constructor(
             put("stream", false)
             put("messages", buildJsonArray {
                 add(buildJsonObject { put("role", "system"); put("content", systemPrompt) })
-                add(buildJsonObject {
-                    put("role", "user")
-                    if (imageBase64s.isEmpty()) {
-                        put("content", userText)
-                    } else {
-                        put("content", buildJsonArray {
-                            add(buildJsonObject { put("type", "text"); put("text", userText) })
-                            imageBase64s.forEach { base64 ->
-                                add(buildJsonObject {
-                                    put("type", "image_url")
-                                    put("image_url", buildJsonObject { put("url", "data:image/jpeg;base64,$base64") })
-                                })
-                            }
-                        })
-                    }
-                })
+                add(requiredUserMessage(AssistantMessage("user", userText), imageBase64s))
             })
         }
         val request = Request.Builder()
@@ -668,6 +657,8 @@ class AssistantModelClient @Inject constructor(
             apiKey = apiKey,
             searchProtocol = profile?.searchProtocol ?: AiSearchProtocol.RESPONSES,
             reasoningEffort = profile?.reasoningEffort ?: AiReasoningEffort.LOW,
+            historyBudget = profile?.historyBudget ?: AiHistoryBudget.STANDARD,
+            contextWindowTokens = profile?.contextWindowTokens,
             effectiveWebSearchEnabled = prefs.aiWebSearchEnabled,
         )
     }
@@ -736,6 +727,8 @@ class AssistantModelClient @Inject constructor(
             apiKey = identity.apiKey,
             searchProtocol = protocol,
             reasoningEffort = effort,
+            historyBudget = policy?.historyBudget ?: identity.historyBudget,
+            contextWindowTokens = if (policy?.contextWindowPinned == true) policy.contextWindowTokens else identity.contextWindowTokens,
             effectiveWebSearchEnabled = policy?.effectiveWebSearchEnabled ?: prefs.aiWebSearchEnabled,
         )
     }
@@ -748,6 +741,8 @@ class AssistantModelClient @Inject constructor(
         val reasoningEffort: AiReasoningEffort,
         /** 全局联网开关的**本轮生效值**（重试时来自快照，不读当前开关）。 */
         val effectiveWebSearchEnabled: Boolean,
+        val historyBudget: AiHistoryBudget = AiHistoryBudget.STANDARD,
+        val contextWindowTokens: Int? = null,
     ) {
         /** 安全端点身份（主机+路径），用于诊断归集与重试校验。 */
         val endpointIdentity: String get() = safeEndpointIdentityOf(baseUrl)
@@ -762,11 +757,14 @@ class AssistantModelClient @Inject constructor(
         webSearchEnabled: Boolean = false,
         userProfile: AssistantUserProfile = AssistantUserProfile(),
         maxOutputTokens: Int = MAX_OUTPUT_TOKENS,
+        preservePreviousTurn: Boolean = false,
     ): JsonObject = buildJsonObject {
+        val boundedMessages = boundedRequestMessages(messages, configured.historyBudget, preservePreviousTurn, configured.contextWindowTokens)
         put("model", configured.model)
         put("temperature", 0.4)
         put("max_tokens", maxOutputTokens)
         put("stream", stream)
+        if (stream) put("stream_options", buildJsonObject { put("include_usage", true) })
         nativeReasoningRequestFields(
             baseUrl = configured.baseUrl,
             model = configured.model,
@@ -800,31 +798,15 @@ class AssistantModelClient @Inject constructor(
                 protocol = SYSTEM_PROMPT,
                 user = userProfile,
                 reasoningEffort = configured.reasoningEffort,
-                history = messages,
+                history = boundedMessages,
                 context = context,
             )
             add(buildJsonObject { put("role", "system"); put("content", segments.stableSystem) })
             // 稳定历史：排除最后一条 user（它是当前问题，稍后单独放）。
-            val currentTurnIndex = messages.indexOfLast { it.role == "user" }
-            messages.forEachIndexed { index, message ->
+            val currentTurnIndex = boundedMessages.indexOfLast { it.role == "user" }
+            boundedMessages.forEachIndexed { index, message ->
                 if (index == currentTurnIndex) return@forEachIndexed
-                val images = message.imageBase64s
-                add(buildJsonObject {
-                    put("role", message.role)
-                    if (images.isNotEmpty()) {
-                        put("content", buildJsonArray {
-                            add(buildJsonObject { put("type", "text"); put("text", message.content) })
-                            images.forEach { base64 ->
-                                add(buildJsonObject {
-                                    put("type", "image_url")
-                                    put("image_url", buildJsonObject { put("url", "data:image/jpeg;base64,$base64") })
-                                })
-                            }
-                        })
-                    } else {
-                        put("content", message.content)
-                    }
-                })
+                wireMessage(message)?.let { add(it) }
             }
             // ── 易变尾部 ──────────────────────────────────────────────────────
             // 当前时间：靠近当前问题，且明确标注不能覆盖系统规则。
@@ -840,29 +822,97 @@ class AssistantModelClient @Inject constructor(
                 )
             }
             // ── 当前问题（必须是最后一条）────────────────────────────────────
-            val current = currentTurnIndex.takeIf { it >= 0 }?.let { messages[it] }
+            val current = currentTurnIndex.takeIf { it >= 0 }?.let { boundedMessages[it] }
             if (current != null) {
                 // 当前轮的图片由调用方直接给出（历史图片走 message.imageBase64s）。
                 val images = if (imageBase64s.isNotEmpty()) imageBase64s else current.imageBase64s
-                add(buildJsonObject {
-                    put("role", "user")
-                    if (images.isNotEmpty()) {
-                        put("content", buildJsonArray {
-                            add(buildJsonObject { put("type", "text"); put("text", current.content) })
-                            images.forEach { base64 ->
-                                add(buildJsonObject {
-                                    put("type", "image_url")
-                                    put("image_url", buildJsonObject { put("url", "data:image/jpeg;base64,$base64") })
-                                })
-                            }
+                add(requiredUserMessage(current, images))
+            }
+        })
+    }.let { payload ->
+        val bounded = boundedRequestMessages(messages, configured.historyBudget, preservePreviousTurn, configured.contextWindowTokens)
+        fitAssistantContextWindow(payload, configured.contextWindowTokens, removableHistoryCount(bounded, preservePreviousTurn))
+    }
+
+    private fun protectedTurnIndex(messages: List<AssistantMessage>, preservePreviousTurn: Boolean): Int {
+        val current = messages.indexOfLast { it.role == "user" }
+        if (preservePreviousTurn || messages.getOrNull(current)?.content == CONTINUE_INSTRUCTION) {
+            val anchor = messages.take(current.coerceAtLeast(0)).indexOfLast {
+                it.role == "user" && it.content != CONTINUE_INSTRUCTION
+            }
+            if (anchor >= 0) return anchor
+        }
+        return if (current >= 0) current else messages.size
+    }
+
+    private fun removableHistoryCount(messages: List<AssistantMessage>, preservePreviousTurn: Boolean): Int =
+        messages.take(protectedTurnIndex(messages, preservePreviousTurn)).count { wireMessage(it) != null }
+
+    private fun boundedRequestMessages(
+        messages: List<AssistantMessage>,
+        budget: AiHistoryBudget,
+        preservePreviousTurn: Boolean = false,
+        contextWindowTokens: Int? = null,
+    ): List<AssistantMessage> {
+        val currentTurnIndex = messages.indexOfLast { it.role == "user" }
+        val anchorIndex = if (preservePreviousTurn || messages.getOrNull(currentTurnIndex)?.content == CONTINUE_INSTRUCTION) {
+            messages.take(currentTurnIndex.coerceAtLeast(0)).indexOfLast {
+                it.role == "user" && it.content != CONTINUE_INSTRUCTION
+            }
+        } else {
+            -1
+        }
+        val history = messages.filterIndexed { index, message ->
+            index != currentTurnIndex &&
+                (anchorIndex < 0 || index < anchorIndex) &&
+                (message.content.isNotBlank() || message.imageBase64s.any { it.isNotBlank() })
+        }
+        val bounded = buildModelHistory(history, budget, contextWindowTokens?.toLong())
+        val anchored = if (anchorIndex >= 0) messages.subList(anchorIndex, currentTurnIndex) else emptyList()
+        return if (currentTurnIndex >= 0) bounded + anchored + messages[currentTurnIndex] else bounded
+    }
+
+    private fun wireMessage(
+        message: AssistantMessage,
+        imageBase64s: List<String> = message.imageBase64s,
+        responses: Boolean = false,
+    ): JsonObject? {
+        val images = imageBase64s.filter { it.isNotBlank() }
+        if (message.content.isBlank() && images.isEmpty()) return null
+        return buildJsonObject {
+            put("role", message.role)
+            if (images.isEmpty()) {
+                put("content", message.content)
+            } else {
+                put("content", buildJsonArray {
+                    if (message.content.isNotBlank()) {
+                        add(buildJsonObject {
+                            put("type", if (responses) "input_text" else "text")
+                            put("text", message.content)
                         })
-                    } else {
-                        put("content", current.content)
+                    }
+                    images.forEach { base64 ->
+                        add(buildJsonObject {
+                            put("type", if (responses) "input_image" else "image_url")
+                            val url = "data:image/jpeg;base64,$base64"
+                            if (responses) put("image_url", url)
+                            else put("image_url", buildJsonObject { put("url", url) })
+                        })
                     }
                 })
             }
-        })
+        }
     }
+
+    private fun requiredUserMessage(
+        message: AssistantMessage,
+        imageBase64s: List<String>,
+        responses: Boolean = false,
+    ): JsonObject = wireMessage(message, imageBase64s, responses)
+        ?: throw AssistantModelException(
+            AssistantModelException.Kind.CONFIG_INVALID,
+            "当前问题没有文字或可用图片，请输入问题或重新选择图片后发送",
+        )
 
     private data class StreamOutput(
         val answer: String,
@@ -911,7 +961,9 @@ class AssistantModelClient @Inject constructor(
             stream = true,
             webSearchEnabled = false,
             maxOutputTokens = RECOVERY_OUTPUT_TOKENS,
+            preservePreviousTurn = true,
         )
+        onEvent(AssistantStreamEvent.ContextUsage(AssistantTokenEstimator.payloadUsage(payload, configured.contextWindowTokens)))
         val request = Request.Builder()
             .url(completionsUrl(configured.baseUrl))
             .header("Authorization", "Bearer ${configured.apiKey}")
@@ -1177,6 +1229,7 @@ class AssistantModelClient @Inject constructor(
         val payload = buildDeepSeekResponsesPayload(
             configured, messages, context, imageBase64s, userProfile, forceWebSearch,
         )
+        onEvent(AssistantStreamEvent.ContextUsage(AssistantTokenEstimator.payloadUsage(payload, configured.contextWindowTokens)))
         val request = Request.Builder()
             .url(deepSeekResponsesUrl(configured.baseUrl))
             .header("Authorization", "Bearer ${configured.apiKey}")
@@ -1265,6 +1318,7 @@ class AssistantModelClient @Inject constructor(
                 configured, messages, context, imageBase64s, userProfile, forceWebSearch,
             ) + ("stream" to JsonPrimitive(true)),
         )
+        onEvent(AssistantStreamEvent.ContextUsage(AssistantTokenEstimator.payloadUsage(payload, configured.contextWindowTokens)))
         val request = Request.Builder()
             .url(deepSeekResponsesUrl(configured.baseUrl))
             .header("Authorization", "Bearer ${configured.apiKey}")
@@ -1539,6 +1593,7 @@ class AssistantModelClient @Inject constructor(
         userProfile: AssistantUserProfile,
         forceWebSearch: Boolean,
     ): JsonObject = buildJsonObject {
+        val boundedMessages = boundedRequestMessages(messages, configured.historyBudget, contextWindowTokens = configured.contextWindowTokens)
         put("model", configured.model)
         put("max_output_tokens", MAX_OUTPUT_TOKENS)
         // 与 Chat Completions 保持同一分段顺序：instructions 只放稳定前缀
@@ -1547,7 +1602,7 @@ class AssistantModelClient @Inject constructor(
             protocol = SYSTEM_PROMPT,
             user = userProfile,
             reasoningEffort = configured.reasoningEffort,
-            history = messages,
+            history = boundedMessages,
             context = context,
         )
         put("instructions", segments.stableSystem)
@@ -1559,26 +1614,10 @@ class AssistantModelClient @Inject constructor(
         put("input", buildJsonArray {
             // 与 Chat Completions 完全相同的顺序约束：
             // 稳定历史（**不含**当前轮）→ 易变时间/只读数据 → **当前问题最后**。
-            val currentTurnIndex = messages.indexOfLast { it.role == "user" }
-            messages.forEachIndexed { index, message ->
+            val currentTurnIndex = boundedMessages.indexOfLast { it.role == "user" }
+            boundedMessages.forEachIndexed { index, message ->
                 if (index == currentTurnIndex) return@forEachIndexed
-                val images = message.imageBase64s
-                add(buildJsonObject {
-                    put("role", message.role)
-                    if (images.isNotEmpty()) {
-                        put("content", buildJsonArray {
-                            add(buildJsonObject { put("type", "input_text"); put("text", message.content) })
-                            images.forEach { base64 ->
-                                add(buildJsonObject {
-                                    put("type", "input_image")
-                                    put("image_url", "data:image/jpeg;base64,$base64")
-                                })
-                            }
-                        })
-                    } else {
-                        put("content", message.content)
-                    }
-                })
+                wireMessage(message, responses = true)?.let { add(it) }
             }
             // 易变尾部：当前时间永远靠近当前问题；只读数据紧随其后。
             add(buildJsonObject { put("role", "system"); put("content", segments.volatileSystem) })
@@ -1592,27 +1631,15 @@ class AssistantModelClient @Inject constructor(
                 )
             }
             // 当前问题必须最后。
-            val current = currentTurnIndex.takeIf { it >= 0 }?.let { messages[it] }
+            val current = currentTurnIndex.takeIf { it >= 0 }?.let { boundedMessages[it] }
             if (current != null) {
                 val images = if (imageBase64s.isNotEmpty()) imageBase64s else current.imageBase64s
-                add(buildJsonObject {
-                    put("role", "user")
-                    if (images.isNotEmpty()) {
-                        put("content", buildJsonArray {
-                            add(buildJsonObject { put("type", "input_text"); put("text", current.content) })
-                            images.forEach { base64 ->
-                                add(buildJsonObject {
-                                    put("type", "input_image")
-                                    put("image_url", "data:image/jpeg;base64,$base64")
-                                })
-                            }
-                        })
-                    } else {
-                        put("content", current.content)
-                    }
-                })
+                add(requiredUserMessage(current, images, responses = true))
             }
         })
+    }.let { payload ->
+        val bounded = boundedRequestMessages(messages, configured.historyBudget, contextWindowTokens = configured.contextWindowTokens)
+        fitAssistantContextWindow(payload, configured.contextWindowTokens, removableHistoryCount(bounded, false))
     }
 
     /**
